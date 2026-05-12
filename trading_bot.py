@@ -210,7 +210,11 @@ def run_bot():
             signal = get_signal(prices)
             
             # 4. Afficher l'état
-            print(f"[{now}] Prix: ${current_price:,.2f} | EMA9: ${ema_fast:,.2f} | EMA21: ${ema_slow:,.2f} | RSI: {rsi:.1f} | Signal: {signal}")
+            ema_fast_str = f"${ema_fast:,.2f}" if ema_fast else "N/A"
+ema_slow_str = f"${ema_slow:,.2f}" if ema_slow else "N/A"
+rsi_str = f"{rsi:.1f}" if rsi else "N/A"
+print(f"[{now}] Prix: ${current_price:,.2f} | EMA9: {ema_fast_str} | EMA21: {ema_slow_str} | RSI: {rsi_str} | Signal: {signal}")
+
             
             # 5. Agir sur le signal (seulement si nouveau signal)
             if signal != last_signal and signal != 'HOLD':
