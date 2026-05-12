@@ -25,7 +25,7 @@ API_SECRET = os.environ.get("HL_API_SECRET", "")    # Ton secret API Hyperliquid
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")    # Ton adresse wallet
 
 # Paramètres de trading
-SYMBOL = "BTC"           # Paire à trader (BTC, ETH, SOL, etc.)
+SYMBOL = "SOL"           # Paire à trader (BTC, ETH, SOL, etc.)
 TRADE_SIZE_USD = 10      # Montant par trade en USD (commence petit !)
 LEVERAGE = 1             # Levier (1 = pas de levier, RECOMMANDÉ pour débuter)
 STOP_LOSS_PCT = 0.02     # Stop-loss à 2%
