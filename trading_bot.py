@@ -26,7 +26,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET", "")    # Ton adresse wallet
 
 # Paramètres de trading
 SYMBOL = "SOL"           # Paire à trader (BTC, ETH, SOL, etc.)
-TRADE_SIZE_USD = 10      # Montant par trade en USD (commence petit !)
+TRADE_SIZE_USD = 2      # Montant par trade en USD (commence petit !)
 LEVERAGE = 1             # Levier (1 = pas de levier, RECOMMANDÉ pour débuter)
 STOP_LOSS_PCT = 0.02     # Stop-loss à 2%
 TAKE_PROFIT_PCT = 0.04   # Take-profit à 4%
@@ -116,7 +116,7 @@ def get_market_prices(symbol: str, limit: int = 100) -> list:
             "type": "candleSnapshot",
             "req": {
                 "coin": symbol,
-                "interval": "1m",
+                "interval": "15m",
                 "startTime": int((time.time() - limit * 60) * 1000),
                 "endTime": int(time.time() * 1000)
             }
