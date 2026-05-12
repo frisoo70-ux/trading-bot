@@ -26,7 +26,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET", "")    # Ton adresse wallet
 
 # Paramètres de trading
 SYMBOL = "SOL"           # Paire à trader (BTC, ETH, SOL, etc.)
-TRADE_SIZE_USD = 2      # Montant par trade en USD (commence petit !)
+TRADE_SIZE_USD = 5      # Montant par trade en USD (commence petit !)
 LEVERAGE = 1             # Levier (1 = pas de levier, RECOMMANDÉ pour débuter)
 STOP_LOSS_PCT = 0.02     # Stop-loss à 2%
 TAKE_PROFIT_PCT = 0.04   # Take-profit à 4%
@@ -116,7 +116,7 @@ def get_market_prices(symbol: str, limit: int = 100) -> list:
             "type": "candleSnapshot",
             "req": {
                 "coin": symbol,
-                "interval": "15m",
+                "interval": "1m",
                 "startTime": int((time.time() - limit * 60) * 1000),
                 "endTime": int(time.time() * 1000)
             }
@@ -210,11 +210,7 @@ def run_bot():
             signal = get_signal(prices)
             
             # 4. Afficher l'état
-            ema_fast_str = f"${ema_fast:,.2f}" if ema_fast else "N/A"
-ema_slow_str = f"${ema_slow:,.2f}" if ema_slow else "N/A"
-rsi_str = f"{rsi:.1f}" if rsi else "N/A"
-print(f"[{now}] Prix: ${current_price:,.2f} | EMA9: {ema_fast_str} | EMA21: {ema_slow_str} | RSI: {rsi_str} | Signal: {signal}")
-
+            print(f"[{now}] Prix: ${current_price:,.2f} | EMA9: ${ema_fast:,.2f} | EMA21: ${ema_slow:,.2f} | RSI: {rsi:.1f} | Signal: {signal}")
             
             # 5. Agir sur le signal (seulement si nouveau signal)
             if signal != last_signal and signal != 'HOLD':
