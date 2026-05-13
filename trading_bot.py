@@ -1,4 +1,4 @@
-“””
+"""
 Bot de Trading RÉEL - Stratégie EMA Cross + RSI
 Plateforme: Hyperliquid
 Mode: PRODUCTION
