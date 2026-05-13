@@ -18,7 +18,7 @@ EMA_SLOW = 21
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-CHECK_INTERVAL = 60 * 15
+CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 
 def info_post(payload):
