@@ -10,7 +10,7 @@ import os
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "SOL"
-TRADE_SIZE_USD = 2
+TRADE_SIZE_USD = 10
 STOP_LOSS_PCT = 0.02
 TAKE_PROFIT_PCT = 0.04
 EMA_FAST = 9
