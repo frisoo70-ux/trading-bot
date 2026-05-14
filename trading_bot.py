@@ -235,3 +235,5 @@ if sig != last and sig != "HOLD" and not positions:
 
 if __name__ == "__main__":
     run()
+
+#v2
