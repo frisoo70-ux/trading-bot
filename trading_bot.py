@@ -215,7 +215,10 @@ def run():
             r = rsi(prices, RSI_PERIOD)
             ef_str = str(round(ef, 2)) if ef else "N/A"
             r_str = str(round(r, 1)) if r else "N/A"
-            print("[" + now + "] $" + str(price) + " | EMA9: " + ef_str + " | RSI: " + r_str + " | " + sig)
+            es = ema(closes, EMA_SLOW)
+es_str = str(round(es, 2)) if es else "N/A"
+print("[" + now + "] $" + str(price) + " | EMA9: " + ef_str + " | EMA21: " + es_str + " | RSI: " + r_str + " | " + sig)
+
             if sig != last and sig != "HOLD" and not positions:
                 if place_order(sig, TRADE_SIZE_USD, price):
                     last = sig
