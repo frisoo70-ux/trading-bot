@@ -214,9 +214,10 @@ def run():
 ef = ema(prices, EMA_FAST)
 es = ema(prices, EMA_SLOW)
 r = rsi(prices, RSI_PERIOD)
-ef_str = str(round(ef, 2)) if ef else "N/A"
-es_str = str(round(es, 2)) if es else "N/A"
-r_str = str(round(r, 1)) if r else "N/A"
+ef_str = str(round(float(ef), 2)) if ef is not None else "N/A"
+es_str = str(round(float(es), 2)) if es is not None else "N/A"
+r_str = str(round(float(r), 1)) if r is not None else "N/A"
+
 print("[" + now + "] $" + str(price) + " | EMA9: " + ef_str + " | EMA21: " + es_str + " | RSI: " + r_str + " | " + sig)
 
 if sig != last and sig != "HOLD" and not positions:
