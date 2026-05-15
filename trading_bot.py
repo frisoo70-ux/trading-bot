@@ -8,7 +8,7 @@ from datetime import datetime
 import os
 
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET")
 WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 10
