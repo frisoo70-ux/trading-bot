@@ -6,6 +6,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from datetime import datetime
 import os
+export HL_WALLET=0x816312928F96F5737F863c2e8b0494B3Ce0e30D1
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
