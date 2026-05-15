@@ -9,7 +9,7 @@ import os
 
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
-WALLET_ADDRESS = os.environ.get("0x816312928F96F5737F863c2e8b0494B3Ce0e30D1", "")
+WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 10
 STOP_LOSS_PCT = 0.02
