@@ -7,18 +7,13 @@ from eth_account.messages import encode_defunct
 from datetime import datetime
 import os
 
-
 PRIVATE_KEY = os.environ.get("HL_API_SECRET")
 WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 10
 STOP_LOSS_PCT = 0.02
-TAKE_PROFIT_PCT = 0.04
-EMA_FAST = 9
-EMA_SLOW = 21
-RSI_PERIOD = 14
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
+EMA_FAST = 20
+EMA_SLOW = 50
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 
@@ -34,14 +29,11 @@ def info_post(payload):
 def get_balance():
     try:
         data = info_post({"type": "spotClearinghouseState", "user": WALLET_ADDRESS})
-        print("[DEBUG] SpotState: " + str(data)[:100])
-        balances = data.get("balances", [])
-        for b in balances:
+        for b in data.get("balances", []):
             if b.get("coin") == "USDC":
                 return float(b.get("total", 0))
         data2 = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS})
-        val = data2.get("marginSummary", {}).get("accountValue", "0")
-        return float(val)
+        return float(data2.get("marginSummary", {}).get("accountValue", 0))
     except Exception as e:
         print("[ERREUR] Solde: " + str(e))
         return 0
@@ -70,7 +62,7 @@ def get_prices():
             "req": {
                 "coin": SYMBOL,
                 "interval": "15m",
-                "startTime": int((time.time() - 100 * 60 * 15) * 1000),
+                "startTime": int((time.time() - 150 * 60 * 15) * 1000),
                 "endTime": int(time.time() * 1000)
             }
         }
@@ -131,7 +123,7 @@ def place_order(side, size_usd, price):
         headers = {"Content-Type": "application/json"}
         r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
         result = r.json()
-        print("[DEBUG] Ordre result: " + str(result)[:150])
+        print("[DEBUG] Ordre: " + str(result)[:150])
         if result.get("status") == "ok":
             print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
             return True
@@ -147,50 +139,41 @@ def ema(prices, period):
         return None
     return pd.Series(prices).ewm(span=period, adjust=False).mean().iloc[-1]
 
-def rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return None
-    s = pd.Series(prices)
-    d = s.diff()
-    g = d.where(d > 0, 0).rolling(period).mean()
-    l = -d.where(d < 0, 0).rolling(period).mean()
-    return (100 - 100 / (1 + g / l)).iloc[-1]
-
-def signal(prices):
-    if len(prices) < EMA_SLOW + RSI_PERIOD:
-        return "HOLD"
-    ef = ema(prices, EMA_FAST)
-    es = ema(prices, EMA_SLOW)
-    r = rsi(prices, RSI_PERIOD)
-    if ef and es and r:
-        if ef > es and r < RSI_OVERSOLD:
-            return "BUY"
-        if ef < es and r > RSI_OVERBOUGHT:
-            return "SELL"
-    return "HOLD"
+def get_signal(prices):
+    if len(prices) < EMA_SLOW + 2:
+        return "HOLD", None, None
+    ef_now = ema(prices, EMA_FAST)
+    es_now = ema(prices, EMA_SLOW)
+    ef_prev = ema(prices[:-1], EMA_FAST)
+    es_prev = ema(prices[:-1], EMA_SLOW)
+    if ef_now is None or es_now is None or ef_prev is None or es_prev is None:
+        return "HOLD", ef_now, es_now
+    golden_cross = ef_prev <= es_prev and ef_now > es_now
+    death_cross = ef_prev >= es_prev and ef_now < es_now
+    if golden_cross:
+        return "BUY", ef_now, es_now
+    elif death_cross:
+        return "SELL", ef_now, es_now
+    return "HOLD", ef_now, es_now
 
 def check_risk(positions, price):
     for pos in positions:
         if pos["symbol"] != SYMBOL:
             continue
         pnl = (price - pos["entry"]) / pos["entry"]
-        if pos["size"] > 0:
-            if pnl <= -STOP_LOSS_PCT:
-                print("[STOP-LOSS] " + str(round(pnl * 100, 2)) + "%")
-                place_order("SELL", abs(pos["size"]) * price, price)
-                return True
-            if pnl >= TAKE_PROFIT_PCT:
-                print("[TAKE-PROFIT] " + str(round(pnl * 100, 2)) + "%")
-                place_order("SELL", abs(pos["size"]) * price, price)
-                return True
+        if pos["size"] > 0 and pnl <= -STOP_LOSS_PCT:
+            print("[STOP-LOSS] " + str(round(pnl * 100, 2)) + "%")
+            place_order("SELL", abs(pos["size"]) * price, price)
+            return True
     return False
 
 def run():
-    print("BOT REEL - " + SYMBOL + " | $" + str(TRADE_SIZE_USD) + " par trade")
+    print("BOT GOLDEN/DEATH CROSS - EMA 20/50")
+    print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
-    balance = get_balance()
-    print("Solde: $" + str(round(balance, 2)))
-    last = "HOLD"
+    print("Solde: $" + str(round(get_balance(), 2)))
+    print("Strategie: Golden Cross BUY | Death Cross SELL")
+    print("---")
     trades = 0
     while True:
         try:
@@ -203,26 +186,28 @@ def run():
             positions = get_positions()
             if positions:
                 if check_risk(positions, price):
-                    last = "HOLD"
                     time.sleep(CHECK_INTERVAL)
                     continue
-            sig = signal(prices)
-            ef = ema(prices, EMA_FAST)
-            es = ema(prices, EMA_SLOW)
-            r = rsi(prices, RSI_PERIOD)
+            sig, ef, es = get_signal(prices)
             ef_str = str(round(float(ef), 2)) if ef is not None else "N/A"
             es_str = str(round(float(es), 2)) if es is not None else "N/A"
-            r_str = str(round(float(r), 1)) if r is not None else "N/A"
-            print("[" + now + "] $" + str(price) + " | EMA9: " + ef_str + " | EMA21: " + es_str + " | RSI: " + r_str + " | " + sig)
-            if sig != last and sig != "HOLD" and not positions:
-                if place_order(sig, TRADE_SIZE_USD, price):
-                    last = sig
+            cross = ""
+            if sig == "BUY":
+                cross = " *** GOLDEN CROSS ***"
+            elif sig == "SELL":
+                cross = " *** DEATH CROSS ***"
+            print("[" + now + "] $" + str(price) + " | EMA20: " + ef_str + " | EMA50: " + es_str + " | " + sig + cross)
+            if sig == "BUY" and not positions and get_balance() >= TRADE_SIZE_USD:
+                if place_order("BUY", TRADE_SIZE_USD, price):
                     trades += 1
-                    balance = get_balance()
-                    print("Trade #" + str(trades) + " | Solde: $" + str(round(balance, 2)))
+                    print("Trade #" + str(trades) + " LONG ouvert | Solde: $" + str(round(get_balance(), 2)))
+            elif sig == "SELL" and positions:
+                pos = positions[0]
+                if place_order("SELL", abs(pos["size"]) * price, price):
+                    print("Trade #" + str(trades) + " LONG ferme | Solde: $" + str(round(get_balance(), 2)))
             time.sleep(CHECK_INTERVAL)
         except KeyboardInterrupt:
-            print("Bot arrete.")
+            print("Bot arrete. Trades: " + str(trades))
             break
         except Exception as e:
             print("[ERREUR] " + str(e))
