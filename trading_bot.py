@@ -119,7 +119,7 @@ def place_order(side, size_usd, price):
                 "s": hex(signed.s),
                 "v": signed.v
             },
-            "vaultAddress": None
+            "vaultAddress": WALLET_ADRESS
         }
         headers = {"Content-Type": "application/json"}
         r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
