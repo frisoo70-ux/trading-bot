@@ -1,5 +1,6 @@
 import time
 import json
+import hashlib
 import requests
 import pandas as pd
 from eth_account import Account
@@ -7,9 +8,8 @@ from eth_account.messages import encode_defunct
 from datetime import datetime
 import os
 
-
-PRIVATE_KEY = os.environ.get("HL_API_SECRET")
-WALLET_ADDRESS = os.environ.get("HL_WALLET")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
+WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 10
 STOP_LOSS_PCT = 0.02
@@ -108,22 +108,20 @@ def place_order(side, size_usd, price):
             }],
             "grouping": "na"
         }
-        import hashlib
-action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
-hash_bytes = hashlib.sha256((action_str + str(nonce)).encode()).digest()
-msg = encode_defunct(primitive=hash_bytes)
-signed = account.sign_message(msg)
-payload = {
-    "action": action,
-    "nonce": nonce,
-    "signature": {
-        "r": hex(signed.r),
-        "s": hex(signed.s),
-        "v": signed.v
-    },
-    "vaultAddress": WALLET_ADDRESS
-}
-
+        action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
+        hash_bytes = hashlib.sha256((action_str + str(nonce)).encode()).digest()
+        msg = encode_defunct(primitive=hash_bytes)
+        signed = account.sign_message(msg)
+        payload = {
+            "action": action,
+            "nonce": nonce,
+            "signature": {
+                "r": hex(signed.r),
+                "s": hex(signed.s),
+                "v": signed.v
+            },
+            "vaultAddress": WALLET_ADDRESS
+        }
         headers = {"Content-Type": "application/json"}
         r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
         result = r.json()
@@ -152,11 +150,11 @@ def get_signal(prices):
     es_prev = ema(prices[:-1], EMA_SLOW)
     if ef_now is None or es_now is None or ef_prev is None or es_prev is None:
         return "HOLD", ef_now, es_now
-    golden_cross = ef_prev <= es_prev and ef_now > es_now
-    death_cross = ef_prev >= es_prev and ef_now < es_now
-    if golden_cross:
+    golden = ef_prev <= es_prev and ef_now > es_now
+    death = ef_prev >= es_prev and ef_now < es_now
+    if golden:
         return "BUY", ef_now, es_now
-    elif death_cross:
+    elif death:
         return "SELL", ef_now, es_now
     return "HOLD", ef_now, es_now
 
@@ -176,7 +174,6 @@ def run():
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
     print("Solde: $" + str(round(get_balance(), 2)))
-    print("Strategie: Golden Cross BUY | Death Cross SELL")
     print("---")
     trades = 0
     while True:
@@ -208,7 +205,7 @@ def run():
             elif sig == "SELL" and positions:
                 pos = positions[0]
                 if place_order("SELL", abs(pos["size"]) * price, price):
-                    print("Trade #" + str(trades) + " LONG ferme | Solde: $" + str(round(get_balance(), 2)))
+                    print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
             time.sleep(CHECK_INTERVAL)
         except KeyboardInterrupt:
             print("Bot arrete. Trades: " + str(trades))
