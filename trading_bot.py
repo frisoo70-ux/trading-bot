@@ -108,19 +108,22 @@ def place_order(side, size_usd, price):
             }],
             "grouping": "na"
         }
-        action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
-        msg = encode_defunct(text=action_str + str(nonce))
-        signed = account.sign_message(msg)
-        payload = {
-            "action": action,
-            "nonce": nonce,
-            "signature": {
-                "r": hex(signed.r),
-                "s": hex(signed.s),
-                "v": signed.v
-            },
-            "vaultAddress": WALLET_ADDRESS
-        }
+        import hashlib
+action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
+hash_bytes = hashlib.sha256((action_str + str(nonce)).encode()).digest()
+msg = encode_defunct(primitive=hash_bytes)
+signed = account.sign_message(msg)
+payload = {
+    "action": action,
+    "nonce": nonce,
+    "signature": {
+        "r": hex(signed.r),
+        "s": hex(signed.s),
+        "v": signed.v
+    },
+    "vaultAddress": WALLET_ADDRESS
+}
+
         headers = {"Content-Type": "application/json"}
         r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
         result = r.json()
