@@ -42,8 +42,11 @@ def get_balance():
 def get_positions():
     try:
         data = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS})
+        if not data:
+            return []
         positions = []
         for pos in data.get("assetPositions", []):
+
             p = pos.get("position", {})
             if float(p.get("szi", 0)) != 0:
                 positions.append({
