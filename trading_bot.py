@@ -89,7 +89,9 @@ def place_order(exchange, side, size_usd, price):
         is_buy = side == "BUY"
         size = round(size_usd / price, 0)
         size = max(size, 100)
-        lp = round(price * (1.002 if is_buy else 0.998), 6)
+        lp = round(round(price * (1.002 if is_buy else 0.998), 5) / 0.00001) * 0.00001
+lp = round(lp, 5)
+
         result = exchange.order(
             SYMBOL,
             is_buy,
@@ -116,7 +118,9 @@ def place_order(exchange, side, size_usd, price):
 def close_position(exchange, pos, price):
     try:
         size = abs(pos["size"])
-        lp = round(price * 0.998, 6)
+        lp = round(round(price * 0.998, 5) / 0.00001) * 0.00001
+lp = round(lp, 5)
+
         result = exchange.order(
             SYMBOL,
             False,
