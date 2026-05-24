@@ -13,8 +13,8 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 10
 STOP_LOSS_PCT = 0.02
-EMA_FAST = 20
-EMA_SLOW = 50
+EMA_FAST = 3
+EMA_SLOW = 8
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 
@@ -65,7 +65,7 @@ def get_prices():
             "type": "candleSnapshot",
             "req": {
                 "coin": SYMBOL,
-                "interval": "15m",
+                "interval": "1m",
                 "startTime": int((time.time() - 150 * 60 * 15) * 1000),
                 "endTime": int(time.time() * 1000)
             }
