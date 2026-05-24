@@ -17,7 +17,7 @@ EMA_FAST = 20
 EMA_SLOW = 50
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
-TICK_SIZE = 0.00001
+TICK_SIZE = 0.01
 
 def get_exchange():
     wallet = eth_account.Account.from_key(PRIVATE_KEY)
