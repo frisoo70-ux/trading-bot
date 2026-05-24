@@ -10,7 +10,7 @@ import eth_account
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
-SYMBOL = "DOGE"
+SYMBOL = "SOL"
 TRADE_SIZE_USD = 20
 STOP_LOSS_PCT = 0.02
 EMA_FAST = 20
