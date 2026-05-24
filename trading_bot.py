@@ -13,8 +13,8 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "DOGE"
 TRADE_SIZE_USD = 20
 STOP_LOSS_PCT = 0.02
-EMA_FAST = 3
-EMA_SLOW = 8
+EMA_FAST = 20
+EMA_SLOW = 50
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.00001
@@ -74,7 +74,7 @@ def get_prices():
             "type": "candleSnapshot",
             "req": {
                 "coin": SYMBOL,
-                "interval": "1m",
+                "interval": "15m",
                 "startTime": int((time.time() - 150 * 60) * 1000),
                 "endTime": int(time.time() * 1000)
             }
