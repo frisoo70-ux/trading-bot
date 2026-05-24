@@ -75,7 +75,7 @@ def get_prices():
             "req": {
                 "coin": SYMBOL,
                 "interval": "15m",
-                "startTime": int((time.time() - 150 * 60) * 1000),
+                "startTime": int((time.time() - 150 * 60 * 15) * 1000),
                 "endTime": int(time.time() * 1000)
             }
         }
