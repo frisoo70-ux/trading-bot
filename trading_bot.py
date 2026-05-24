@@ -12,7 +12,7 @@ import eth_account
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "DOGE"
-TRADE_SIZE_USD = 15
+TRADE_SIZE_USD = 20
 STOP_LOSS_PCT = 0.02
 EMA_FAST = 3
 EMA_SLOW = 8
@@ -87,19 +87,25 @@ def get_prices():
 def place_order(exchange, side, size_usd, price):
     try:
         is_buy = side == "BUY"
-        size = round(size_usd / price, 4)
+        size = round(size_usd / price, 0)
+        size = max(size, 100)
+        lp = round(price * (1.002 if is_buy else 0.998), 6)
         result = exchange.order(
             SYMBOL,
             is_buy,
             size,
-            round(price * (1.002 if is_buy else 0.998), 2),
+            lp,
             {"limit": {"tif": "Ioc"}},
             reduce_only=False
         )
-        print("[DEBUG] Ordre: " + str(result)[:150])
-        if result.get("status") == "ok":
-            print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(price))
+        print("[DEBUG] Ordre: " + str(result)[:200])
+        statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+        if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
+            print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
             return True
+        elif statuses and "error" in statuses[0]:
+            print("[ECHEC] " + str(statuses[0]["error"]))
+            return False
         else:
             print("[ECHEC] " + str(result))
             return False
@@ -110,26 +116,23 @@ def place_order(exchange, side, size_usd, price):
 def close_position(exchange, pos, price):
     try:
         size = abs(pos["size"])
+        lp = round(price * 0.998, 6)
         result = exchange.order(
             SYMBOL,
             False,
             size,
-            round(price * 0.998, 2),
+            lp,
             {"limit": {"tif": "Ioc"}},
             reduce_only=True
         )
-        print("[DEBUG] Close: " + str(result)[:150])
-        if result.get("status") == "ok":
-    statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-    if statuses and "error" in statuses[0]:
-        print("[ECHEC] " + str(statuses[0]["error"]))
-        return False
-    print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(price))
-    return True
-else:
-    print("[ECHEC] " + str(result))
-    return False
-
+        print("[DEBUG] Close: " + str(result)[:200])
+        statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+        if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
+            print("[OK] CLOSE " + str(size) + " " + SYMBOL)
+            return True
+        else:
+            print("[ECHEC] Close: " + str(result))
+            return False
     except Exception as e:
         print("[ERREUR] Close: " + str(e))
         return False
@@ -189,8 +192,8 @@ def run():
                     time.sleep(CHECK_INTERVAL)
                     continue
             sig, ef, es = get_signal(prices)
-            ef_str = str(round(float(ef), 2)) if ef is not None else "N/A"
-            es_str = str(round(float(es), 2)) if es is not None else "N/A"
+            ef_str = str(round(float(ef), 5)) if ef is not None else "N/A"
+            es_str = str(round(float(es), 5)) if es is not None else "N/A"
             cross = ""
             if sig == "BUY":
                 cross = " *** GOLDEN CROSS ***"
