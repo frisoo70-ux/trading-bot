@@ -4,7 +4,6 @@ import requests
 import pandas as pd
 from datetime import datetime
 import os
-
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 import eth_account
@@ -18,10 +17,14 @@ EMA_FAST = 3
 EMA_SLOW = 8
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
+TICK_SIZE = 0.00001
 
 def get_exchange():
     wallet = eth_account.Account.from_key(PRIVATE_KEY)
     return Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS)
+
+def round_price(price):
+    return round(round(price / TICK_SIZE) * TICK_SIZE, 5)
 
 def info_post(payload):
     try:
@@ -87,19 +90,9 @@ def get_prices():
 def place_order(exchange, side, size_usd, price):
     try:
         is_buy = side == "BUY"
-        size = round(size_usd / price, 0)
-        size = max(size, 100)
-        lp = round(round(price * (1.002 if is_buy else 0.998), 5) / 0.00001) * 0.00001
-lp = round(lp, 5)
-
-        result = exchange.order(
-            SYMBOL,
-            is_buy,
-            size,
-            lp,
-            {"limit": {"tif": "Ioc"}},
-            reduce_only=False
-        )
+        size = max(round(size_usd / price, 0), 100)
+        lp = round_price(price * (1.002 if is_buy else 0.998))
+        result = exchange.order(SYMBOL, is_buy, size, lp, {"limit": {"tif": "Ioc"}}, reduce_only=False)
         print("[DEBUG] Ordre: " + str(result)[:200])
         statuses = result.get("response", {}).get("data", {}).get("statuses", [])
         if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
@@ -118,17 +111,8 @@ lp = round(lp, 5)
 def close_position(exchange, pos, price):
     try:
         size = abs(pos["size"])
-        lp = round(round(price * 0.998, 5) / 0.00001) * 0.00001
-lp = round(lp, 5)
-
-        result = exchange.order(
-            SYMBOL,
-            False,
-            size,
-            lp,
-            {"limit": {"tif": "Ioc"}},
-            reduce_only=True
-        )
+        lp = round_price(price * 0.998)
+        result = exchange.order(SYMBOL, False, size, lp, {"limit": {"tif": "Ioc"}}, reduce_only=True)
         print("[DEBUG] Close: " + str(result)[:200])
         statuses = result.get("response", {}).get("data", {}).get("statuses", [])
         if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
