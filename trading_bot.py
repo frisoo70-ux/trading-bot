@@ -120,11 +120,16 @@ def close_position(exchange, pos, price):
         )
         print("[DEBUG] Close: " + str(result)[:150])
         if result.get("status") == "ok":
-            print("[OK] CLOSE " + str(size) + " " + SYMBOL)
-            return True
-        else:
-            print("[ECHEC] Close: " + str(result))
-            return False
+    statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+    if statuses and "error" in statuses[0]:
+        print("[ECHEC] " + str(statuses[0]["error"]))
+        return False
+    print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(price))
+    return True
+else:
+    print("[ECHEC] " + str(result))
+    return False
+
     except Exception as e:
         print("[ERREUR] Close: " + str(e))
         return False
