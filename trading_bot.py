@@ -1,15 +1,16 @@
 import time
 import json
-import hashlib
 import requests
 import pandas as pd
-from eth_account import Account
-from eth_account.messages import encode_defunct
 from datetime import datetime
 import os
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET")
-WALLET_ADDRESS = os.environ.get("HL_WALLET")
+from hyperliquid.exchange import Exchange
+from hyperliquid.utils import constants
+import eth_account
+
+PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
+WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 10
 STOP_LOSS_PCT = 0.02
@@ -17,6 +18,10 @@ EMA_FAST = 3
 EMA_SLOW = 8
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
+
+def get_exchange():
+    wallet = eth_account.Account.from_key(PRIVATE_KEY)
+    return Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS)
 
 def info_post(payload):
     try:
@@ -34,6 +39,8 @@ def get_balance():
             if b.get("coin") == "USDC":
                 return float(b.get("total", 0))
         data2 = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS})
+        if not data2:
+            return 0
         return float(data2.get("marginSummary", {}).get("accountValue", 0))
     except Exception as e:
         print("[ERREUR] Solde: " + str(e))
@@ -46,7 +53,6 @@ def get_positions():
             return []
         positions = []
         for pos in data.get("assetPositions", []):
-
             p = pos.get("position", {})
             if float(p.get("szi", 0)) != 0:
                 positions.append({
@@ -66,7 +72,7 @@ def get_prices():
             "req": {
                 "coin": SYMBOL,
                 "interval": "1m",
-                "startTime": int((time.time() - 150 * 60 * 15) * 1000),
+                "startTime": int((time.time() - 150 * 60) * 1000),
                 "endTime": int(time.time() * 1000)
             }
         }
@@ -78,65 +84,49 @@ def get_prices():
         print("[ERREUR] Prix: " + str(e))
         return []
 
-def get_asset_index():
+def place_order(exchange, side, size_usd, price):
     try:
-        data = info_post({"type": "meta"})
-        for i, a in enumerate(data.get("universe", [])):
-            if a.get("name") == SYMBOL:
-                return i
-        return -1
-    except:
-        return -1
-
-def place_order(side, size_usd, price):
-    try:
-        account = Account.from_key(PRIVATE_KEY)
-        nonce = int(time.time() * 1000)
-        idx = get_asset_index()
-        if idx == -1:
-            print("[ERREUR] Asset introuvable")
-            return False
-        size = round(size_usd / price, 4)
         is_buy = side == "BUY"
-        lp = round(price * 1.002, 2) if is_buy else round(price * 0.998, 2)
-        action = {
-            "type": "order",
-            "orders": [{
-                "a": idx,
-                "b": is_buy,
-                "p": str(lp),
-                "s": str(size),
-                "r": False,
-                "t": {"limit": {"tif": "Ioc"}}
-            }],
-            "grouping": "na"
-        }
-        action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
-        hash_bytes = hashlib.sha256((action_str + str(nonce)).encode()).digest()
-        msg = encode_defunct(primitive=hash_bytes)
-        signed = account.sign_message(msg)
-        payload = {
-            "action": action,
-            "nonce": nonce,
-            "signature": {
-                "r": hex(signed.r),
-                "s": hex(signed.s),
-                "v": signed.v
-            },
-            "vaultAddress": WALLET_ADDRESS
-        }
-        headers = {"Content-Type": "application/json"}
-        r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
-        result = r.json()
+        size = round(size_usd / price, 4)
+        result = exchange.order(
+            SYMBOL,
+            is_buy,
+            size,
+            round(price * (1.002 if is_buy else 0.998), 2),
+            {"limit": {"tif": "Ioc"}},
+            reduce_only=False
+        )
         print("[DEBUG] Ordre: " + str(result)[:150])
         if result.get("status") == "ok":
-            print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
+            print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(price))
             return True
         else:
             print("[ECHEC] " + str(result))
             return False
     except Exception as e:
         print("[ERREUR] Ordre: " + str(e))
+        return False
+
+def close_position(exchange, pos, price):
+    try:
+        size = abs(pos["size"])
+        result = exchange.order(
+            SYMBOL,
+            False,
+            size,
+            round(price * 0.998, 2),
+            {"limit": {"tif": "Ioc"}},
+            reduce_only=True
+        )
+        print("[DEBUG] Close: " + str(result)[:150])
+        if result.get("status") == "ok":
+            print("[OK] CLOSE " + str(size) + " " + SYMBOL)
+            return True
+        else:
+            print("[ECHEC] Close: " + str(result))
+            return False
+    except Exception as e:
+        print("[ERREUR] Close: " + str(e))
         return False
 
 def ema(prices, period):
@@ -153,29 +143,30 @@ def get_signal(prices):
     es_prev = ema(prices[:-1], EMA_SLOW)
     if ef_now is None or es_now is None or ef_prev is None or es_prev is None:
         return "HOLD", ef_now, es_now
-    golden = ef_prev <= es_prev and ef_now > es_now
-    death = ef_prev >= es_prev and ef_now < es_now
+    golden = ef_prev < es_prev and ef_now > es_now
+    death = ef_prev > es_prev and ef_now < es_now
     if golden:
         return "BUY", ef_now, es_now
     elif death:
         return "SELL", ef_now, es_now
     return "HOLD", ef_now, es_now
 
-def check_risk(positions, price):
+def check_risk(exchange, positions, price):
     for pos in positions:
         if pos["symbol"] != SYMBOL:
             continue
         pnl = (price - pos["entry"]) / pos["entry"]
         if pos["size"] > 0 and pnl <= -STOP_LOSS_PCT:
             print("[STOP-LOSS] " + str(round(pnl * 100, 2)) + "%")
-            place_order("SELL", abs(pos["size"]) * price, price)
+            close_position(exchange, pos, price)
             return True
     return False
 
 def run():
-    print("BOT GOLDEN/DEATH CROSS - EMA 20/50")
+    print("BOT GOLDEN/DEATH CROSS - EMA " + str(EMA_FAST) + "/" + str(EMA_SLOW))
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
+    exchange = get_exchange()
     print("Solde: $" + str(round(get_balance(), 2)))
     print("---")
     trades = 0
@@ -189,7 +180,7 @@ def run():
             price = prices[-1]
             positions = get_positions()
             if positions:
-                if check_risk(positions, price):
+                if check_risk(exchange, positions, price):
                     time.sleep(CHECK_INTERVAL)
                     continue
             sig, ef, es = get_signal(prices)
@@ -200,14 +191,13 @@ def run():
                 cross = " *** GOLDEN CROSS ***"
             elif sig == "SELL":
                 cross = " *** DEATH CROSS ***"
-            print("[" + now + "] $" + str(price) + " | EMA20: " + ef_str + " | EMA50: " + es_str + " | " + sig + cross)
+            print("[" + now + "] $" + str(price) + " | EMA" + str(EMA_FAST) + ": " + ef_str + " | EMA" + str(EMA_SLOW) + ": " + es_str + " | " + sig + cross)
             if sig == "BUY" and not positions and get_balance() >= TRADE_SIZE_USD:
-                if place_order("BUY", TRADE_SIZE_USD, price):
+                if place_order(exchange, "BUY", TRADE_SIZE_USD, price):
                     trades += 1
                     print("Trade #" + str(trades) + " LONG ouvert | Solde: $" + str(round(get_balance(), 2)))
             elif sig == "SELL" and positions:
-                pos = positions[0]
-                if place_order("SELL", abs(pos["size"]) * price, price):
+                if close_position(exchange, positions[0], price):
                     print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
             time.sleep(CHECK_INTERVAL)
         except KeyboardInterrupt:
