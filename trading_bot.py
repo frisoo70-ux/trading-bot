@@ -139,8 +139,9 @@ def get_signal(prices):
     es_prev = ema(prices[:-1], EMA_SLOW)
     if ef_now is None or es_now is None or ef_prev is None or es_prev is None:
         return "HOLD", ef_now, es_now
-    golden = ef_prev < es_prev and ef_now > es_now
-    death = ef_prev > es_prev and ef_now < es_now
+    golden = ef_now > es_now and ef_prev <= es_prev
+    death = ef_now < es_now and ef_prev >= es_prev
+
     if golden:
         return "BUY", ef_now, es_now
     elif death:
