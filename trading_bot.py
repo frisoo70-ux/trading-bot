@@ -8,8 +8,8 @@ import eth_account
 from eth_account.messages import encode_defunct
 import hashlib
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
-WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET")
+WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
@@ -188,8 +188,8 @@ def check_risk(positions, price):
 
 def run():
     account = eth_account.Account.from_key(PRIVATE_KEY)
-print("Adresse generee par la cle: " + account.address)
-print("API Wallet attendu: 0x739ebf0dd77637471b501ae5fcd9f2359c4de514")
+    print("Adresse generee par la cle: " + account.address)
+    print("API Wallet attendu: 0x739ebf0dd77637471b501ae5fcd9f2359c4de514")
     print("BOT GOLDEN/DEATH CROSS - EMA " + str(EMA_FAST) + "/" + str(EMA_SLOW))
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
