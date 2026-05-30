@@ -9,8 +9,8 @@ from eth_account.structured_data.hashing import hash_domain, hash_message
 from eth_account._utils.structured_data.hashing import hash_domain as hd
 import struct
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET")
-WALLET_ADDRESS = os.environ.get("HL_WALLET")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
+WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
