@@ -21,7 +21,7 @@ TICK_SIZE = 0.01
 
 def get_exchange():
     wallet = eth_account.Account.from_key(PRIVATE_KEY)
-    return Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS)
+    return Exchange(wallet, constants.MAINNET_API_URL)
 
 def round_price(price):
     return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
