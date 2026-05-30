@@ -5,6 +5,8 @@ import pandas as pd
 from datetime import datetime
 import os
 import eth_account
+from eth_account.messages import encode_defunct
+import hashlib
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
@@ -93,36 +95,11 @@ def get_asset_index():
 
 def sign_action(action, nonce):
     account = eth_account.Account.from_key(PRIVATE_KEY)
-    data = {
-        "domain": {
-            "chainId": 1337,
-            "name": "Exchange",
-            "verifyingContract": "0x0000000000000000000000000000000000000000",
-            "version": "1"
-        },
-        "types": {
-            "Agent": [
-                {"name": "source", "type": "string"},
-                {"name": "connectionId", "type": "bytes32"}
-            ],
-            "EIP712Domain": [
-                {"name": "name", "type": "string"},
-                {"name": "version", "type": "string"},
-                {"name": "chainId", "type": "uint256"},
-                {"name": "verifyingContract", "type": "address"}
-            ]
-        },
-        "primaryType": "Agent",
-        "message": {
-            "source": "a",
-            "connectionId": "0x" + "00" * 32
-        }
-    }
-    signed = account.sign_typed_data(
-        domain_data=data["domain"],
-        message_types={"Agent": data["types"]["Agent"]},
-        message_data=data["message"]
-    )
+    action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
+    msg_str = action_str + str(nonce) + "a"
+    msg_hash = hashlib.sha256(msg_str.encode()).digest()
+    msg = encode_defunct(primitive=msg_hash)
+    signed = account.sign_message(msg)
     return {"r": hex(signed.r), "s": hex(signed.s), "v": signed.v}
 
 def place_order(side, size_usd, price, reduce_only=False):
