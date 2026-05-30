@@ -187,6 +187,9 @@ def check_risk(positions, price):
     return False
 
 def run():
+    account = eth_account.Account.from_key(PRIVATE_KEY)
+print("Adresse generee par la cle: " + account.address)
+print("API Wallet attendu: 0x739ebf0dd77637471b501ae5fcd9f2359c4de514")
     print("BOT GOLDEN/DEATH CROSS - EMA " + str(EMA_FAST) + "/" + str(EMA_SLOW))
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
