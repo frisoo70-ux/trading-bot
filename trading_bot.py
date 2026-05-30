@@ -141,6 +141,7 @@ def get_signal(prices):
         return "HOLD", ef_now, es_now
     golden = ef_now > es_now and ef_prev <= es_prev
     death = ef_now < es_now and ef_prev >= es_prev
+  
 
     if golden:
         return "BUY", ef_now, es_now
