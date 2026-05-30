@@ -5,9 +5,6 @@ import pandas as pd
 from datetime import datetime
 import os
 import eth_account
-from eth_account.structured_data.hashing import hash_domain, hash_message
-from eth_account._utils.structured_data.hashing import hash_domain as hd
-import struct
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
 WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
@@ -94,9 +91,8 @@ def get_asset_index():
     except:
         return -1
 
-def sign_action(action, nonce, vault_address=None):
+def sign_action(action, nonce):
     account = eth_account.Account.from_key(PRIVATE_KEY)
-    connection_id = b'\x00' * 32
     data = {
         "domain": {
             "chainId": 1337,
@@ -118,12 +114,14 @@ def sign_action(action, nonce, vault_address=None):
         },
         "primaryType": "Agent",
         "message": {
-            "source": "a" if vault_address is None else "b",
-            "connectionId": connection_id.hex()
+            "source": "a",
+            "connectionId": "0x" + "00" * 32
         }
     }
     signed = account.sign_typed_data(
-        full_message=data
+        domain_data=data["domain"],
+        message_types={"Agent": data["types"]["Agent"]},
+        message_data=data["message"]
     )
     return {"r": hex(signed.r), "s": hex(signed.s), "v": signed.v}
 
