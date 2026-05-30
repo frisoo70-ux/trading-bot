@@ -15,7 +15,7 @@ TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
 EMA_FAST = 20
 EMA_SLOW = 50
-CHECK_INTERVAL = 60 * 1
+CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
 
@@ -24,7 +24,7 @@ def get_exchange():
     return Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS)
 
 def round_price(price):
-    return round(round(price / TICK_SIZE) * TICK_SIZE, 5)
+    return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
 
 def info_post(payload):
     try:
@@ -90,7 +90,7 @@ def get_prices():
 def place_order(exchange, side, size_usd, price):
     try:
         is_buy = side == "BUY"
-        size = max(round(size_usd / price, 0), 100)
+        size = round(size_usd / price, 4)
         lp = round_price(price * (1.002 if is_buy else 0.998))
         result = exchange.order(SYMBOL, is_buy, size, lp, {"limit": {"tif": "Ioc"}}, reduce_only=False)
         print("[DEBUG] Ordre: " + str(result)[:200])
@@ -139,11 +139,8 @@ def get_signal(prices):
     es_prev = ema(prices[:-1], EMA_SLOW)
     if ef_now is None or es_now is None or ef_prev is None or es_prev is None:
         return "HOLD", ef_now, es_now
-    golden = ef_prev < es_prev and ef_now > es_now
-death = ef_prev > es_prev and ef_now < es_now
-
-  
-
+    golden = ef_now > es_now and ef_prev <= es_prev
+    death = ef_now < es_now and ef_prev >= es_prev
     if golden:
         return "BUY", ef_now, es_now
     elif death:
@@ -183,14 +180,14 @@ def run():
                     time.sleep(CHECK_INTERVAL)
                     continue
             sig, ef, es = get_signal(prices)
-            ef_str = str(round(float(ef), 5)) if ef is not None else "N/A"
-            es_str = str(round(float(es), 5)) if es is not None else "N/A"
+            ef_str = str(round(float(ef), 2)) if ef is not None else "N/A"
+            es_str = str(round(float(es), 2)) if es is not None else "N/A"
             cross = ""
             if sig == "BUY":
                 cross = " *** GOLDEN CROSS ***"
             elif sig == "SELL":
                 cross = " *** DEATH CROSS ***"
-            print("[" + now + "] $" + str(price) + " | EMA" + str(EMA_FAST) + ": " + ef_str + " | EMA" + str(EMA_SLOW) + ": " + es_str + " | " + sig + cross)
+            print("[" + now + "] $" + str(price) + " | EMA20: " + ef_str + " | EMA50: " + es_str + " | " + sig + cross)
             if sig == "BUY" and not positions and get_balance() >= TRADE_SIZE_USD:
                 if place_order(exchange, "BUY", TRADE_SIZE_USD, price):
                     trades += 1
