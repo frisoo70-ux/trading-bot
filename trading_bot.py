@@ -8,13 +8,13 @@ import eth_account
 from eth_account.messages import encode_defunct
 import hashlib
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET")
-WALLET_ADDRESS = os.environ.get("HL_WALLET")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
+WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
-EMA_FAST = 20
-EMA_SLOW = 50
+MA_BUY = 50
+MA_SELL = 20
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
@@ -64,7 +64,7 @@ def get_positions():
         print("[ERREUR] Positions: " + str(e))
         return []
 
-def get_prices():
+def get_candles():
     try:
         payload = {
             "type": "candleSnapshot",
@@ -77,10 +77,11 @@ def get_prices():
         }
         data = info_post(payload)
         if isinstance(data, list):
-            return [float(c["c"]) for c in data]
+            closes = [float(c["c"]) for c in data]
+            return closes
         return []
     except Exception as e:
-        print("[ERREUR] Prix: " + str(e))
+        print("[ERREUR] Candles: " + str(e))
         return []
 
 def get_asset_index():
@@ -135,15 +136,19 @@ def place_order(side, size_usd, price, reduce_only=False):
         r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
         result = r.json()
         print("[DEBUG] Ordre: " + str(result)[:200])
-        statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-        if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
-            print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
-            return True
-        elif statuses and "error" in statuses[0]:
-            print("[ECHEC] " + str(statuses[0]["error"]))
-            return False
+        if isinstance(result, dict):
+            statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+            if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
+                print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
+                return True
+            elif statuses and "error" in statuses[0]:
+                print("[ECHEC] " + str(statuses[0]["error"]))
+                return False
+            else:
+                print("[ECHEC] " + str(result))
+                return False
         else:
-            print("[ECHEC] " + str(result))
+            print("[ECHEC] Reponse inattendue: " + str(result))
             return False
     except Exception as e:
         print("[ERREUR] Ordre: " + str(e))
@@ -153,27 +158,28 @@ def close_pos(pos, price):
     size_usd = abs(pos["size"]) * price
     return place_order("SELL", size_usd, price, reduce_only=True)
 
-def ema(prices, period):
-    if len(prices) < period:
+def ma(closes, period):
+    if len(closes) < period:
         return None
-    return pd.Series(prices).ewm(span=period, adjust=False).mean().iloc[-1]
+    return pd.Series(closes).rolling(period).mean().iloc[-1]
 
-def get_signal(prices):
-    if len(prices) < EMA_SLOW + 2:
+def get_signal(closes, positions):
+    if len(closes) < MA_BUY + 1:
         return "HOLD", None, None
-    ef_now = ema(prices, EMA_FAST)
-    es_now = ema(prices, EMA_SLOW)
-    ef_prev = ema(prices[:-1], EMA_FAST)
-    es_prev = ema(prices[:-1], EMA_SLOW)
-    if ef_now is None or es_now is None or ef_prev is None or es_prev is None:
-        return "HOLD", ef_now, es_now
-    golden = ef_now > es_now and ef_prev <= es_prev
-    death = ef_now < es_now and ef_prev >= es_prev
-    if golden:
-        return "BUY", ef_now, es_now
-    elif death:
-        return "SELL", ef_now, es_now
-    return "HOLD", ef_now, es_now
+    last_close = closes[-1]
+    prev_close = closes[-2]
+    ma50 = ma(closes, MA_BUY)
+    ma20 = ma(closes, MA_SELL)
+    if ma50 is None or ma20 is None:
+        return "HOLD", ma20, ma50
+    in_position = len(positions) > 0
+    if not in_position:
+        if prev_close <= ma50 and last_close > ma50:
+            return "BUY", ma20, ma50
+    else:
+        if last_close < ma20:
+            return "SELL", ma20, ma50
+    return "HOLD", ma20, ma50
 
 def check_risk(positions, price):
     for pos in positions:
@@ -187,37 +193,32 @@ def check_risk(positions, price):
     return False
 
 def run():
-    account = eth_account.Account.from_key(PRIVATE_KEY)
-    print("Adresse generee par la cle: " + account.address)
-    print("API Wallet attendu: 0x739ebf0dd77637471b501ae5fcd9f2359c4de514")
-    print("BOT GOLDEN/DEATH CROSS - EMA " + str(EMA_FAST) + "/" + str(EMA_SLOW))
+    print("BOT MA50/MA20 - Price Action")
+    print("BUY: cloture au-dessus MA50 | SELL: cloture en-dessous MA20")
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
     print("Solde: $" + str(round(get_balance(), 2)))
     print("---")
     trades = 0
+    last_candle_time = None
     while True:
         try:
             now = datetime.now().strftime("%H:%M:%S")
-            prices = get_prices()
-            if not prices:
+            closes = get_candles()
+            if not closes:
                 time.sleep(CHECK_INTERVAL)
                 continue
-            price = prices[-1]
+            price = closes[-1]
             positions = get_positions()
             if positions:
                 if check_risk(positions, price):
                     time.sleep(CHECK_INTERVAL)
                     continue
-            sig, ef, es = get_signal(prices)
-            ef_str = str(round(float(ef), 2)) if ef is not None else "N/A"
-            es_str = str(round(float(es), 2)) if es is not None else "N/A"
-            cross = ""
-            if sig == "BUY":
-                cross = " *** GOLDEN CROSS ***"
-            elif sig == "SELL":
-                cross = " *** DEATH CROSS ***"
-            print("[" + now + "] $" + str(price) + " | EMA20: " + ef_str + " | EMA50: " + es_str + " | " + sig + cross)
+            sig, ma20_val, ma50_val = get_signal(closes, positions)
+            ma20_str = str(round(float(ma20_val), 2)) if ma20_val is not None else "N/A"
+            ma50_str = str(round(float(ma50_val), 2)) if ma50_val is not None else "N/A"
+            pos_str = "EN POSITION" if positions else "HORS POSITION"
+            print("[" + now + "] $" + str(price) + " | MA20: " + ma20_str + " | MA50: " + ma50_str + " | " + sig + " | " + pos_str)
             if sig == "BUY" and not positions and get_balance() >= TRADE_SIZE_USD:
                 if place_order("BUY", TRADE_SIZE_USD, price):
                     trades += 1
