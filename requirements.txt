@@ -1,7 +1,4 @@
-def get_exchange():
-    wallet = eth_account.Account.from_key(PRIVATE_KEY)
-    from hyperliquid.exchange import Exchange
-    from hyperliquid.utils import constants
-    from hyperliquid.info import Info
-    info = Info(constants.MAINNET_API_URL, skip_ws=True)
-    return Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS)
+requests==2.31.0
+pandas==2.2.0
+numpy==1.26.0
+eth-account==0.10.0
