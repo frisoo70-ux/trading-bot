@@ -181,7 +181,7 @@ def run():
                 touched_ma50 = False
                 sig = "HOLD"
                 if prev_close <= ma20 and price > ma20 and ma20 < ma50:
-                sig = "BUY"
+                    sig = "BUY"
 
 
                 print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION")
