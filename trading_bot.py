@@ -5,22 +5,17 @@ import pandas as pd
 from datetime import datetime
 import os
 import eth_account
-from eth_account.messages import encode_defunct
-import hashlib
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET")
 WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
-MA_BUY = 20
-MA_SELL = 50
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
 
-# Etat interne
-touched_ma20 = False
+touched_ma50 = False
 
 def round_price(price):
     return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
@@ -86,16 +81,6 @@ def get_candles():
         print("[ERREUR] Candles: " + str(e))
         return []
 
-def get_asset_index():
-    try:
-        data = info_post({"type": "meta"})
-        for i, a in enumerate(data.get("universe", [])):
-            if a.get("name") == SYMBOL:
-                return i
-        return -1
-    except:
-        return -1
-
 def place_order(side, size_usd, price, reduce_only=False):
     try:
         from hyperliquid.exchange import Exchange
@@ -121,15 +106,14 @@ def place_order(side, size_usd, price, reduce_only=False):
         print("[ERREUR] Ordre: " + str(e))
         return False
 
-
 def close_pos(pos, price):
     size_usd = abs(pos["size"]) * price
     return place_order("SELL", size_usd, price, reduce_only=True)
 
-def ma(closes, period):
+def sma(closes, period):
     if len(closes) < period:
         return None
-    return pd.Series(closes).rolling(period).mean().iloc[-1]
+    return float(pd.Series(closes).rolling(period).mean().iloc[-1])
 
 def check_risk(positions, price):
     for pos in positions:
@@ -143,21 +127,21 @@ def check_risk(positions, price):
     return False
 
 def run():
-    global touched_ma20
-    print("BOT MA50/MA20 - Price Action")
-    print("BUY: cloture > MA50 | SELL: touche MA20 puis cloture < MA20")
+    global touched_ma50
+    print("BOT PRICE ACTION - MA20/MA50")
+    print("BUY: cloture > MA20 | SELL: touche MA50 puis cloture < MA50")
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
     print("Solde: $" + str(round(get_balance(), 2)))
     print("---")
     trades = 0
-    touched_ma20 = False
+    touched_ma50 = False
 
     while True:
         try:
             now = datetime.now().strftime("%H:%M:%S")
             closes = get_candles()
-            if not closes or len(closes) < MA_BUY + 1:
+            if not closes or len(closes) < 52:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -165,43 +149,38 @@ def run():
             prev_close = closes[-2]
             positions = get_positions()
 
-            ma20_val = ma(closes, MA_SELL)
-            ma50_val = ma(closes, MA_BUY)
+            ma20 = sma(closes, 20)
+            ma50 = sma(closes, 50)
 
-            if ma20_val is None or ma50_val is None:
+            if ma20 is None or ma50 is None:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            ma20 = float(ma20_val)
-            ma50 = float(ma50_val)
-
             if positions:
                 if check_risk(positions, price):
-                    touched_ma20 = False
+                    touched_ma50 = False
                     time.sleep(CHECK_INTERVAL)
                     continue
 
-                # Verifier si le prix a touche MA20
-                if price >= ma20:
-                    touched_ma20 = True
+                if price >= ma50:
+                    touched_ma50 = True
 
-                # Vendre si MA20 touchee ET cloture en dessous
                 sig = "HOLD"
-                if touched_ma20 and price < ma20:
+                if touched_ma50 and price < ma50:
                     sig = "SELL"
 
-                status = "MA20 TOUCHEE" if touched_ma20 else "ATTENTE MA20"
+                status = "MA50 TOUCHEE" if touched_ma50 else "ATTENTE MA50"
                 print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | EN POSITION | " + status)
 
                 if sig == "SELL":
                     if close_pos(positions[0], price):
-                        touched_ma20 = False
+                        touched_ma50 = False
                         print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
 
             else:
-                # Acheter si cloture au dessus MA50
+                touched_ma50 = False
                 sig = "HOLD"
-                if prev_close <= ma50 and price > ma50:
+                if prev_close <= ma20 and price > ma20:
                     sig = "BUY"
 
                 print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION")
@@ -209,7 +188,7 @@ def run():
                 if sig == "BUY" and get_balance() >= TRADE_SIZE_USD:
                     if place_order("BUY", TRADE_SIZE_USD, price):
                         trades += 1
-                        touched_ma20 = False
+                        touched_ma50 = False
                         print("Trade #" + str(trades) + " LONG ouvert | Solde: $" + str(round(get_balance(), 2)))
 
             time.sleep(CHECK_INTERVAL)
