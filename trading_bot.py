@@ -8,8 +8,8 @@ import eth_account
 from eth_account.messages import encode_defunct
 import hashlib
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
-WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET")
+WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
