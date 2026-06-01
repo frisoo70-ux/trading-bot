@@ -101,7 +101,7 @@ def place_order(side, size_usd, price, reduce_only=False):
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
         wallet = eth_account.Account.from_key(PRIVATE_KEY)
-        exchange = Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS, skip_ws=True)
+        exchange = Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS)
         is_buy = side == "BUY"
         size = round(size_usd / price, 4)
         lp = round_price(price * (1.002 if is_buy else 0.998))
