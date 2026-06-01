@@ -8,8 +8,8 @@ import eth_account
 from eth_account.messages import encode_defunct
 import hashlib
 
-PRIVATE_KEY = os.environ.get("HL_API_SECRET")
-WALLET_ADDRESS = os.environ.get("HL_WALLET")
+PRIVATE_KEY = os.environ.get("HL_API_SECRET", "")
+WALLET_ADDRESS = os.environ.get("HL_WALLET", "")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
@@ -18,6 +18,9 @@ MA_SELL = 20
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
+
+# Etat interne
+touched_ma20 = False
 
 def round_price(price):
     return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
@@ -77,8 +80,7 @@ def get_candles():
         }
         data = info_post(payload)
         if isinstance(data, list):
-            closes = [float(c["c"]) for c in data]
-            return closes
+            return [float(c["c"]) for c in data]
         return []
     except Exception as e:
         print("[ERREUR] Candles: " + str(e))
@@ -163,24 +165,6 @@ def ma(closes, period):
         return None
     return pd.Series(closes).rolling(period).mean().iloc[-1]
 
-def get_signal(closes, positions):
-    if len(closes) < MA_BUY + 1:
-        return "HOLD", None, None
-    last_close = closes[-1]
-    prev_close = closes[-2]
-    ma50 = ma(closes, MA_BUY)
-    ma20 = ma(closes, MA_SELL)
-    if ma50 is None or ma20 is None:
-        return "HOLD", ma20, ma50
-    in_position = len(positions) > 0
-    if not in_position:
-        if prev_close <= ma50 and last_close > ma50:
-            return "BUY", ma20, ma50
-    else:
-        if last_close < ma20:
-            return "SELL", ma20, ma50
-    return "HOLD", ma20, ma50
-
 def check_risk(positions, price):
     for pos in positions:
         if pos["symbol"] != SYMBOL:
@@ -193,40 +177,77 @@ def check_risk(positions, price):
     return False
 
 def run():
+    global touched_ma20
     print("BOT MA50/MA20 - Price Action")
-    print("BUY: cloture au-dessus MA50 | SELL: cloture en-dessous MA20")
+    print("BUY: cloture > MA50 | SELL: touche MA20 puis cloture < MA20")
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
     print("Solde: $" + str(round(get_balance(), 2)))
     print("---")
     trades = 0
-    last_candle_time = None
+    touched_ma20 = False
+
     while True:
         try:
             now = datetime.now().strftime("%H:%M:%S")
             closes = get_candles()
-            if not closes:
+            if not closes or len(closes) < MA_BUY + 1:
                 time.sleep(CHECK_INTERVAL)
                 continue
+
             price = closes[-1]
+            prev_close = closes[-2]
             positions = get_positions()
+
+            ma20_val = ma(closes, MA_SELL)
+            ma50_val = ma(closes, MA_BUY)
+
+            if ma20_val is None or ma50_val is None:
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            ma20 = float(ma20_val)
+            ma50 = float(ma50_val)
+
             if positions:
                 if check_risk(positions, price):
+                    touched_ma20 = False
                     time.sleep(CHECK_INTERVAL)
                     continue
-            sig, ma20_val, ma50_val = get_signal(closes, positions)
-            ma20_str = str(round(float(ma20_val), 2)) if ma20_val is not None else "N/A"
-            ma50_str = str(round(float(ma50_val), 2)) if ma50_val is not None else "N/A"
-            pos_str = "EN POSITION" if positions else "HORS POSITION"
-            print("[" + now + "] $" + str(price) + " | MA20: " + ma20_str + " | MA50: " + ma50_str + " | " + sig + " | " + pos_str)
-            if sig == "BUY" and not positions and get_balance() >= TRADE_SIZE_USD:
-                if place_order("BUY", TRADE_SIZE_USD, price):
-                    trades += 1
-                    print("Trade #" + str(trades) + " LONG ouvert | Solde: $" + str(round(get_balance(), 2)))
-            elif sig == "SELL" and positions:
-                if close_pos(positions[0], price):
-                    print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
+
+                # Verifier si le prix a touche MA20
+                if price >= ma20:
+                    touched_ma20 = True
+
+                # Vendre si MA20 touchee ET cloture en dessous
+                sig = "HOLD"
+                if touched_ma20 and price < ma20:
+                    sig = "SELL"
+
+                status = "MA20 TOUCHEE" if touched_ma20 else "ATTENTE MA20"
+                print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | EN POSITION | " + status)
+
+                if sig == "SELL":
+                    if close_pos(positions[0], price):
+                        touched_ma20 = False
+                        print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
+
+            else:
+                # Acheter si cloture au dessus MA50
+                sig = "HOLD"
+                if prev_close <= ma50 and price > ma50:
+                    sig = "BUY"
+
+                print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION")
+
+                if sig == "BUY" and get_balance() >= TRADE_SIZE_USD:
+                    if place_order("BUY", TRADE_SIZE_USD, price):
+                        trades += 1
+                        touched_ma20 = False
+                        print("Trade #" + str(trades) + " LONG ouvert | Solde: $" + str(round(get_balance(), 2)))
+
             time.sleep(CHECK_INTERVAL)
+
         except KeyboardInterrupt:
             print("Bot arrete. Trades: " + str(trades))
             break
@@ -236,4 +257,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
