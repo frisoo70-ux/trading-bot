@@ -96,65 +96,31 @@ def get_asset_index():
     except:
         return -1
 
-def sign_action(action, nonce):
-    account = eth_account.Account.from_key(PRIVATE_KEY)
-    action_str = json.dumps(action, separators=(",", ":"), sort_keys=True)
-    msg_str = action_str + str(nonce) + "a"
-    msg_hash = hashlib.sha256(msg_str.encode()).digest()
-    msg = encode_defunct(primitive=msg_hash)
-    signed = account.sign_message(msg)
-    return {"r": hex(signed.r), "s": hex(signed.s), "v": signed.v}
-
 def place_order(side, size_usd, price, reduce_only=False):
     try:
-        nonce = int(time.time() * 1000)
-        idx = get_asset_index()
-        if idx == -1:
-            print("[ERREUR] Asset introuvable")
-            return False
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.utils import constants
+        wallet = eth_account.Account.from_key(PRIVATE_KEY)
+        exchange = Exchange(wallet, constants.MAINNET_API_URL, account_address=WALLET_ADDRESS, skip_ws=True)
         is_buy = side == "BUY"
         size = round(size_usd / price, 4)
         lp = round_price(price * (1.002 if is_buy else 0.998))
-        action = {
-            "type": "order",
-            "orders": [{
-                "a": idx,
-                "b": is_buy,
-                "p": str(lp),
-                "s": str(size),
-                "r": reduce_only,
-                "t": {"limit": {"tif": "Ioc"}}
-            }],
-            "grouping": "na"
-        }
-        signature = sign_action(action, nonce)
-        payload = {
-            "action": action,
-            "nonce": nonce,
-            "signature": signature,
-            "vaultAddress": WALLET_ADDRESS
-        }
-        headers = {"Content-Type": "application/json"}
-        r = requests.post(BASE_URL + "/exchange", headers=headers, data=json.dumps(payload), timeout=10)
-        result = r.json()
+        result = exchange.order(SYMBOL, is_buy, size, lp, {"limit": {"tif": "Ioc"}}, reduce_only=reduce_only)
         print("[DEBUG] Ordre: " + str(result)[:200])
-        if isinstance(result, dict):
-            statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-            if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
-                print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
-                return True
-            elif statuses and "error" in statuses[0]:
-                print("[ECHEC] " + str(statuses[0]["error"]))
-                return False
-            else:
-                print("[ECHEC] " + str(result))
-                return False
+        statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+        if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
+            print("[OK] " + side + " " + str(size) + " " + SYMBOL + " @ $" + str(lp))
+            return True
+        elif statuses and "error" in statuses[0]:
+            print("[ECHEC] " + str(statuses[0]["error"]))
+            return False
         else:
-            print("[ECHEC] Reponse inattendue: " + str(result))
+            print("[ECHEC] " + str(result))
             return False
     except Exception as e:
         print("[ERREUR] Ordre: " + str(e))
         return False
+
 
 def close_pos(pos, price):
     size_usd = abs(pos["size"]) * price
