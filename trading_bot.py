@@ -13,7 +13,7 @@ TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
-TICK_SIZE = 1.0
+TICK_SIZE = 0.01
 
 touched_ma50 = False
 
