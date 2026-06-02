@@ -68,8 +68,8 @@ def get_candles():
             "type": "candleSnapshot",
             "req": {
                 "coin": SYMBOL,
-                "interval": "1m",
-                "startTime": int((time.time() - 150 * 60) * 1000),
+                "interval": "15m",
+                "startTime": int((time.time() - 150 * 60 * 15) * 1000),
                 "endTime": int(time.time() * 1000)
             }
         }
