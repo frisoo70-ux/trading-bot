@@ -8,12 +8,12 @@ import eth_account
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET")
 WALLET_ADDRESS = os.environ.get("HL_WALLET")
-SYMBOL = "SOL"
+SYMBOL = "BTC"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.02
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
-TICK_SIZE = 0.01
+TICK_SIZE = 1.0
 
 touched_ma50 = False
 
@@ -68,8 +68,8 @@ def get_candles():
             "type": "candleSnapshot",
             "req": {
                 "coin": SYMBOL,
-                "interval": "15m",
-                "startTime": int((time.time() - 150 * 60 * 15) * 1000),
+                "interval": "1m",
+                "startTime": int((time.time() - 150 * 60) * 1000),
                 "endTime": int(time.time() * 1000)
             }
         }
