@@ -114,7 +114,8 @@ def close_pos(pos, price):
 def sma(closes, period):
     if len(closes) < period:
         return None
-    return float(pd.Series(closes).rolling(period).mean().iloc[-1])
+    return float(pd.Series(closes).ewm(span=period, adjust=False).mean().iloc[-1])
+
 
 def check_risk(positions, price):
     for pos in positions:
