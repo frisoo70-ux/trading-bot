@@ -8,17 +8,21 @@ import eth_account
 
 PRIVATE_KEY = os.environ.get("HL_API_SECRET")
 WALLET_ADDRESS = os.environ.get("HL_WALLET")
-SYMBOL = "SOL"
+SYMBOL = "BTC"
 TRADE_SIZE_USD = 40
-STOP_LOSS_PCT = 0.02
+STOP_LOSS_PCT = 0.03
 CHECK_INTERVAL = 60
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
 
-touched_ma50 = False
+# Mode du trade en cours
+# "ma50" = achat sur MA20, sortie sur MA50
+# "ma20" = achat sur MA50, sortie sur MA20
+trade_mode = None
+touched_target = False
 
 def round_price(price):
-    return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
+    return round(round(price / TICK_SIZE) * TICK_SIZE, 1)
 
 def info_post(payload):
     try:
@@ -127,15 +131,17 @@ def check_risk(positions, price):
     return False
 
 def run():
-    global touched_ma50
-    print("BOT PRICE ACTION - MA20/MA50")
-    print("BUY: cloture > MA20 | SELL: touche MA50 puis cloture < MA50")
+    global trade_mode, touched_target
+    print("BOT PRICE ACTION - BTC 1min")
+    print("Mode 1: BUY>MA20 | SELL touche MA50 puis <MA50")
+    print("Mode 2: BUY>MA50 | SELL cloture <MA20")
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
     print("Solde: $" + str(round(get_balance(), 2)))
     print("---")
     trades = 0
-    touched_ma50 = False
+    trade_mode = None
+    touched_target = False
 
     while True:
         try:
@@ -156,41 +162,62 @@ def run():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
+            tendance_ok = ma20 < ma50
+
             if positions:
                 if check_risk(positions, price):
-                    touched_ma50 = False
+                    trade_mode = None
+                    touched_target = False
                     time.sleep(CHECK_INTERVAL)
                     continue
 
-                if price >= ma50:
-                    touched_ma50 = True
-
                 sig = "HOLD"
-                if touched_ma50 and price < ma50:
-                    sig = "SELL"
 
-                status = "MA50 TOUCHEE" if touched_ma50 else "ATTENTE MA50"
-                print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | EN POSITION | " + status)
+                if trade_mode == "ma50":
+                    if price >= ma50:
+                        touched_target = True
+                    if touched_target and price < ma50:
+                        sig = "SELL"
+                    status = "ATTENTE MA50" if not touched_target else "MA50 TOUCHEE"
+
+                elif trade_mode == "ma20":
+                    if price < ma20:
+                        sig = "SELL"
+                    status = "ATTENTE CLOTURE < MA20"
+
+                else:
+                    status = "MODE INCONNU"
+
+                print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 1)) + " | MA50: " + str(round(ma50, 1)) + " | " + sig + " | EN POSITION | " + status)
 
                 if sig == "SELL":
                     if close_pos(positions[0], price):
-                        touched_ma50 = False
+                        trade_mode = None
+                        touched_target = False
                         print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
 
             else:
-                touched_ma50 = False
+                trade_mode = None
+                touched_target = False
                 sig = "HOLD"
-                if prev_close <= ma20 and price > ma20 and ma20 < ma50:
-                    sig = "BUY"
+                mode_info = ""
 
+                if tendance_ok:
+                    if prev_close <= ma20 and price > ma20:
+                        sig = "BUY"
+                        trade_mode = "ma50"
+                        mode_info = "MODE 1: sortie MA50"
+                    elif prev_close <= ma50 and price > ma50:
+                        sig = "BUY"
+                        trade_mode = "ma20"
+                        mode_info = "MODE 2: sortie MA20"
 
-                print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 2)) + " | MA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION")
+                print("[" + now + "] $" + str(price) + " | MA20: " + str(round(ma20, 1)) + " | MA50: " + str(round(ma50, 1)) + " | " + sig + " | HORS POSITION | " + ("TENDANCE OK" if tendance_ok else "TENDANCE NON"))
 
                 if sig == "BUY" and get_balance() >= TRADE_SIZE_USD:
                     if place_order("BUY", TRADE_SIZE_USD, price):
                         trades += 1
-                        touched_ma50 = False
-                        print("Trade #" + str(trades) + " LONG ouvert | Solde: $" + str(round(get_balance(), 2)))
+                        print("Trade #" + str(trades) + " | " + mode_info + " | Solde: $" + str(round(get_balance(), 2)))
 
             time.sleep(CHECK_INTERVAL)
 
