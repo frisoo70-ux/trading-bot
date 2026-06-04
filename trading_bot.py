@@ -26,17 +26,6 @@ SIZE_DECIMALS = 4
 
 def round_price(price):
     return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
-    
-    
-pnl_pct = ((price - positions[0]["entry"]) / positions[0]["entry"]) * 100
-
-print(
-    f"[{now}] ${price} | "
-    f"MA20:{round(ma20,2)} | "
-    f"MA50:{round(ma50,2)} | "
-    f"PnL:{round(pnl_pct,2)}% | "
-    f"{sig}"
-)
 
 def info_post(payload):
     try:
