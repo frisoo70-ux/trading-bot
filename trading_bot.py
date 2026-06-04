@@ -255,13 +255,8 @@ def check_risk(positions, price):
             print("[STOP-LOSS]", round(pnl * 100, 2), "%")
             close_pos(pos, price)
             return True
-        pnl_pct = ((price - positions[0]["entry"]) / positions[0]["entry"]) * 100
-
-            print(f"[{now}] ${price} | "
-                  f"MA20:{round(ma20,2)} | "
-                  f"MA50:{round(ma50,2)} | "
-                  f"PnL:{round(pnl_pct,2)}% | "
-                  f"{sig}")
+            
+        
 
     return False
 
