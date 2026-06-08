@@ -134,7 +134,7 @@ def run():
     global trade_mode, touched_target, last_candle_time
     print("BOT PRICE ACTION - SOL 15min - CLOTURES UNIQUEMENT")
     print("Mode 1 (MA20>MA50): BUY cloture>MA50 | SELL touche MA20 puis cloture<MA20")
-    print("Mode 2 (MA20<MA50): BUY cloture>MA50 | SELL cloture<MA20")
+    print("Mode 2 (MA20<MA50): BUY cloture>MA20 | SELL touche MA50 puis cloture<MA50")
     print("Symbole: " + SYMBOL + " | Taille: $" + str(TRADE_SIZE_USD))
     print("Wallet: " + WALLET_ADDRESS[:8] + "...")
     print("Solde: $" + str(round(get_balance(), 2)))
@@ -166,7 +166,8 @@ def run():
 
             mode1 = ma20 > ma50
             mode2 = ma20 < ma50
-            tendance = "HAUSSIERE" if mode1 else "BAISSIERE"
+            tendance = "HAUSSIERE (M1)" if mode1 else "BAISSIERE (M2)"
+            new_candle = candle_time != last_candle_time
 
             if positions:
                 if check_risk(positions, price):
@@ -181,14 +182,16 @@ def run():
                 if trade_mode == "mode1":
                     if price >= ma20:
                         touched_target = True
-                    if touched_target and candle_time != last_candle_time and price < ma20:
+                    if touched_target and new_candle and price < ma20:
                         sig = "SELL"
                     status = "MA20 TOUCHEE" if touched_target else "ATTENTE MA20"
 
                 elif trade_mode == "mode2":
-                    if candle_time != last_candle_time and price < ma20:
+                    if price >= ma50:
+                        touched_target = True
+                    if touched_target and new_candle and price < ma50:
                         sig = "SELL"
-                    status = "ATTENTE CLOTURE < MA20"
+                    status = "MA50 TOUCHEE" if touched_target else "ATTENTE MA50"
 
                 print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | EN POSITION | " + status)
 
@@ -205,18 +208,18 @@ def run():
                 sig = "HOLD"
                 mode_label = ""
 
-                if candle_time != last_candle_time:
+                if new_candle:
                     if mode1 and prev_close <= ma50 and price > ma50:
                         sig = "BUY"
                         trade_mode = "mode1"
                         mode_label = "MODE 1 haussier"
-                    elif mode2 and prev_close <= ma50 and price > ma50:
+                    elif mode2 and prev_close <= ma20 and price > ma20:
                         sig = "BUY"
                         trade_mode = "mode2"
                         mode_label = "MODE 2 baissier"
 
-                new_candle = "NOUVELLE BOUGIE" if candle_time != last_candle_time else "BOUGIE EN COURS"
-                print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION | " + tendance + " | " + new_candle)
+                candle_str = "NOUVELLE BOUGIE" if new_candle else "BOUGIE EN COURS"
+                print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION | " + tendance + " | " + candle_str)
 
                 if sig == "BUY" and get_balance() >= TRADE_SIZE_USD:
                     if place_order("BUY", TRADE_SIZE_USD, price):
