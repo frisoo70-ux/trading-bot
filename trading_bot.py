@@ -241,14 +241,14 @@ def run():
                                  trade_mode = "mode2"
                                  mode_label = "MODE 2 baissier"
 
-          print(
-               f"[DEBUG] Prev={prev_close:.2f} "
-               f"Curr={current_close:.2f} "
-               f"EMA20prev={ma20_prev:.2f} "
-               f"EMA20={ma20:.2f} "
-               f"EMA50prev={ma50_prev:.2f} "
-               f"EMA50={ma50:.2f}"
-          )
+               print(
+                   f"[DEBUG] Prev={prev_close:.2f} "
+                   f"Curr={current_close:.2f} "
+                   f"EMA20prev={ma20_prev:.2f} "
+                   f"EMA20={ma20:.2f} "
+                   f"EMA50prev={ma50_prev:.2f} "
+                   f"EMA50={ma50:.2f}"
+               )
 
                 candle_str = "NOUVELLE BOUGIE" if new_candle else "BOUGIE EN COURS"
                 print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION | " + tendance + " | " + candle_str)
