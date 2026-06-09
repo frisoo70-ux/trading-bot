@@ -203,20 +203,52 @@ def run():
                         print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
 
             else:
-                trade_mode = None
-                touched_target = False
-                sig = "HOLD"
-                mode_label = ""
+    trade_mode = None
+    touched_target = False
+    sig = "HOLD"
+    mode_label = ""
 
-                if new_candle:
-                    if mode1 and prev_close <= ma50 and price > ma50:
-                        sig = "BUY"
-                        trade_mode = "mode1"
-                        mode_label = "MODE 1 haussier"
-                    elif mode2 and prev_close <= ma20 and price > ma20:
-                        sig = "BUY"
-                        trade_mode = "mode2"
-                        mode_label = "MODE 2 baissier"
+    # EMA de la bougie précédente
+    ma20_prev = ema(closes[:-1], 20)
+    ma50_prev = ema(closes[:-1], 50)
+
+    prev_close = closes[-2]
+    current_close = closes[-1]
+
+    if new_candle:
+
+        # MODE 1 : EMA20 > EMA50
+        if mode1:
+            crossed_up = (
+                prev_close <= ma50_prev and
+                current_close > ma50
+            )
+
+            if crossed_up:
+                sig = "BUY"
+                trade_mode = "mode1"
+                mode_label = "MODE 1 haussier"
+
+        # MODE 2 : EMA20 < EMA50
+        elif mode2:
+            crossed_up = (
+                prev_close <= ma20_prev and
+                current_close > ma20
+            )
+
+            if crossed_up:
+                sig = "BUY"
+                trade_mode = "mode2"
+                mode_label = "MODE 2 baissier"
+
+    print(
+        f"[DEBUG] Prev={prev_close:.2f} "
+        f"Curr={current_close:.2f} "
+        f"EMA20prev={ma20_prev:.2f} "
+        f"EMA20={ma20:.2f} "
+        f"EMA50prev={ma50_prev:.2f} "
+        f"EMA50={ma50:.2f}"
+    )
 
                 candle_str = "NOUVELLE BOUGIE" if new_candle else "BOUGIE EN COURS"
                 print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION | " + tendance + " | " + candle_str)
