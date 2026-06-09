@@ -230,7 +230,7 @@ def run():
                           mode_label = "MODE 1 haussier"
 
                     # MODE 2 : EMA20 < EMA50
-                    elif mode2:
+                     elif mode2:
                              crossed_up = (
                                    prev_close <= ma20_prev and
                                    current_close > ma20
