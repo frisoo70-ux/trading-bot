@@ -76,14 +76,19 @@ def get_candles():
             }
         }
         data = info_post(payload)
-        if isinstance(data, list) and len(data) > 0:
+        if isinstance(data, list) and len(data) > 1:
+            # closes[-1] = bougie en cours (non cloturee - ignoree pour signaux)
+            # closes[-2] = derniere bougie cloturee confirmee
+            # closes[-3] = avant-derniere bougie cloturee confirmee
             closes = [float(c["c"]) for c in data]
-            last_time = int(data[-1]["t"])
-            return closes, last_time
-        return [], None
+            candle_times = [int(c["t"]) for c in data]
+            last_confirmed_time = candle_times[-2]  # temps de la derniere bougie confirmee
+            current_price = closes[-1]  # prix en cours (bougie ouverte)
+            return closes, last_confirmed_time, current_price
+        return [], None, None
     except Exception as e:
         print("[ERREUR] Candles: " + str(e))
-        return [], None
+        return [], None, None
 
 def place_order(side, size_usd, price, reduce_only=False):
     try:
@@ -147,18 +152,22 @@ def run():
     while True:
         try:
             now = datetime.now().strftime("%H:%M:%S")
-            closes, candle_time = get_candles()
+            closes, confirmed_time, current_price = get_candles()
 
-            if not closes or len(closes) < 52 or candle_time is None:
+            if not closes or len(closes) < 53 or confirmed_time is None:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            price = closes[-1]
-            prev_close = closes[-2]
+            # Bougies confirmees uniquement (on ignore closes[-1] = bougie en cours)
+            confirmed_closes = closes[:-1]
+            last_close = confirmed_closes[-1]   # derniere bougie cloturee
+            prev_close = confirmed_closes[-2]   # avant-derniere bougie cloturee
+
             positions = get_positions()
 
-            ma20 = ema(closes, 20)
-            ma50 = ema(closes, 50)
+            # EMA calculees sur bougies confirmees uniquement
+            ma20 = ema(confirmed_closes, 20)
+            ma50 = ema(confirmed_closes, 50)
 
             if ma20 is None or ma50 is None:
                 time.sleep(CHECK_INTERVAL)
@@ -167,10 +176,10 @@ def run():
             mode1 = ma20 > ma50
             mode2 = ma20 < ma50
             tendance = "HAUSSIERE (M1)" if mode1 else "BAISSIERE (M2)"
-            new_candle = candle_time != last_candle_time
+            new_candle = confirmed_time != last_candle_time
 
             if positions:
-                if check_risk(positions, price):
+                if check_risk(positions, current_price):
                     trade_mode = None
                     touched_target = False
                     time.sleep(CHECK_INTERVAL)
@@ -180,24 +189,28 @@ def run():
                 status = ""
 
                 if trade_mode == "mode1":
-                    if price >= ma20:
+                    # Touche MA20 si derniere cloture >= MA20
+                    if last_close >= ma20:
                         touched_target = True
-                    if touched_target and new_candle and price < ma20:
+                    # SELL si MA20 touchee ET nouvelle bougie cloture sous MA20
+                    if touched_target and new_candle and last_close < ma20:
                         sig = "SELL"
                     status = "MA20 TOUCHEE" if touched_target else "ATTENTE MA20"
 
                 elif trade_mode == "mode2":
-                    if price >= ma50:
+                    # Touche MA50 si derniere cloture >= MA50
+                    if last_close >= ma50:
                         touched_target = True
-                    if touched_target and new_candle and price < ma50:
+                    # SELL si MA50 touchee ET nouvelle bougie cloture sous MA50
+                    if touched_target and new_candle and last_close < ma50:
                         sig = "SELL"
                     status = "MA50 TOUCHEE" if touched_target else "ATTENTE MA50"
 
-                print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | EN POSITION | " + status)
+                print("[" + now + "] CLOTURE: $" + str(last_close) + " | PRIX: $" + str(current_price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | EN POSITION | " + status)
 
                 if sig == "SELL":
-                    if close_pos(positions[0], price):
-                        last_candle_time = candle_time
+                    if close_pos(positions[0], current_price):
+                        last_candle_time = confirmed_time
                         trade_mode = None
                         touched_target = False
                         print("Trade ferme | Solde: $" + str(round(get_balance(), 2)))
@@ -208,26 +221,27 @@ def run():
                 sig = "HOLD"
                 mode_label = ""
 
+                # Signal uniquement sur nouvelle bougie confirmee
                 if new_candle:
-                    if mode1 and prev_close <= ma50 and price > ma50:
+                    if mode1 and prev_close <= ma50 and last_close > ma50:
                         sig = "BUY"
                         trade_mode = "mode1"
                         mode_label = "MODE 1 haussier"
-                    elif mode2 and prev_close <= ma20 and price > ma20:
+                    elif mode2 and prev_close <= ma20 and last_close > ma20:
                         sig = "BUY"
                         trade_mode = "mode2"
                         mode_label = "MODE 2 baissier"
 
                 candle_str = "NOUVELLE BOUGIE" if new_candle else "BOUGIE EN COURS"
-                print("[" + now + "] $" + str(price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION | " + tendance + " | " + candle_str)
+                print("[" + now + "] CLOTURE: $" + str(last_close) + " | PRIX: $" + str(current_price) + " | EMA20: " + str(round(ma20, 2)) + " | EMA50: " + str(round(ma50, 2)) + " | " + sig + " | HORS POSITION | " + tendance + " | " + candle_str)
 
                 if sig == "BUY" and get_balance() >= TRADE_SIZE_USD:
-                    if place_order("BUY", TRADE_SIZE_USD, price):
-                        last_candle_time = candle_time
+                    if place_order("BUY", TRADE_SIZE_USD, current_price):
+                        last_candle_time = confirmed_time
                         trades += 1
                         print("Trade #" + str(trades) + " | " + mode_label + " | Solde: $" + str(round(get_balance(), 2)))
 
-            last_candle_time = candle_time
+            last_candle_time = confirmed_time
             time.sleep(CHECK_INTERVAL)
 
         except KeyboardInterrupt:
