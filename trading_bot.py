@@ -11,7 +11,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 40
 STOP_LOSS_PCT = 0.03
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 30
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
 
