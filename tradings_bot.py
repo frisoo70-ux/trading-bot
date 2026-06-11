@@ -19,7 +19,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 30
-CHECK_INTERVAL = 5
+CHECK_INTERVAL = 60
 
 BASE_URL = "https://api.hyperliquid.xyz"
 TICK_SIZE = 0.01
@@ -387,12 +387,22 @@ def manage_open_position(pos, df, current_price, candle_time):
     if current_price > trade_state["highest_price"]:
         trade_state["highest_price"] = current_price
 
-    trailing = trade_state["highest_price"] - ATR_TRAIL_MULT * atr_value
-    trade_state["trailing_stop"] = trailing
-
     pnl_pct = ((current_price - entry) / entry) * 100
     tp1_price = entry + ATR_TP_MULT * atr_value
     hard_stop = entry - ATR_STOP_MULT * atr_value
+
+    # Le trailing stop est volontairement INACTIF avant TP1.
+    # Avant TP1, seule la protection ATR principale est utilisée.
+    if trade_state["tp1_done"]:
+        trailing = trade_state["highest_price"] - ATR_TRAIL_MULT * atr_value
+        trade_state["trailing_stop"] = trailing
+        trailing_hit = current_price <= trailing
+        trailing_display = f"{trailing:.4f}"
+    else:
+        trailing = None
+        trade_state["trailing_stop"] = None
+        trailing_hit = False
+        trailing_display = "INACTIF avant TP1"
 
     if last["rsi"] >= RSI_OVERBOUGHT:
         trade_state["rsi_was_overbought"] = True
@@ -400,12 +410,11 @@ def manage_open_position(pos, df, current_price, candle_time):
     rsi_rollover = trade_state["rsi_was_overbought"] and last["rsi"] < RSI_EXIT_LEVEL
     ema_break = last["close"] < last["ema20"]
     hard_stop_hit = current_price <= hard_stop
-    trailing_hit = current_price <= trailing
 
     print(
         f"[POSITION] Entry={entry:.4f} Prix={current_price:.4f} "
         f"PnL={pnl_pct:.2f}% ATR={atr_value:.4f} TP1={tp1_price:.4f} "
-        f"Trail={trailing:.4f} Stop={hard_stop:.4f} RSI={last['rsi']:.2f}"
+        f"Trail={trailing_display} Stop={hard_stop:.4f} RSI={last['rsi']:.2f}"
     )
 
     # TP1 : vendre 50 % une seule fois
