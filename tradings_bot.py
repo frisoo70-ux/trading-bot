@@ -486,13 +486,6 @@ def run():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # On traite uniquement la nouvelle bougie 15 min confirmée.
-            if confirmed_time == last_candle_time:
-                time.sleep(CHECK_INTERVAL)
-                continue
-
-            last_candle_time = confirmed_time
-
             df = add_indicators(df)
             df = df.dropna().copy()
 
@@ -506,7 +499,17 @@ def run():
             pos = get_sol_position()
             sync_state_with_position(pos)
 
-            print("\n[CANDLE CLOSE]", now)
+            new_candle = confirmed_time != last_candle_time
+
+            # V2.2 :
+            # BUY uniquement sur nouvelle bougie 15 min confirmée.
+            # TP1 / stop / trailing vérifiés à chaque CHECK_INTERVAL avec le prix courant.
+            if new_candle:
+                last_candle_time = confirmed_time
+                print("\n[CANDLE CLOSE]", now)
+            else:
+                print("\n[PRICE CHECK]", now)
+
             print(
                 f"Close={last['close']:.4f} Current={current_price:.4f} "
                 f"EMA20={last['ema20']:.4f} EMA50={last['ema50']:.4f} "
@@ -516,6 +519,11 @@ def run():
 
             if pos:
                 manage_open_position(pos, df, current_price, confirmed_time)
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # Si aucune position ouverte, on ne cherche un BUY que sur nouvelle bougie.
+            if not new_candle:
                 time.sleep(CHECK_INTERVAL)
                 continue
 
