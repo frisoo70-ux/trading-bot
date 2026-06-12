@@ -453,7 +453,7 @@ def manage_open_position(pos, df, current_price, candle_time):
 def run():
     global last_candle_time, META, SIZE_DECIMALS, trade_state
 
-    print("BOT SOL 15m V2 AGRESSIF")
+    print("BOT SOL 15m V2.3 HYBRIDE")
     print("Long only | EMA20/EMA50 + RSI + ATR + OBV + VWAP + Breakout")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
@@ -501,31 +501,42 @@ def run():
 
             new_candle = confirmed_time != last_candle_time
 
-            # V2.2 :
-            # BUY uniquement sur nouvelle bougie 15 min confirmée.
-            # TP1 / stop / trailing vérifiés à chaque CHECK_INTERVAL avec le prix courant.
-            if new_candle:
-                last_candle_time = confirmed_time
-                print("\n[CANDLE CLOSE]", now)
-            else:
-                print("\n[PRICE CHECK]", now)
+            # V2.3 :
+            # - Si position ouverte : contrôle du prix toutes les 60 secondes.
+            # - Si aucune position ouverte : analyse uniquement sur nouvelle clôture 15 min.
+            if pos:
+                if new_candle:
+                    last_candle_time = confirmed_time
+                    print("\n[CANDLE CLOSE - POSITION]", now)
+                else:
+                    print("\n[PRICE CHECK - POSITION]", now)
 
+                print(
+                    f"Close={last['close']:.4f} Current={current_price:.4f} "
+                    f"EMA20={last['ema20']:.4f} EMA50={last['ema50']:.4f} "
+                    f"RSI={last['rsi']:.2f} ATR={last['atr']:.4f} "
+                    f"VWAP={last['vwap']:.4f} OBV={last['obv']:.2f}"
+                )
+
+                manage_open_position(pos, df, current_price, confirmed_time)
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # Aucune position ouverte :
+            # pas de PRICE CHECK toutes les minutes, on attend la nouvelle bougie 15 min.
+            if not new_candle:
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            last_candle_time = confirmed_time
+
+            print("\n[CANDLE CLOSE]", now)
             print(
                 f"Close={last['close']:.4f} Current={current_price:.4f} "
                 f"EMA20={last['ema20']:.4f} EMA50={last['ema50']:.4f} "
                 f"RSI={last['rsi']:.2f} ATR={last['atr']:.4f} "
                 f"VWAP={last['vwap']:.4f} OBV={last['obv']:.2f}"
             )
-
-            if pos:
-                manage_open_position(pos, df, current_price, confirmed_time)
-                time.sleep(CHECK_INTERVAL)
-                continue
-
-            # Si aucune position ouverte, on ne cherche un BUY que sur nouvelle bougie.
-            if not new_candle:
-                time.sleep(CHECK_INTERVAL)
-                continue
 
             # Cooldown après une vente
             cooldown_until = trade_state.get("cooldown_until_candle")
