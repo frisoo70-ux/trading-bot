@@ -341,14 +341,13 @@ def buy_signal(df):
     prev3 = df.iloc[-4]
 
     trend_ok = last["ema20"] > last["ema50"]
-    rsi_ok = last["rsi"] > RSI_BUY_LEVEL
+    rsi_ok = RSI_BUY_LEVEL < last["rsi"] < 70
     vwap_ok = last["close"] > last["vwap"]
 
-    obv_rising = (
-        last["obv"] > prev1["obv"]
-        and prev1["obv"] > prev2["obv"]
-        and prev2["obv"] > prev3["obv"]
-    )
+    # OBV assoupli :
+    # avant = OBV devait monter 3 bougies de suite
+    # maintenant = OBV actuel au-dessus de sa moyenne mobile 5
+    obv_rising = last["obv"] > last["obv_ma5"]
 
     breakout_level = max(prev1["high"], prev2["high"])
     breakout_ok = last["close"] > breakout_level
@@ -451,7 +450,7 @@ def manage_open_position(pos, df, current_price, candle_time):
 def run():
     global last_candle_time, META, SIZE_DECIMALS, trade_state
 
-    print("BOT SOL 15m V2.4 HYBRIDE - SANS SORTIE RSI")
+    print("BOT SOL 15m V2.5 HYBRIDE - OBV MA5")
     print("Long only | EMA20/EMA50 + RSI + ATR + OBV + VWAP + Breakout")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
