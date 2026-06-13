@@ -60,6 +60,7 @@ trade_state = {
 
 META = None
 SIZE_DECIMALS = 2
+LAST_ENTRY_PRICE = None
 
 
 def round_price(price):
@@ -245,6 +246,7 @@ def add_indicators(df):
 
 
 def place_order_qty(side, qty, price, reduce_only=False):
+    global LAST_ENTRY_PRICE
     try:
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
@@ -290,17 +292,51 @@ def place_order_qty(side, qty, price, reduce_only=False):
 
         if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
             print("[OK]", side, qty, SYMBOL, "@", lp)
+
             filled = statuses[0].get("filled", {})
-            avg_px = filled.get("avgPx", lp)
-            total_sz = filled.get("totalSz", qty)
+            avg_px = float(filled.get("avgPx", lp))
+            total_sz = float(filled.get("totalSz", qty))
+            balance_after = round(get_balance(), 2)
             emoji = "🟢" if side == "BUY" else "🔴"
-            notify_telegram(
-                f"{emoji} <b>{side} exécuté</b>\n"
-                f"Symbole: {SYMBOL}\n"
-                f"Quantité: {total_sz}\n"
-                f"Prix moyen: {avg_px}\n"
-                f"Reduce only: {reduce_only}"
-            )
+
+            if side == "BUY":
+                LAST_ENTRY_PRICE = avg_px
+                notify_telegram(
+                    f"{emoji} <b>BUY exécuté</b>\n"
+                    f"Symbole: {SYMBOL}\n"
+                    f"Quantité: {total_sz}\n"
+                    f"Prix moyen: {avg_px:.4f}\n"
+                    f"Montant approx: {total_sz * avg_px:.2f} USDC\n"
+                    f"Solde: {balance_after} USDC"
+                )
+            else:
+                entry_ref = trade_state.get("entry_price") or LAST_ENTRY_PRICE
+
+                if entry_ref:
+                    pnl_pct = ((avg_px - float(entry_ref)) / float(entry_ref)) * 100
+                    pnl_usdc = (avg_px - float(entry_ref)) * total_sz
+
+                    notify_telegram(
+                        f"{emoji} <b>SELL exécuté</b>\n"
+                        f"Symbole: {SYMBOL}\n"
+                        f"Quantité: {total_sz}\n"
+                        f"Entry: {float(entry_ref):.4f}\n"
+                        f"Sortie: {avg_px:.4f}\n"
+                        f"PnL: {pnl_pct:.2f}%\n"
+                        f"Gain/perte approx: {pnl_usdc:.3f} USDC\n"
+                        f"Solde: {balance_after} USDC\n"
+                        f"Reduce only: {reduce_only}"
+                    )
+                else:
+                    notify_telegram(
+                        f"{emoji} <b>SELL exécuté</b>\n"
+                        f"Symbole: {SYMBOL}\n"
+                        f"Quantité: {total_sz}\n"
+                        f"Prix moyen: {avg_px:.4f}\n"
+                        f"Solde: {balance_after} USDC\n"
+                        f"Reduce only: {reduce_only}"
+                    )
+
             return True
 
         if statuses and "error" in statuses[0]:
@@ -459,6 +495,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Entry: {entry:.4f}\n"
             f"Prix: {current_price:.4f}\n"
             f"TP1: {tp1_price:.4f}\n"
+            f"PnL: {pnl_pct:.2f}%\n"
+            f"Solde: {round(get_balance(), 2)} USDC\n"
             f"Action: vente 50%"
         )
         if close_position_fraction(pos, 0.5, current_price):
@@ -473,7 +511,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Entry: {entry:.4f}\n"
             f"Prix: {current_price:.4f}\n"
             f"Stop: {hard_stop:.4f}\n"
-            f"PnL: {pnl_pct:.2f}%"
+            f"PnL: {pnl_pct:.2f}%\n"
+            f"Solde: {round(get_balance(), 2)} USDC"
         )
         if close_position_full(pos, current_price):
             reset_trade_state_after_sell(candle_time)
@@ -486,7 +525,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Entry: {entry:.4f}\n"
             f"Prix: {current_price:.4f}\n"
             f"Trail: {trailing:.4f}\n"
-            f"PnL: {pnl_pct:.2f}%"
+            f"PnL: {pnl_pct:.2f}%\n"
+            f"Solde: {round(get_balance(), 2)} USDC"
         )
         if close_position_full(pos, current_price):
             reset_trade_state_after_sell(candle_time)
@@ -499,7 +539,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Entry: {entry:.4f}\n"
             f"Prix: {current_price:.4f}\n"
             f"EMA20: {last['ema20']:.4f}\n"
-            f"PnL: {pnl_pct:.2f}%"
+            f"PnL: {pnl_pct:.2f}%\n"
+            f"Solde: {round(get_balance(), 2)} USDC"
         )
         if close_position_full(pos, current_price):
             reset_trade_state_after_sell(candle_time)
@@ -512,7 +553,7 @@ def manage_open_position(pos, df, current_price, candle_time):
 def run():
     global last_candle_time, META, SIZE_DECIMALS, trade_state
 
-    print("BOT SOL 15m V2.6 HYBRIDE - TELEGRAM")
+    print("BOT SOL 15m V2.7 TELEGRAM - PNL SOLDE")
     print("Long only | EMA20/EMA50 + RSI + ATR + OBV + VWAP + Breakout")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
@@ -531,7 +572,7 @@ def run():
     print("Solde:", start_balance, "USDC")
     print("---")
     notify_telegram(
-        "🤖 <b>BOT SOL V2.6 Telegram démarré</b>\n"
+        "🤖 <b>BOT SOL V2.7 Telegram démarré</b>\n"
         f"Solde: {start_balance} USDC\n"
         f"Taille trade: {TRADE_SIZE_USD} USDC"
     )
@@ -646,7 +687,8 @@ def run():
                     f"EMA20: {last['ema20']:.4f}\n"
                     f"EMA50: {last['ema50']:.4f}\n"
                     f"VWAP: {last['vwap']:.4f}\n"
-                    f"OBV: {last['obv']:.2f}"
+                    f"OBV: {last['obv']:.2f}\n"
+                    f"Solde avant ordre: {round(balance, 2)} USDC"
                 )
 
                 if place_order_usd("BUY", TRADE_SIZE_USD, current_price, reduce_only=False):
