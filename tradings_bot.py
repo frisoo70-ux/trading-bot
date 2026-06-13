@@ -407,7 +407,8 @@ def manage_open_position(pos, df, current_price, candle_time):
     if last["rsi"] >= RSI_OVERBOUGHT:
         trade_state["rsi_was_overbought"] = True
 
-    rsi_rollover = trade_state["rsi_was_overbought"] and last["rsi"] < RSI_EXIT_LEVEL
+    # Sortie RSI désactivée : le RSI sert uniquement au filtre d’achat.
+    rsi_rollover = False
     ema_break = last["close"] < last["ema20"]
     hard_stop_hit = current_price <= hard_stop
 
@@ -443,17 +444,14 @@ def manage_open_position(pos, df, current_price, candle_time):
             reset_trade_state_after_sell(candle_time)
         return
 
-    if rsi_rollover:
-        print("[SELL] RSI overbought puis retour sous 70.")
-        if close_position_full(pos, current_price):
-            reset_trade_state_after_sell(candle_time)
-        return
+    # Sortie RSI désactivée.
+    # On garde la position tant que le stop ATR, EMA20 ou le trailing ne sort pas.
 
 
 def run():
     global last_candle_time, META, SIZE_DECIMALS, trade_state
 
-    print("BOT SOL 15m V2.3 HYBRIDE")
+    print("BOT SOL 15m V2.4 HYBRIDE - SANS SORTIE RSI")
     print("Long only | EMA20/EMA50 + RSI + ATR + OBV + VWAP + Breakout")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
