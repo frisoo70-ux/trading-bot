@@ -17,6 +17,9 @@ import eth_account
 PRIVATE_KEY = os.environ.get("HL_API_SECRET")
 WALLET_ADDRESS = os.environ.get("HL_WALLET")
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
 SYMBOL = "SOL"
 TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
@@ -61,6 +64,20 @@ SIZE_DECIMALS = 2
 
 def round_price(price):
     return round(round(price / TICK_SIZE) * TICK_SIZE, 2)
+
+def notify_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print("[ERREUR TELEGRAM]", e)
 
 
 def info_post(payload):
@@ -273,10 +290,27 @@ def place_order_qty(side, qty, price, reduce_only=False):
 
         if result.get("status") == "ok" and statuses and "error" not in statuses[0]:
             print("[OK]", side, qty, SYMBOL, "@", lp)
+            filled = statuses[0].get("filled", {})
+            avg_px = filled.get("avgPx", lp)
+            total_sz = filled.get("totalSz", qty)
+            emoji = "🟢" if side == "BUY" else "🔴"
+            notify_telegram(
+                f"{emoji} <b>{side} exécuté</b>\n"
+                f"Symbole: {SYMBOL}\n"
+                f"Quantité: {total_sz}\n"
+                f"Prix moyen: {avg_px}\n"
+                f"Reduce only: {reduce_only}"
+            )
             return True
 
         if statuses and "error" in statuses[0]:
-            print("[ECHEC]", statuses[0]["error"])
+            error_msg = statuses[0]["error"]
+            print("[ECHEC]", error_msg)
+            notify_telegram(
+                f"⚠️ <b>Erreur ordre</b>\n"
+                f"Side: {side}\n"
+                f"Erreur: {error_msg}"
+            )
             return False
 
         print("[ECHEC]", result)
@@ -420,6 +454,13 @@ def manage_open_position(pos, df, current_price, candle_time):
     # TP1 : vendre 50 % une seule fois
     if not trade_state["tp1_done"] and current_price >= tp1_price:
         print("[TP1] Objectif +2 ATR atteint. Vente de 50%.")
+        notify_telegram(
+            f"🎯 <b>TP1 atteint</b>\n"
+            f"Entry: {entry:.4f}\n"
+            f"Prix: {current_price:.4f}\n"
+            f"TP1: {tp1_price:.4f}\n"
+            f"Action: vente 50%"
+        )
         if close_position_fraction(pos, 0.5, current_price):
             trade_state["tp1_done"] = True
         return
@@ -427,18 +468,39 @@ def manage_open_position(pos, df, current_price, candle_time):
     # Sorties complètes
     if hard_stop_hit:
         print("[SELL] Stop ATR touché.")
+        notify_telegram(
+            f"🛑 <b>Stop ATR touché</b>\n"
+            f"Entry: {entry:.4f}\n"
+            f"Prix: {current_price:.4f}\n"
+            f"Stop: {hard_stop:.4f}\n"
+            f"PnL: {pnl_pct:.2f}%"
+        )
         if close_position_full(pos, current_price):
             reset_trade_state_after_sell(candle_time)
         return
 
     if trailing_hit and trade_state["tp1_done"]:
         print("[SELL] Trailing stop ATR touché.")
+        notify_telegram(
+            f"📉 <b>Trailing stop touché</b>\n"
+            f"Entry: {entry:.4f}\n"
+            f"Prix: {current_price:.4f}\n"
+            f"Trail: {trailing:.4f}\n"
+            f"PnL: {pnl_pct:.2f}%"
+        )
         if close_position_full(pos, current_price):
             reset_trade_state_after_sell(candle_time)
         return
 
     if ema_break:
         print("[SELL] Clôture sous EMA20.")
+        notify_telegram(
+            f"📉 <b>Sortie EMA20</b>\n"
+            f"Entry: {entry:.4f}\n"
+            f"Prix: {current_price:.4f}\n"
+            f"EMA20: {last['ema20']:.4f}\n"
+            f"PnL: {pnl_pct:.2f}%"
+        )
         if close_position_full(pos, current_price):
             reset_trade_state_after_sell(candle_time)
         return
@@ -450,7 +512,7 @@ def manage_open_position(pos, df, current_price, candle_time):
 def run():
     global last_candle_time, META, SIZE_DECIMALS, trade_state
 
-    print("BOT SOL 15m V2.5 HYBRIDE - OBV MA5")
+    print("BOT SOL 15m V2.6 HYBRIDE - TELEGRAM")
     print("Long only | EMA20/EMA50 + RSI + ATR + OBV + VWAP + Breakout")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
@@ -465,8 +527,14 @@ def run():
     print("[INFO] META =", META)
     print("[INFO] SIZE_DECIMALS =", SIZE_DECIMALS)
     print("Wallet:", WALLET_ADDRESS[:8] + "...")
-    print("Solde:", round(get_balance(), 2), "USDC")
+    start_balance = round(get_balance(), 2)
+    print("Solde:", start_balance, "USDC")
     print("---")
+    notify_telegram(
+        "🤖 <b>BOT SOL V2.6 Telegram démarré</b>\n"
+        f"Solde: {start_balance} USDC\n"
+        f"Taille trade: {TRADE_SIZE_USD} USDC"
+    )
 
     trades = 0
 
@@ -561,10 +629,25 @@ def run():
 
                 if balance < TRADE_SIZE_USD:
                     print("[ECHEC] Solde insuffisant:", balance)
+                    notify_telegram(
+                        f"⚠️ <b>Solde insuffisant</b>\n"
+                        f"Solde: {balance:.2f} USDC\n"
+                        f"Trade demandé: {TRADE_SIZE_USD} USDC"
+                    )
                     time.sleep(CHECK_INTERVAL)
                     continue
 
                 print("[BUY SIGNAL] Achat agressif confirmé.")
+                notify_telegram(
+                    f"🚀 <b>BUY SIGNAL confirmé</b>\n"
+                    f"Prix: {current_price:.4f}\n"
+                    f"RSI: {last['rsi']:.2f}\n"
+                    f"ATR: {last['atr']:.4f}\n"
+                    f"EMA20: {last['ema20']:.4f}\n"
+                    f"EMA50: {last['ema50']:.4f}\n"
+                    f"VWAP: {last['vwap']:.4f}\n"
+                    f"OBV: {last['obv']:.2f}"
+                )
 
                 if place_order_usd("BUY", TRADE_SIZE_USD, current_price, reduce_only=False):
                     trades += 1
