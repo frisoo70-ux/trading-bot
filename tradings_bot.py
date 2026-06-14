@@ -470,18 +470,58 @@ def buy_signal(df):
     trend_ok = last["ema20"] > last["ema50"]
     rsi_ok = RSI_BUY_LEVEL < last["rsi"] < RSI_BUY_MAX
     vwap_ok = last["close"] > last["vwap"]
+
+    # OBV_MA5 :
+    # OBV actuel au-dessus de sa moyenne mobile 5.
     obv_rising = last["obv"] > last["obv_ma5"]
 
     breakout_level = max(prev1["high"], prev2["high"])
     breakout_ok = last["close"] > breakout_level
+
     green_candle = last["close"] > last["open"]
 
+    patt_score, patt_details = pattern_score(df)
+
+    # Force du breakout et du contexte
     breakout_strength = max(0, (last["close"] / breakout_level) - 1) if breakout_level > 0 else 0
     vwap_strength = max(0, (last["close"] / last["vwap"]) - 1) if last["vwap"] > 0 else 0
     obv_strength = max(0, (last["obv"] / last["obv_ma5"]) - 1) if last["obv_ma5"] and last["obv_ma5"] != 0 else 0
     rsi_score = max(0, 1 - abs(last["rsi"] - 62) / 10)
 
-    patt_score, patt_details = pattern_score(df)
+    # MODE A : signal classique, plus prudent
+    mode_a_ok = (
+        trend_ok
+        and rsi_ok
+        and vwap_ok
+        and obv_rising
+        and breakout_ok
+        and green_candle
+    )
+
+    # MODE B : pattern premium, plus agressif.
+    # Il peut acheter avant le croisement EMA20/EMA50 si la structure est forte.
+    # Conditions :
+    # - pattern_score >= 2.0
+    # - cassure confirmée
+    # - OBV au-dessus OBV_MA5
+    # - prix au-dessus VWAP
+    # - bougie verte
+    # - RSI pas surchauffé
+    mode_b_ok = (
+        patt_details["pattern_score"] >= 2.0
+        and breakout_ok
+        and obv_rising
+        and vwap_ok
+        and green_candle
+        and 45 < last["rsi"] < RSI_BUY_MAX
+    )
+
+    signal_mode = None
+
+    if mode_a_ok:
+        signal_mode = "MODE_A_CLASSIQUE"
+    elif mode_b_ok:
+        signal_mode = "MODE_B_PATTERN"
 
     score = (
         breakout_strength * 100
@@ -490,7 +530,12 @@ def buy_signal(df):
         + rsi_score
         + patt_score
     )
-    ok = trend_ok and rsi_ok and vwap_ok and obv_rising and breakout_ok and green_candle
+
+    # Bonus si signal pattern premium
+    if mode_b_ok:
+        score += 2.0
+
+    ok = mode_a_ok or mode_b_ok
 
     return ok, score, {
         "trend_ok": trend_ok,
@@ -501,6 +546,9 @@ def buy_signal(df):
         "green_candle": green_candle,
         "breakout_level": breakout_level,
         "score": score,
+        "signal_mode": signal_mode,
+        "mode_a_ok": mode_a_ok,
+        "mode_b_ok": mode_b_ok,
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -671,6 +719,9 @@ def scan_symbols_for_best_buy():
                 "compression": details["compression_breakout"],
                 "higher_lows": details["higher_lows"],
             },
+            "| mode:", details.get("signal_mode"),
+            "| mode_a:", details.get("mode_a_ok"),
+            "| mode_b:", details.get("mode_b_ok"),
             "| pattern_score:", round(details["pattern_score"], 4),
             "| score:", round(details["score"], 4),
         )
@@ -696,9 +747,9 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.1 PATTERNS - SOL / XRP / AAVE")
+    print("BOT MULTI V3.2 MODE A/B - SOL / XRP / AAVE")
     print("Long only | 15m | Une seule position à la fois")
-    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns")
+    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
     if not PRIVATE_KEY or not WALLET_ADDRESS:
@@ -720,7 +771,7 @@ def run():
     print("---")
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.1 Patterns démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.2 Mode A/B démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -796,6 +847,7 @@ def run():
                 f"Symbole: {symbol}\n"
                 f"Prix: {current_price:.5f}\n"
                 f"Score: {best['score']:.4f}\n"
+                f"Mode: {details.get('signal_mode')}\n"
                 f"RSI: {last['rsi']:.2f}\n"
                 f"ATR: {last['atr']:.5f}\n"
                 f"EMA20: {last['ema20']:.5f}\n"
