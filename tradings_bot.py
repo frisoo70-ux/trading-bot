@@ -513,7 +513,7 @@ def buy_signal(df):
         and obv_rising
         and vwap_ok
         and green_candle
-        and 45 < last["rsi"] < RSI_BUY_MAX
+        and 45 < last["rsi"] < 85
     )
 
     signal_mode = None
@@ -747,7 +747,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.2 MODE A/B - SOL / XRP / AAVE")
+    print("BOT MULTI V3.3 MODE B RSI 85 - SOL / XRP / AAVE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -771,7 +771,7 @@ def run():
     print("---")
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.2 Mode A/B démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.3 Mode B RSI 85 démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
