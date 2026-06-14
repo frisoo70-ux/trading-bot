@@ -374,6 +374,94 @@ def sync_state_with_position(pos):
         trade_state["trailing_stop"] = None
 
 
+
+def detect_bull_flag(df):
+    if len(df) < 25:
+        return False, 0
+
+    recent = df.iloc[-12:]
+    impulse = df.iloc[-24:-12]
+
+    impulse_move = (impulse["close"].iloc[-1] - impulse["close"].iloc[0]) / impulse["close"].iloc[0]
+    consolidation_range = (recent["high"].max() - recent["low"].min()) / recent["close"].iloc[-1]
+
+    highs_flat = recent["high"].max() <= impulse["high"].max() * 1.03
+    pullback_controlled = recent["low"].min() > impulse["close"].iloc[0]
+
+    ok = impulse_move > 0.012 and consolidation_range < 0.018 and highs_flat and pullback_controlled
+    score = 1.5 + min(impulse_move * 50, 1.5) if ok else 0
+
+    return ok, score
+
+
+def detect_ascending_triangle(df):
+    if len(df) < 10:
+        return False, 0
+
+    recent = df.iloc[-8:]
+    resistance = recent["high"].max()
+    resistance_tolerance = resistance * 0.004
+
+    highs_near_resistance = (resistance - recent["high"]).abs().mean() < resistance_tolerance * 2
+
+    lows = recent["low"].values
+    higher_lows = lows[-1] > lows[-3] > lows[-5]
+    close_near_resistance = recent["close"].iloc[-1] > resistance * 0.995
+
+    ok = highs_near_resistance and higher_lows and close_near_resistance
+    score = 2.0 if ok else 0
+
+    return ok, score
+
+
+def detect_compression_breakout(df):
+    if len(df) < 25:
+        return False, 0
+
+    recent = df.iloc[-8:]
+    previous = df.iloc[-20:-8]
+
+    recent_range = (recent["high"].max() - recent["low"].min()) / recent["close"].iloc[-1]
+    previous_range = (previous["high"].max() - previous["low"].min()) / previous["close"].iloc[-1]
+
+    range_contracting = recent_range < previous_range * 0.75
+    breakout = recent["close"].iloc[-1] > recent["high"].iloc[:-1].max()
+
+    ok = range_contracting and breakout
+    score = 1.8 if ok else 0
+
+    return ok, score
+
+
+def detect_higher_lows(df):
+    if len(df) < 8:
+        return False, 0
+
+    lows = df["low"].iloc[-6:].values
+    ok = lows[-1] > lows[-3] > lows[-5]
+    score = 1.0 if ok else 0
+
+    return ok, score
+
+
+def pattern_score(df):
+    bull_flag, bull_flag_score = detect_bull_flag(df)
+    triangle, triangle_score = detect_ascending_triangle(df)
+    compression, compression_score = detect_compression_breakout(df)
+    higher_lows, higher_lows_score = detect_higher_lows(df)
+
+    total = bull_flag_score + triangle_score + compression_score + higher_lows_score
+
+    return total, {
+        "bull_flag": bull_flag,
+        "ascending_triangle": triangle,
+        "compression_breakout": compression,
+        "higher_lows": higher_lows,
+        "pattern_score": total,
+    }
+
+
+
 def buy_signal(df):
     last = df.iloc[-1]
     prev1 = df.iloc[-2]
@@ -405,6 +493,11 @@ def buy_signal(df):
         "green_candle": green_candle,
         "breakout_level": breakout_level,
         "score": score,
+        "pattern_score": patt_details["pattern_score"],
+        "bull_flag": patt_details["bull_flag"],
+        "ascending_triangle": patt_details["ascending_triangle"],
+        "compression_breakout": patt_details["compression_breakout"],
+        "higher_lows": patt_details["higher_lows"],
     }
 
 
@@ -564,6 +657,13 @@ def scan_symbols_for_best_buy():
             "| breakout:", details["breakout_ok"],
             "| green:", details["green_candle"],
             "| breakout_level:", round(details["breakout_level"], 5),
+            "| patterns:", {
+                "bull_flag": details["bull_flag"],
+                "triangle": details["ascending_triangle"],
+                "compression": details["compression_breakout"],
+                "higher_lows": details["higher_lows"],
+            },
+            "| pattern_score:", round(details["pattern_score"], 4),
             "| score:", round(details["score"], 4),
         )
 
@@ -588,9 +688,9 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3 - SOL / XRP / AAVE")
+    print("BOT MULTI V3.1 PATTERNS - SOL / XRP / AAVE")
     print("Long only | 15m | Une seule position à la fois")
-    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout")
+    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
     if not PRIVATE_KEY or not WALLET_ADDRESS:
@@ -612,7 +712,7 @@ def run():
     print("---")
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3 démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.1 Patterns démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -695,6 +795,11 @@ def run():
                 f"VWAP: {last['vwap']:.5f}\n"
                 f"OBV: {last['obv']:.2f}\n"
                 f"OBV_MA5: {last['obv_ma5']:.2f}\n"
+                f"Pattern score: {details['pattern_score']:.2f}\n"
+                f"Bull flag: {details['bull_flag']}\n"
+                f"Triangle ascendant: {details['ascending_triangle']}\n"
+                f"Compression: {details['compression_breakout']}\n"
+                f"Higher lows: {details['higher_lows']}\n"
                 f"Solde avant ordre: {round(balance, 2)} USDC"
             )
 
