@@ -481,7 +481,15 @@ def buy_signal(df):
     obv_strength = max(0, (last["obv"] / last["obv_ma5"]) - 1) if last["obv_ma5"] and last["obv_ma5"] != 0 else 0
     rsi_score = max(0, 1 - abs(last["rsi"] - 62) / 10)
 
-    score = breakout_strength * 100 + vwap_strength * 10 + obv_strength * 2 + rsi_score
+    patt_score, patt_details = pattern_score(df)
+
+    score = (
+        breakout_strength * 100
+        + vwap_strength * 10
+        + obv_strength * 2
+        + rsi_score
+        + patt_score
+    )
     ok = trend_ok and rsi_ok and vwap_ok and obv_rising and breakout_ok and green_candle
 
     return ok, score, {
