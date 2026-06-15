@@ -68,6 +68,19 @@ trade_state = {
     "highest_price": None,
     "trailing_stop": None,
     "cooldown_until_candle": None,
+
+    # Infos pour résumé final Telegram
+    "entry_balance": None,
+    "signal_mode": None,
+    "score": None,
+    "pattern_score": None,
+    "bull_flag": None,
+    "ascending_triangle": None,
+    "compression_breakout": None,
+    "higher_lows": None,
+    "tp1_price": None,
+    "tp1_exec_price": None,
+    "tp1_qty": None,
 }
 
 META_BY_SYMBOL = {}
@@ -350,6 +363,7 @@ def close_position_full(pos, price):
 
 def reset_trade_state_after_sell(candle_time):
     global trade_state
+
     trade_state = {
         "in_position": False,
         "symbol": None,
@@ -359,6 +373,18 @@ def reset_trade_state_after_sell(candle_time):
         "highest_price": None,
         "trailing_stop": None,
         "cooldown_until_candle": candle_time + COOLDOWN_CANDLES_AFTER_SELL * 15 * 60 * 1000,
+
+        "entry_balance": None,
+        "signal_mode": None,
+        "score": None,
+        "pattern_score": None,
+        "bull_flag": None,
+        "ascending_triangle": None,
+        "compression_breakout": None,
+        "higher_lows": None,
+        "tp1_price": None,
+        "tp1_exec_price": None,
+        "tp1_qty": None,
     }
 
 
@@ -561,6 +587,56 @@ def buy_signal(df):
     }
 
 
+
+def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
+    """
+    Notification Telegram compacte à copier/coller dans ChatGPT après chaque trade complet.
+    """
+    entry = trade_state.get("entry_price")
+    entry_balance = trade_state.get("entry_balance")
+
+    if not entry:
+        return
+
+    pnl_pct = ((exit_price - entry) / entry) * 100
+    real_account_pnl = None
+
+    if entry_balance is not None:
+        real_account_pnl = final_balance - entry_balance
+
+    tp1_done = trade_state.get("tp1_done", False)
+    tp1_exec = trade_state.get("tp1_exec_price")
+    tp1_price = trade_state.get("tp1_price")
+
+    msg = (
+        f"📋 <b>RÉSUMÉ TRADE COMPLET</b>\n"
+        f"Symbole: {symbol}\n"
+        f"Mode: {trade_state.get('signal_mode')}\n"
+        f"Score: {trade_state.get('score')}\n"
+        f"Pattern score: {trade_state.get('pattern_score')}\n"
+        f"Bull flag: {trade_state.get('bull_flag')}\n"
+        f"Triangle ascendant: {trade_state.get('ascending_triangle')}\n"
+        f"Compression: {trade_state.get('compression_breakout')}\n"
+        f"Higher lows: {trade_state.get('higher_lows')}\n"
+        f"Entry: {entry:.5f}\n"
+        f"Sortie finale: {exit_price:.5f}\n"
+        f"Raison sortie finale: {exit_reason}\n"
+        f"TP1 atteint: {tp1_done}\n"
+        f"TP1 théorique: {tp1_price if tp1_price is not None else 'N/A'}\n"
+        f"TP1 exécuté: {tp1_exec if tp1_exec is not None else 'N/A'}\n"
+        f"PnL final prix: {pnl_pct:.2f}%\n"
+        f"Solde avant trade: {entry_balance if entry_balance is not None else 'N/A'} USDC\n"
+        f"Solde après trade: {final_balance} USDC\n"
+    )
+
+    if real_account_pnl is not None:
+        msg += f"Résultat réel compte: {real_account_pnl:.3f} USDC\n"
+
+    msg += "Copier ce message dans ChatGPT pour analyse."
+
+    notify_telegram(msg)
+
+
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
@@ -613,6 +689,10 @@ def manage_open_position(pos, df, current_price, candle_time):
     )
 
     if not trade_state["tp1_done"] and current_price >= tp1_price:
+        LAST_SELL_REASON = "TP1_PARTIAL"
+        trade_state["tp1_price"] = round(tp1_price, 5)
+        trade_state["tp1_exec_price"] = round(current_price, 5)
+        trade_state["tp1_qty"] = abs(pos["size"]) * 0.5
         print("[TP1] Objectif +2 ATR atteint. Vente de 50%.")
         notify_telegram(
             f"🎯 <b>TP1 atteint</b>\n"
@@ -641,6 +721,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Solde: {round(get_balance(), 2)} USDC"
         )
         if close_position_full(pos, current_price):
+            final_balance = round(get_balance(), 2)
+            send_trade_summary(symbol, current_price, LAST_SELL_REASON or "ATR_STOP", final_balance)
             reset_trade_state_after_sell(candle_time)
         return
 
@@ -657,6 +739,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Solde: {round(get_balance(), 2)} USDC"
         )
         if close_position_full(pos, current_price):
+            final_balance = round(get_balance(), 2)
+            send_trade_summary(symbol, current_price, LAST_SELL_REASON or "TRAILING_STOP", final_balance)
             reset_trade_state_after_sell(candle_time)
         return
 
@@ -673,6 +757,8 @@ def manage_open_position(pos, df, current_price, candle_time):
             f"Solde: {round(get_balance(), 2)} USDC"
         )
         if close_position_full(pos, current_price):
+            final_balance = round(get_balance(), 2)
+            send_trade_summary(symbol, current_price, LAST_SELL_REASON or "EMA20_2_CLOSES", final_balance)
             reset_trade_state_after_sell(candle_time)
         return
 
@@ -760,7 +846,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.4 EMA20x2 + SELL REASON")
+    print("BOT MULTI V3.5 TRADE SUMMARY")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -784,7 +870,7 @@ def run():
     print("---")
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.4 EMA20x2 + Sell reason démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.5 Trade Summary démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -887,6 +973,19 @@ def run():
                 trade_state["highest_price"] = current_price
                 trade_state["trailing_stop"] = None
                 trade_state["cooldown_until_candle"] = None
+
+                # Sauvegarde infos signal pour résumé final Telegram
+                trade_state["entry_balance"] = round(balance, 2)
+                trade_state["signal_mode"] = details.get("signal_mode")
+                trade_state["score"] = round(best["score"], 4)
+                trade_state["pattern_score"] = round(details.get("pattern_score", 0), 4)
+                trade_state["bull_flag"] = details.get("bull_flag")
+                trade_state["ascending_triangle"] = details.get("ascending_triangle")
+                trade_state["compression_breakout"] = details.get("compression_breakout")
+                trade_state["higher_lows"] = details.get("higher_lows")
+                trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
+                trade_state["tp1_exec_price"] = None
+                trade_state["tp1_qty"] = None
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
 
             time.sleep(CHECK_INTERVAL)
