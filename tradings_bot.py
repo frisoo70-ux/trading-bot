@@ -73,6 +73,7 @@ trade_state = {
 META_BY_SYMBOL = {}
 SIZE_DECIMALS_BY_SYMBOL = {symbol: 2 for symbol in SYMBOLS}
 LAST_ENTRY_PRICE_BY_SYMBOL = {symbol: None for symbol in SYMBOLS}
+LAST_SELL_REASON = None
 
 
 def notify_telegram(message):
@@ -237,7 +238,7 @@ def add_indicators(df):
 
 
 def place_order_qty(symbol, side, qty, price, reduce_only=False):
-    global LAST_ENTRY_PRICE_BY_SYMBOL
+    global LAST_ENTRY_PRICE_BY_SYMBOL, LAST_SELL_REASON
     try:
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
@@ -278,6 +279,7 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
             emoji = "🟢" if side == "BUY" else "🔴"
 
             if side == "BUY":
+                LAST_SELL_REASON = None
                 LAST_ENTRY_PRICE_BY_SYMBOL[symbol] = avg_px
                 notify_telegram(
                     f"{emoji} <b>BUY exécuté</b>\n"
@@ -295,6 +297,7 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
                     notify_telegram(
                         f"{emoji} <b>SELL exécuté</b>\n"
                         f"Symbole: {symbol}\n"
+                        f"Raison: {LAST_SELL_REASON or 'NON_SPECIFIEE'}\n"
                         f"Quantité: {total_sz}\n"
                         f"Entry: {float(entry_ref):.5f}\n"
                         f"Sortie: {avg_px:.5f}\n"
@@ -307,6 +310,7 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
                     notify_telegram(
                         f"{emoji} <b>SELL exécuté</b>\n"
                         f"Symbole: {symbol}\n"
+                        f"Raison: {LAST_SELL_REASON or 'NON_SPECIFIEE'}\n"
                         f"Quantité: {total_sz}\n"
                         f"Prix moyen: {avg_px:.5f}\n"
                         f"Solde: {balance_after} USDC\n"
@@ -558,7 +562,7 @@ def buy_signal(df):
 
 
 def manage_open_position(pos, df, current_price, candle_time):
-    global trade_state
+    global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
     last = df.iloc[-1]
 
@@ -593,7 +597,13 @@ def manage_open_position(pos, df, current_price, candle_time):
         trailing_hit = False
         trailing_display = "INACTIF avant TP1"
 
-    ema_break = last["close"] < last["ema20"]
+    # Sortie EMA20 moins agressive :
+    # on vend uniquement après 2 clôtures 15 min consécutives sous EMA20.
+    prev = df.iloc[-2]
+    ema_break = (
+        last["close"] < last["ema20"]
+        and prev["close"] < prev["ema20"]
+    )
     hard_stop_hit = current_price <= hard_stop
 
     print(
@@ -619,6 +629,7 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
     if hard_stop_hit:
+        LAST_SELL_REASON = "ATR_STOP"
         print("[SELL] Stop ATR touché.")
         notify_telegram(
             f"🛑 <b>Stop ATR touché</b>\n"
@@ -634,6 +645,7 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
     if trailing_hit and trade_state["tp1_done"]:
+        LAST_SELL_REASON = "TRAILING_STOP"
         print("[SELL] Trailing stop ATR touché.")
         notify_telegram(
             f"📉 <b>Trailing stop touché</b>\n"
@@ -649,9 +661,10 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
     if ema_break:
-        print("[SELL] Clôture sous EMA20.")
+        LAST_SELL_REASON = "EMA20_2_CLOSES"
+        print("[SELL] 2 clôtures consécutives sous EMA20.")
         notify_telegram(
-            f"📉 <b>Sortie EMA20</b>\n"
+            f"📉 <b>Sortie EMA20 - 2 clôtures</b>\n"
             f"Symbole: {symbol}\n"
             f"Entry: {entry:.5f}\n"
             f"Prix: {current_price:.5f}\n"
@@ -747,7 +760,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.3 MODE B RSI 85 - SOL / XRP / AAVE")
+    print("BOT MULTI V3.4 EMA20x2 + SELL REASON")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -771,7 +784,7 @@ def run():
     print("---")
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.3 Mode B RSI 85 démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.4 EMA20x2 + Sell reason démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
