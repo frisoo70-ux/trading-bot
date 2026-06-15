@@ -824,6 +824,7 @@ def run():
             confirmed_time = best["confirmed_time"]
             current_price = best["current_price"]
             last = best["last"]
+            details = best["details"]
 
             if cooldown_until and confirmed_time < cooldown_until:
                 print("[COOLDOWN] Attente après vente.")
