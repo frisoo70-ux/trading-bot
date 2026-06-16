@@ -4,6 +4,8 @@ import requests
 import pandas as pd
 from datetime import datetime
 import os
+import csv
+from pathlib import Path
 import eth_account
 
 # ============================================================
@@ -40,6 +42,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SYMBOLS = ["SOL", "XRP", "AAVE"]
 TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
+
+TRADES_CSV_PATH = Path("trades.csv")
+LAST_MONTHLY_REPORT_FILE = Path("last_monthly_report.txt")
 
 BASE_URL = "https://api.hyperliquid.xyz"
 
@@ -98,6 +103,206 @@ def notify_telegram(message):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print("[ERREUR TELEGRAM]", e)
+
+
+
+def send_telegram_document(file_path, caption=""):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+        with open(file_path, "rb") as f:
+            files = {"document": f}
+            data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption
+            }
+            requests.post(url, data=data, files=files, timeout=30)
+    except Exception as e:
+        print("[ERREUR TELEGRAM DOCUMENT]", e)
+
+
+def ensure_trades_csv():
+    if TRADES_CSV_PATH.exists():
+        return
+
+    headers = [
+        "date",
+        "symbol",
+        "mode",
+        "score",
+        "pattern_score",
+        "bull_flag",
+        "ascending_triangle",
+        "compression_breakout",
+        "higher_lows",
+        "entry",
+        "exit",
+        "exit_reason",
+        "tp1_done",
+        "tp1_price",
+        "tp1_exec_price",
+        "pnl_price_pct",
+        "balance_before",
+        "balance_after",
+        "real_pnl_usdc",
+    ]
+
+    with open(TRADES_CSV_PATH, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+
+def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
+    ensure_trades_csv()
+
+    entry = trade_state.get("entry_price")
+    entry_balance = trade_state.get("entry_balance")
+
+    if not entry:
+        return None
+
+    pnl_pct = ((exit_price - entry) / entry) * 100
+    real_pnl = ""
+
+    if entry_balance is not None:
+        real_pnl = final_balance - entry_balance
+
+    row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        symbol,
+        trade_state.get("signal_mode"),
+        trade_state.get("score"),
+        trade_state.get("pattern_score"),
+        trade_state.get("bull_flag"),
+        trade_state.get("ascending_triangle"),
+        trade_state.get("compression_breakout"),
+        trade_state.get("higher_lows"),
+        round(entry, 8),
+        round(exit_price, 8),
+        exit_reason,
+        trade_state.get("tp1_done"),
+        trade_state.get("tp1_price"),
+        trade_state.get("tp1_exec_price"),
+        round(pnl_pct, 4),
+        entry_balance,
+        final_balance,
+        round(real_pnl, 6) if real_pnl != "" else "",
+    ]
+
+    with open(TRADES_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
+
+    return row
+
+
+def load_trades_dataframe():
+    ensure_trades_csv()
+
+    try:
+        df = pd.read_csv(TRADES_CSV_PATH)
+        if df.empty:
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        print("[ERREUR CSV READ]", e)
+        return pd.DataFrame()
+
+
+def build_report_message(df=None, title="📊 RAPPORT TRADES"):
+    if df is None:
+        df = load_trades_dataframe()
+
+    if df.empty:
+        return f"{title}\nAucun trade enregistré."
+
+    total = len(df)
+    pnl = pd.to_numeric(df["real_pnl_usdc"], errors="coerce").fillna(0)
+    wins = int((pnl > 0).sum())
+    losses = int((pnl < 0).sum())
+    win_rate = (wins / total) * 100 if total else 0
+    pnl_total = pnl.sum()
+
+    msg = (
+        f"{title}\n"
+        f"Trades: {total}\n"
+        f"Gagnants: {wins}\n"
+        f"Perdants: {losses}\n"
+        f"Win rate: {win_rate:.1f}%\n"
+        f"PnL total réel: {pnl_total:.3f} USDC\n"
+    )
+
+    try:
+        by_symbol = df.assign(real_pnl_usdc=pnl).groupby("symbol")["real_pnl_usdc"].sum()
+        msg += "\nPar coin:\n"
+        for symbol, value in by_symbol.items():
+            msg += f"- {symbol}: {value:.3f} USDC\n"
+    except Exception:
+        pass
+
+    try:
+        by_mode = df.assign(real_pnl_usdc=pnl).groupby("mode")["real_pnl_usdc"].sum()
+        msg += "\nPar mode:\n"
+        for mode, value in by_mode.items():
+            msg += f"- {mode}: {value:.3f} USDC\n"
+    except Exception:
+        pass
+
+    try:
+        tp1_rate = (df["tp1_done"].astype(str).str.lower() == "true").mean() * 100
+        msg += f"\nTP1 atteint: {tp1_rate:.1f}% des trades\n"
+    except Exception:
+        pass
+
+    return msg
+
+
+def maybe_send_monthly_report():
+    """
+    Envoie un rapport mensuel une fois par mois.
+    Railway doit rester actif pour que cette vérification se fasse.
+    """
+    now = datetime.now()
+
+    # Rapport le 1er du mois uniquement
+    if now.day != 1:
+        return
+
+    current_month_key = now.strftime("%Y-%m")
+
+    if LAST_MONTHLY_REPORT_FILE.exists():
+        last_sent = LAST_MONTHLY_REPORT_FILE.read_text(encoding="utf-8").strip()
+        if last_sent == current_month_key:
+            return
+
+    df = load_trades_dataframe()
+
+    if df.empty:
+        return
+
+    # Rapport sur le mois précédent
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    first_day_current_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    previous_month_end = first_day_current_month
+    previous_month_start = (first_day_current_month - pd.DateOffset(months=1)).to_pydatetime()
+
+    monthly = df[(df["date"] >= previous_month_start) & (df["date"] < previous_month_end)].copy()
+
+    if monthly.empty:
+        LAST_MONTHLY_REPORT_FILE.write_text(current_month_key, encoding="utf-8")
+        return
+
+    report = build_report_message(
+        monthly,
+        title=f"📊 RAPPORT MENSUEL {previous_month_start.strftime('%Y-%m')}"
+    )
+
+    notify_telegram(report)
+    send_telegram_document(TRADES_CSV_PATH, caption="📎 Fichier trades.csv complet")
+    LAST_MONTHLY_REPORT_FILE.write_text(current_month_key, encoding="utf-8")
+
 
 
 def info_post(payload):
@@ -636,6 +841,11 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
 
     notify_telegram(msg)
 
+    # Journal CSV + rapport stats + envoi fichier Telegram
+    append_trade_to_csv(symbol, exit_price, exit_reason, final_balance)
+    notify_telegram(build_report_message(title="📊 RAPPORT ACTUEL"))
+    send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv mis à jour")
+
 
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
@@ -846,7 +1056,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.5 TRADE SUMMARY")
+    print("BOT MULTI V3.6 ANALYTICS CSV")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -868,9 +1078,10 @@ def run():
     start_balance = round(get_balance(), 2)
     print("Solde:", start_balance, "USDC")
     print("---")
+    ensure_trades_csv()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.5 Trade Summary démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.6 Analytics CSV démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -881,6 +1092,7 @@ def run():
 
     while True:
         try:
+            maybe_send_monthly_report()
             pos = get_open_position()
             sync_state_with_position(pos)
 
