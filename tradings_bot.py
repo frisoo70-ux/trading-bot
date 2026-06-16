@@ -565,7 +565,6 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
 
             if side == "BUY":
                 LAST_SELL_REASON = None
-TELEGRAM_LAST_UPDATE_ID = None
                 LAST_ENTRY_PRICE_BY_SYMBOL[symbol] = avg_px
                 notify_telegram(
                     f"{emoji} <b>BUY exécuté</b>\n"
