@@ -92,6 +92,7 @@ META_BY_SYMBOL = {}
 SIZE_DECIMALS_BY_SYMBOL = {symbol: 2 for symbol in SYMBOLS}
 LAST_ENTRY_PRICE_BY_SYMBOL = {symbol: None for symbol in SYMBOLS}
 LAST_SELL_REASON = None
+TELEGRAM_LAST_UPDATE_ID = None
 
 
 def notify_telegram(message):
@@ -257,6 +258,72 @@ def build_report_message(df=None, title="📊 RAPPORT TRADES"):
         pass
 
     return msg
+
+
+
+def check_telegram_commands():
+    """
+    Lit les commandes envoyées au bot Telegram.
+    Commandes disponibles :
+    /report : envoie le rapport actuel
+    /csv    : envoie trades.csv
+    /help   : aide
+    """
+    global TELEGRAM_LAST_UPDATE_ID
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        params = {
+            "timeout": 1,
+            "limit": 10
+        }
+
+        if TELEGRAM_LAST_UPDATE_ID is not None:
+            params["offset"] = TELEGRAM_LAST_UPDATE_ID + 1
+
+        r = requests.get(url, params=params, timeout=5)
+        data = r.json()
+
+        if not data.get("ok"):
+            return
+
+        for update in data.get("result", []):
+            TELEGRAM_LAST_UPDATE_ID = update.get("update_id", TELEGRAM_LAST_UPDATE_ID)
+
+            message = update.get("message", {})
+            chat = message.get("chat", {})
+            chat_id = str(chat.get("id"))
+
+            # Sécurité : répondre uniquement à ton chat Telegram configuré.
+            if chat_id != str(TELEGRAM_CHAT_ID):
+                continue
+
+            text_msg = (message.get("text") or "").strip().lower()
+
+            if text_msg == "/report":
+                notify_telegram(build_report_message(title="📊 RAPPORT ACTUEL"))
+                continue
+
+            if text_msg == "/csv":
+                ensure_trades_csv()
+                send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv actuel")
+                continue
+
+            if text_msg == "/help":
+                notify_telegram(
+                    "🤖 <b>Commandes disponibles</b>\n"
+                    "/report - Rapport actuel\n"
+                    "/csv - Recevoir le fichier trades.csv\n"
+                    "/help - Afficher cette aide"
+                )
+                continue
+
+    except Exception as e:
+        print("[ERREUR TELEGRAM COMMANDS]", e)
+
 
 
 def maybe_send_monthly_report():
@@ -498,6 +565,7 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
 
             if side == "BUY":
                 LAST_SELL_REASON = None
+TELEGRAM_LAST_UPDATE_ID = None
                 LAST_ENTRY_PRICE_BY_SYMBOL[symbol] = avg_px
                 notify_telegram(
                     f"{emoji} <b>BUY exécuté</b>\n"
@@ -1056,7 +1124,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.6 ANALYTICS CSV")
+    print("BOT MULTI V3.7 TELEGRAM COMMANDS")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1081,17 +1149,19 @@ def run():
     ensure_trades_csv()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.6 Analytics CSV démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.7 Telegram Commands démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
-        f"Taille trade: {TRADE_SIZE_USD} USDC"
+        f"Taille trade: {TRADE_SIZE_USD} USDC\n"
+        f"Commandes: /report /csv /help"
     )
 
     trades = 0
 
     while True:
         try:
+            check_telegram_commands()
             maybe_send_monthly_report()
             pos = get_open_position()
             sync_state_with_position(pos)
