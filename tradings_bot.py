@@ -1038,6 +1038,66 @@ def buy_signal(df):
 
 
 
+
+def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
+    """
+    Envoie le résumé complet du trade, ajoute la ligne dans trades.csv,
+    envoie le rapport actuel et le fichier CSV sur Telegram.
+    """
+    entry = trade_state.get("entry_price")
+    entry_balance = trade_state.get("entry_balance")
+
+    if not entry:
+        return
+
+    pnl_pct = ((exit_price - entry) / entry) * 100
+    real_account_pnl = None
+
+    if entry_balance is not None:
+        real_account_pnl = final_balance - entry_balance
+
+    tp1_done = trade_state.get("tp1_done", False)
+    tp1_exec = trade_state.get("tp1_exec_price")
+    tp1_price = trade_state.get("tp1_price")
+
+    msg = (
+        f"📋 <b>RÉSUMÉ TRADE COMPLET</b>\n"
+        f"Symbole: {symbol}\n"
+        f"Mode: {trade_state.get('signal_mode')}\n"
+        f"Score: {trade_state.get('score')}\n"
+        f"Pattern score: {trade_state.get('pattern_score')}\n"
+        f"Bull flag: {trade_state.get('bull_flag')}\n"
+        f"Triangle ascendant: {trade_state.get('ascending_triangle')}\n"
+        f"Compression: {trade_state.get('compression_breakout')}\n"
+        f"Higher lows: {trade_state.get('higher_lows')}\n"
+        f"TP Structure indicatif: {trade_state.get('tp_structure')}\n"
+        f"Mode C Reversal: {trade_state.get('mode_c_reversal')}\n"
+        f"Mode C Drop: {trade_state.get('mode_c_drop_pct')}%\n"
+        f"Mode B early: {trade_state.get('mode_b_early_ok')}\n"
+        f"EMA gap: {trade_state.get('ema_gap_pct')}%\n"
+        f"Entry: {entry:.5f}\n"
+        f"Sortie finale: {exit_price:.5f}\n"
+        f"Raison sortie finale: {exit_reason}\n"
+        f"TP1 atteint: {tp1_done}\n"
+        f"TP1 théorique: {tp1_price if tp1_price is not None else 'N/A'}\n"
+        f"TP1 exécuté: {tp1_exec if tp1_exec is not None else 'N/A'}\n"
+        f"PnL final prix: {pnl_pct:.2f}%\n"
+        f"Solde avant trade: {entry_balance if entry_balance is not None else 'N/A'} USDC\n"
+        f"Solde après trade: {final_balance} USDC\n"
+    )
+
+    if real_account_pnl is not None:
+        msg += f"Résultat réel compte: {real_account_pnl:.3f} USDC\n"
+
+    msg += "Copier ce message dans ChatGPT pour analyse."
+
+    notify_telegram(msg)
+
+    append_trade_to_csv(symbol, exit_price, exit_reason, final_balance)
+    notify_telegram(build_report_message(title="📊 RAPPORT ACTUEL"))
+    send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv mis à jour")
+
+
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
@@ -1252,7 +1312,7 @@ def run():
 
     print("BOT MULTI V3.10 MODE C SOFT + MODE B EARLY")
     print("Long only | 15m | Une seule position à la fois")
-    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
+    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
     if not PRIVATE_KEY or not WALLET_ADDRESS:
