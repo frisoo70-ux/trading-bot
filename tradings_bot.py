@@ -71,6 +71,12 @@ COOLDOWN_CANDLES_AFTER_SELL = 2
 
 last_candle_times = {symbol: None for symbol in SYMBOLS}
 
+# Historique en mémoire pour commandes Telegram /analysis et /log
+ANALYSIS_HISTORY = []
+LOG_HISTORY = []
+MAX_ANALYSIS_HISTORY = 500
+MAX_LOG_HISTORY = 300
+
 trade_state = {
     "in_position": False,
     "symbol": None,
@@ -115,6 +121,146 @@ def notify_telegram(message):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print("[ERREUR TELEGRAM]", e)
+
+
+
+
+def add_log_line(line):
+    """
+    Stocke une ligne de log en mémoire pour la commande /log.
+    """
+    try:
+        LOG_HISTORY.append(str(line))
+        if len(LOG_HISTORY) > MAX_LOG_HISTORY:
+            del LOG_HISTORY[:-MAX_LOG_HISTORY]
+    except Exception:
+        pass
+
+
+def add_analysis_entry(symbol, last, current_price, details, signal_text):
+    """
+    Stocke les infos utiles d'une bougie clôturée pour /analysis.
+    """
+    try:
+        ANALYSIS_HISTORY.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "symbol": symbol,
+            "signal": signal_text,
+            "close": float(last["close"]),
+            "current": float(current_price),
+            "ema20": float(last["ema20"]),
+            "ema50": float(last["ema50"]),
+            "rsi": float(last["rsi"]),
+            "atr": float(last["atr"]),
+            "vwap": float(last["vwap"]),
+            "obv": float(last["obv"]),
+            "obv_ma5": float(last["obv_ma5"]),
+            "trend": bool(details.get("trend_ok")),
+            "rsi_ok": bool(details.get("rsi_ok")),
+            "vwap_ok": bool(details.get("vwap_ok")),
+            "obv_ok": bool(details.get("obv_rising")),
+            "breakout": bool(details.get("breakout_ok")),
+            "green": bool(details.get("green_candle")),
+            "mode": details.get("signal_mode"),
+            "mode_a": bool(details.get("mode_a_ok")),
+            "mode_b": bool(details.get("mode_b_ok")),
+            "mode_c": bool(details.get("mode_c_ok")),
+            "pattern_score": float(details.get("pattern_score", 0)),
+            "score": float(details.get("score", 0)),
+            "bull_flag": bool(details.get("bull_flag")),
+            "triangle": bool(details.get("ascending_triangle")),
+            "compression": bool(details.get("compression_breakout")),
+            "higher_lows": bool(details.get("higher_lows")),
+            "mode_c_drop_pct": details.get("mode_c_drop_pct"),
+        })
+
+        if len(ANALYSIS_HISTORY) > MAX_ANALYSIS_HISTORY:
+            del ANALYSIS_HISTORY[:-MAX_ANALYSIS_HISTORY]
+    except Exception as e:
+        print("[ERREUR ANALYSIS HISTORY]", e)
+
+
+def split_telegram_message(text, max_len=3500):
+    """
+    Telegram limite la taille des messages. On découpe proprement.
+    """
+    chunks = []
+    text = str(text)
+
+    while len(text) > max_len:
+        cut = text.rfind("\\n", 0, max_len)
+        if cut == -1:
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\\n")
+
+    if text:
+        chunks.append(text)
+
+    return chunks
+
+
+def send_long_telegram_message(text):
+    for chunk in split_telegram_message(text):
+        notify_telegram(chunk)
+
+
+def build_analysis_message(limit=20):
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 20
+
+    limit = max(5, min(limit, 120))
+
+    if not ANALYSIS_HISTORY:
+        return "📊 ANALYSIS\\nAucun historique disponible depuis le dernier redémarrage."
+
+    msg = f"📊 <b>ANALYSIS {limit} dernières bougies par coin</b>\\n"
+    msg += "Timeframe: 15m\\n"
+
+    for symbol in SYMBOLS:
+        rows = [x for x in ANALYSIS_HISTORY if x.get("symbol") == symbol][-limit:]
+
+        msg += f"\\n<b>{symbol}</b>\\n"
+
+        if not rows:
+            msg += "Aucune donnée.\\n"
+            continue
+
+        for r in rows:
+            mode = r.get("mode") or "None"
+            sig = r.get("signal") or "HOLD"
+
+            msg += (
+                f"{r['time'][-5:]} | {sig} | "
+                f"C={r['close']:.5f} | RSI={r['rsi']:.1f} | "
+                f"E20={r['ema20']:.5f} E50={r['ema50']:.5f} | "
+                f"VWAP={r['vwap']:.5f} | "
+                f"T={r['trend']} V={r['vwap_ok']} OBV={r['obv_ok']} "
+                f"BR={r['breakout']} G={r['green']} | "
+                f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} | "
+                f"Pat={r['pattern_score']:.1f} Score={r['score']:.2f} | "
+                f"Mode={mode}\\n"
+            )
+
+    return msg
+
+
+def build_log_message(limit=100):
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 100
+
+    limit = max(20, min(limit, 250))
+
+    if not LOG_HISTORY:
+        return "📋 LOG\\nAucun log disponible depuis le dernier redémarrage."
+
+    rows = LOG_HISTORY[-limit:]
+
+    return "📋 <b>DERNIERS LOGS</b>\\n" + "\\n".join(rows)
 
 
 
@@ -385,12 +531,39 @@ def check_telegram_commands():
                 send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv actuel")
                 continue
 
+            if cmd.startswith("/analysis"):
+                parts = raw_text.strip().split()
+                limit = 20
+                if len(parts) >= 2:
+                    try:
+                        limit = int(parts[1])
+                    except Exception:
+                        limit = 20
+                send_long_telegram_message(build_analysis_message(limit))
+                continue
+
+            if cmd.startswith("/log"):
+                parts = raw_text.strip().split()
+                limit = 100
+                if len(parts) >= 2:
+                    try:
+                        limit = int(parts[1])
+                    except Exception:
+                        limit = 100
+                send_long_telegram_message(build_log_message(limit))
+                continue
+
             if cmd == "/help":
                 notify_telegram(
                     "🤖 <b>Commandes disponibles</b>\n"
                     "/report ou report - Rapport actuel\n"
                     "/stats ou stats - Rapport actuel\n"
                     "/csv ou csv - Recevoir trades.csv\n"
+                    "/analysis - 20 dernières bougies par coin\n"
+                    "/analysis 40 - 40 dernières bougies par coin\n"
+                    "/analysis 96 - 24h de bougies par coin\n"
+                    "/log - 100 dernières lignes de log\n"
+                    "/log 200 - 200 dernières lignes de log\n"
                     "/help ou help - Afficher cette aide"
                 )
                 continue
@@ -1242,6 +1415,22 @@ def scan_symbols_for_best_buy():
             "| score:", round(details["score"], 4),
         )
 
+        signal_text = "BUY" if ok else "HOLD"
+        add_analysis_entry(symbol, last, current_price, details, signal_text)
+
+        add_log_line(
+            f"[CANDLE CLOSE] {now} {symbol} Close={last['close']:.5f} Current={current_price:.5f} "
+            f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} RSI={last['rsi']:.2f} "
+            f"ATR={last['atr']:.5f} VWAP={last['vwap']:.5f} OBV={last['obv']:.2f} OBV_MA5={last['obv_ma5']:.2f}"
+        )
+        add_log_line(
+            f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} rsi={details['rsi_ok']} "
+            f"vwap={details['vwap_ok']} obv={details['obv_rising']} breakout={details['breakout_ok']} "
+            f"green={details['green_candle']} mode={details.get('signal_mode')} "
+            f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} "
+            f"pattern_score={round(details['pattern_score'], 4)} score={round(details['score'], 4)}"
+        )
+
         if ok:
             candidates.append({
                 "symbol": symbol,
@@ -1263,7 +1452,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8C STABLE + MODE C")
+    print("BOT MULTI V3.8D MODE C + ANALYSIS LOG")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1289,12 +1478,12 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8C Stable + Mode C démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8D Mode C + Analysis Log démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
         f"Taille trade: {TRADE_SIZE_USD} USDC\n"
-        f"Commandes: /report /csv /help"
+        f"Commandes: /report /csv /analysis /log /help"
     )
 
     trades = 0
@@ -1328,6 +1517,12 @@ def run():
                     f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} "
                     f"RSI={last['rsi']:.2f} ATR={last['atr']:.5f} "
                     f"VWAP={last['vwap']:.5f} OBV={last['obv']:.2f}"
+                )
+
+                add_log_line(
+                    f"[POSITION CHECK] {now} {symbol} Close={last['close']:.5f} Current={current_price:.5f} "
+                    f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} RSI={last['rsi']:.2f} "
+                    f"ATR={last['atr']:.5f} VWAP={last['vwap']:.5f} OBV={last['obv']:.2f}"
                 )
 
                 manage_open_position(pos, df, current_price, confirmed_time)
