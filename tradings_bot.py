@@ -61,7 +61,7 @@ ATR_TP_MULT = 2.0
 ATR_TRAIL_MULT = 1.0
 
 # MODE C - Capitulation / Reversal après forte baisse
-MODE_C_RSI_MAX = 35
+MODE_C_RSI_MAX = 40
 MODE_C_DROP_LOOKBACK = 8
 MODE_C_MIN_DROP_PCT = 0.035
 MODE_C_VOLUME_MULT = 1.2
@@ -971,11 +971,14 @@ def buy_signal(df):
 
     ema_gap_pct = abs(last["ema20"] - last["ema50"]) / last["close"] if last["close"] > 0 else 1
 
+    # V3.11 : Mode B Early assoupli.
+    # Permet d'acheter une compression/breakout même si le pattern_score n'est que 1.8,
+    # à condition que EMA20/EMA50 soient très proches et que le momentum revienne.
     mode_b_early_ok = (
-        patt_details["pattern_score"] >= 3.0
-        and patt_details["higher_lows"]
+        patt_details["pattern_score"] >= 1.8
         and obv_rising
         and green_candle
+        and breakout_ok
         and ema_gap_pct <= MODE_B_MAX_EMA_GAP_PCT
         and 40 < last["rsi"] < 85
     )
@@ -1310,7 +1313,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.10 MODE C SOFT + MODE B EARLY")
+    print("BOT MULTI V3.11 MODE C RSI40 + B EARLY SOFT")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1336,7 +1339,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.10 Mode C Soft + Mode B Early démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.11 Mode C RSI40 + B Early Soft démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
