@@ -60,6 +60,13 @@ ATR_STOP_MULT = 2.5
 ATR_TP_MULT = 2.0
 ATR_TRAIL_MULT = 1.0
 
+# MODE C - Capitulation / Reversal après forte baisse
+MODE_C_RSI_MAX = 35
+MODE_C_DROP_LOOKBACK = 8
+MODE_C_MIN_DROP_PCT = 0.035
+MODE_C_VOLUME_MULT = 1.3
+MODE_C_WICK_ATR_MULT = 0.6
+
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
 last_candle_times = {symbol: None for symbol in SYMBOLS}
@@ -83,6 +90,9 @@ trade_state = {
     "ascending_triangle": None,
     "compression_breakout": None,
     "higher_lows": None,
+    "tp_structure": None,
+    "mode_c_reversal": None,
+    "mode_c_drop_pct": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -138,6 +148,9 @@ def ensure_trades_csv():
         "ascending_triangle",
         "compression_breakout",
         "higher_lows",
+        "tp_structure",
+        "mode_c_reversal",
+        "mode_c_drop_pct",
         "entry",
         "exit",
         "exit_reason",
@@ -180,6 +193,9 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("ascending_triangle"),
         trade_state.get("compression_breakout"),
         trade_state.get("higher_lows"),
+        trade_state.get("tp_structure"),
+        trade_state.get("mode_c_reversal"),
+        trade_state.get("mode_c_drop_pct"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -261,13 +277,64 @@ def build_report_message(df=None, title="📊 RAPPORT TRADES"):
 
 
 
+def normalize_telegram_command(text_msg):
+    """
+    Accepte :
+    /report
+    report
+    /report@NomDuBot
+    csv
+    csc
+    """
+    cmd = (text_msg or "").strip().lower()
+
+    if "@" in cmd:
+        cmd = cmd.split("@")[0]
+
+    if not cmd.startswith("/"):
+        cmd = "/" + cmd
+
+    return cmd
+
+
+def initialize_telegram_offset():
+    """
+    Ignore les anciens messages Telegram au démarrage.
+    Les commandes envoyées APRÈS le démarrage seront lues.
+    """
+    global TELEGRAM_LAST_UPDATE_ID
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        r = requests.get(url, params={"timeout": 1, "limit": 100}, timeout=5)
+        data = r.json()
+
+        if not data.get("ok"):
+            print("[TELEGRAM COMMANDS] getUpdates not ok:", data)
+            return
+
+        results = data.get("result", [])
+
+        if results:
+            TELEGRAM_LAST_UPDATE_ID = results[-1].get("update_id")
+            print("[TELEGRAM COMMANDS] Offset initialisé:", TELEGRAM_LAST_UPDATE_ID)
+        else:
+            print("[TELEGRAM COMMANDS] Aucun ancien message.")
+
+    except Exception as e:
+        print("[ERREUR TELEGRAM INIT OFFSET]", e)
+
+
 def check_telegram_commands():
     """
-    Lit les commandes envoyées au bot Telegram.
     Commandes disponibles :
-    /report : envoie le rapport actuel
-    /csv    : envoie trades.csv
-    /help   : aide
+    /report ou report
+    /csv ou csv ou csc
+    /help ou help
+    /stats ou stats
     """
     global TELEGRAM_LAST_UPDATE_ID
 
@@ -278,16 +345,17 @@ def check_telegram_commands():
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
         params = {
             "timeout": 1,
-            "limit": 10
+            "limit": 20
         }
 
         if TELEGRAM_LAST_UPDATE_ID is not None:
             params["offset"] = TELEGRAM_LAST_UPDATE_ID + 1
 
-        r = requests.get(url, params=params, timeout=5)
+        r = requests.get(url, params=params, timeout=8)
         data = r.json()
 
         if not data.get("ok"):
+            print("[TELEGRAM COMMANDS] getUpdates not ok:", data)
             return
 
         for update in data.get("result", []):
@@ -297,32 +365,42 @@ def check_telegram_commands():
             chat = message.get("chat", {})
             chat_id = str(chat.get("id"))
 
-            # Sécurité : répondre uniquement à ton chat Telegram configuré.
             if chat_id != str(TELEGRAM_CHAT_ID):
                 continue
 
-            text_msg = (message.get("text") or "").strip().lower()
+            raw_text = message.get("text") or ""
+            cmd = normalize_telegram_command(raw_text)
 
-            if text_msg == "/report":
+            print("[TELEGRAM COMMAND]", raw_text, "=>", cmd)
+
+            if cmd in ["/report", "/stats"]:
                 notify_telegram(build_report_message(title="📊 RAPPORT ACTUEL"))
                 continue
 
-            if text_msg == "/csv":
+            if cmd in ["/csv", "/csc"]:
                 ensure_trades_csv()
                 send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv actuel")
                 continue
 
-            if text_msg == "/help":
+            if cmd == "/help":
                 notify_telegram(
                     "🤖 <b>Commandes disponibles</b>\n"
-                    "/report - Rapport actuel\n"
-                    "/csv - Recevoir le fichier trades.csv\n"
-                    "/help - Afficher cette aide"
+                    "/report ou report - Rapport actuel\n"
+                    "/stats ou stats - Rapport actuel\n"
+                    "/csv ou csv - Recevoir trades.csv\n"
+                    "/help ou help - Afficher cette aide"
                 )
                 continue
 
+            if cmd.startswith("/"):
+                notify_telegram(
+                    "Commande inconnue.\n"
+                    "Tape /help pour voir les commandes disponibles."
+                )
+
     except Exception as e:
         print("[ERREUR TELEGRAM COMMANDS]", e)
+
 
 
 
@@ -654,6 +732,9 @@ def reset_trade_state_after_sell(candle_time):
         "ascending_triangle": None,
         "compression_breakout": None,
         "higher_lows": None,
+        "tp_structure": None,
+        "mode_c_reversal": None,
+        "mode_c_drop_pct": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -764,6 +845,70 @@ def pattern_score(df):
 
 
 
+
+def estimate_tp_structure(df, breakout_level):
+    try:
+        recent = df.iloc[-12:]
+        structure_low = recent["low"].min()
+        height = breakout_level - structure_low
+        if height <= 0:
+            return None
+        return round(breakout_level + height, 5)
+    except Exception:
+        return None
+
+
+def detect_mode_c_capitulation(df):
+    if len(df) < 40:
+        return False, 0, {
+            "mode_c_drop_pct": 0,
+            "mode_c_volume_ok": False,
+            "mode_c_wick_ok": False,
+            "mode_c_green_ok": False,
+            "mode_c_rsi_ok": False,
+        }
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    recent = df.iloc[-MODE_C_DROP_LOOKBACK:]
+    previous_high = recent["high"].max()
+    recent_low = recent["low"].min()
+    drop_pct = (previous_high - recent_low) / previous_high if previous_high > 0 else 0
+
+    volume_ma20 = df["volume"].rolling(20).mean().iloc[-1]
+    volume_ok = last["volume"] > volume_ma20 * MODE_C_VOLUME_MULT if volume_ma20 and volume_ma20 > 0 else False
+
+    lower_wick = min(last["open"], last["close"]) - last["low"]
+    wick_ok = lower_wick > last["atr"] * MODE_C_WICK_ATR_MULT if last["atr"] and last["atr"] > 0 else False
+
+    green_ok = last["close"] > last["open"] and last["close"] > prev["close"]
+    rsi_ok = last["rsi"] < MODE_C_RSI_MAX
+    not_closing_at_low = last["close"] > (last["low"] + (last["high"] - last["low"]) * 0.45)
+
+    ok = (
+        drop_pct >= MODE_C_MIN_DROP_PCT
+        and rsi_ok
+        and volume_ok
+        and wick_ok
+        and green_ok
+        and not_closing_at_low
+    )
+
+    score = 0
+    if ok:
+        score = 2.0 + min(drop_pct * 50, 3.0) + min((lower_wick / last["atr"]) if last["atr"] > 0 else 0, 2.0)
+
+    return ok, score, {
+        "mode_c_drop_pct": round(drop_pct * 100, 2),
+        "mode_c_volume_ok": volume_ok,
+        "mode_c_wick_ok": wick_ok,
+        "mode_c_green_ok": green_ok,
+        "mode_c_rsi_ok": rsi_ok,
+    }
+
+
+
 def buy_signal(df):
     last = df.iloc[-1]
     prev1 = df.iloc[-2]
@@ -772,25 +917,28 @@ def buy_signal(df):
     trend_ok = last["ema20"] > last["ema50"]
     rsi_ok = RSI_BUY_LEVEL < last["rsi"] < RSI_BUY_MAX
     vwap_ok = last["close"] > last["vwap"]
-
-    # OBV_MA5 :
-    # OBV actuel au-dessus de sa moyenne mobile 5.
     obv_rising = last["obv"] > last["obv_ma5"]
 
     breakout_level = max(prev1["high"], prev2["high"])
     breakout_ok = last["close"] > breakout_level
-
     green_candle = last["close"] > last["open"]
 
     patt_score, patt_details = pattern_score(df)
+    mode_c_ok, mode_c_score, mode_c_details = detect_mode_c_capitulation(df)
+    tp_structure = estimate_tp_structure(df, breakout_level)
 
-    # Force du breakout et du contexte
     breakout_strength = max(0, (last["close"] / breakout_level) - 1) if breakout_level > 0 else 0
     vwap_strength = max(0, (last["close"] / last["vwap"]) - 1) if last["vwap"] > 0 else 0
-    obv_strength = max(0, (last["obv"] / last["obv_ma5"]) - 1) if last["obv_ma5"] and last["obv_ma5"] != 0 else 0
+
+    # Correction bug OBV négatif.
+    if obv_rising and last["obv_ma5"] != 0:
+        obv_strength = max(0, (last["obv"] - last["obv_ma5"]) / abs(last["obv_ma5"]))
+        obv_strength = min(obv_strength, 2.0)
+    else:
+        obv_strength = 0
+
     rsi_score = max(0, 1 - abs(last["rsi"] - 62) / 10)
 
-    # MODE A : signal classique, plus prudent
     mode_a_ok = (
         trend_ok
         and rsi_ok
@@ -800,15 +948,6 @@ def buy_signal(df):
         and green_candle
     )
 
-    # MODE B : pattern premium, plus agressif.
-    # Il peut acheter avant le croisement EMA20/EMA50 si la structure est forte.
-    # Conditions :
-    # - pattern_score >= 2.0
-    # - cassure confirmée
-    # - OBV au-dessus OBV_MA5
-    # - prix au-dessus VWAP
-    # - bougie verte
-    # - RSI pas surchauffé
     mode_b_ok = (
         patt_details["pattern_score"] >= 2.0
         and breakout_ok
@@ -819,11 +958,12 @@ def buy_signal(df):
     )
 
     signal_mode = None
-
     if mode_a_ok:
         signal_mode = "MODE_A_CLASSIQUE"
     elif mode_b_ok:
         signal_mode = "MODE_B_PATTERN"
+    elif mode_c_ok:
+        signal_mode = "MODE_C_CAPITULATION"
 
     score = (
         breakout_strength * 100
@@ -831,13 +971,15 @@ def buy_signal(df):
         + obv_strength * 2
         + rsi_score
         + patt_score
+        + mode_c_score
     )
 
-    # Bonus si signal pattern premium
     if mode_b_ok:
         score += 2.0
+    if mode_c_ok:
+        score += 2.0
 
-    ok = mode_a_ok or mode_b_ok
+    ok = mode_a_ok or mode_b_ok or mode_c_ok
 
     return ok, score, {
         "trend_ok": trend_ok,
@@ -851,67 +993,21 @@ def buy_signal(df):
         "signal_mode": signal_mode,
         "mode_a_ok": mode_a_ok,
         "mode_b_ok": mode_b_ok,
+        "mode_c_ok": mode_c_ok,
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
         "compression_breakout": patt_details["compression_breakout"],
         "higher_lows": patt_details["higher_lows"],
+        "tp_structure": tp_structure,
+        "mode_c_reversal": mode_c_ok,
+        "mode_c_drop_pct": mode_c_details["mode_c_drop_pct"],
+        "mode_c_volume_ok": mode_c_details["mode_c_volume_ok"],
+        "mode_c_wick_ok": mode_c_details["mode_c_wick_ok"],
+        "mode_c_green_ok": mode_c_details["mode_c_green_ok"],
+        "mode_c_rsi_ok": mode_c_details["mode_c_rsi_ok"],
     }
 
-
-
-def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
-    """
-    Notification Telegram compacte à copier/coller dans ChatGPT après chaque trade complet.
-    """
-    entry = trade_state.get("entry_price")
-    entry_balance = trade_state.get("entry_balance")
-
-    if not entry:
-        return
-
-    pnl_pct = ((exit_price - entry) / entry) * 100
-    real_account_pnl = None
-
-    if entry_balance is not None:
-        real_account_pnl = final_balance - entry_balance
-
-    tp1_done = trade_state.get("tp1_done", False)
-    tp1_exec = trade_state.get("tp1_exec_price")
-    tp1_price = trade_state.get("tp1_price")
-
-    msg = (
-        f"📋 <b>RÉSUMÉ TRADE COMPLET</b>\n"
-        f"Symbole: {symbol}\n"
-        f"Mode: {trade_state.get('signal_mode')}\n"
-        f"Score: {trade_state.get('score')}\n"
-        f"Pattern score: {trade_state.get('pattern_score')}\n"
-        f"Bull flag: {trade_state.get('bull_flag')}\n"
-        f"Triangle ascendant: {trade_state.get('ascending_triangle')}\n"
-        f"Compression: {trade_state.get('compression_breakout')}\n"
-        f"Higher lows: {trade_state.get('higher_lows')}\n"
-        f"Entry: {entry:.5f}\n"
-        f"Sortie finale: {exit_price:.5f}\n"
-        f"Raison sortie finale: {exit_reason}\n"
-        f"TP1 atteint: {tp1_done}\n"
-        f"TP1 théorique: {tp1_price if tp1_price is not None else 'N/A'}\n"
-        f"TP1 exécuté: {tp1_exec if tp1_exec is not None else 'N/A'}\n"
-        f"PnL final prix: {pnl_pct:.2f}%\n"
-        f"Solde avant trade: {entry_balance if entry_balance is not None else 'N/A'} USDC\n"
-        f"Solde après trade: {final_balance} USDC\n"
-    )
-
-    if real_account_pnl is not None:
-        msg += f"Résultat réel compte: {real_account_pnl:.3f} USDC\n"
-
-    msg += "Copier ce message dans ChatGPT pour analyse."
-
-    notify_telegram(msg)
-
-    # Journal CSV + rapport stats + envoi fichier Telegram
-    append_trade_to_csv(symbol, exit_price, exit_reason, final_balance)
-    notify_telegram(build_report_message(title="📊 RAPPORT ACTUEL"))
-    send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv mis à jour")
 
 
 def manage_open_position(pos, df, current_price, candle_time):
@@ -1098,6 +1194,7 @@ def scan_symbols_for_best_buy():
             "| mode:", details.get("signal_mode"),
             "| mode_a:", details.get("mode_a_ok"),
             "| mode_b:", details.get("mode_b_ok"),
+            "| mode_c:", details.get("mode_c_ok"),
             "| pattern_score:", round(details["pattern_score"], 4),
             "| score:", round(details["score"], 4),
         )
@@ -1123,7 +1220,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.7 TELEGRAM COMMANDS")
+    print("BOT MULTI V3.9 MODE C + OBV FIX")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1146,9 +1243,10 @@ def run():
     print("Solde:", start_balance, "USDC")
     print("---")
     ensure_trades_csv()
+    initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.7 Telegram Commands démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.9 Mode C + OBV Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -1241,6 +1339,9 @@ def run():
                 f"Triangle ascendant: {details['ascending_triangle']}\n"
                 f"Compression: {details['compression_breakout']}\n"
                 f"Higher lows: {details['higher_lows']}\n"
+                f"TP Structure indicatif: {details.get('tp_structure')}\n"
+                f"Mode C Reversal: {details.get('mode_c_reversal')}\n"
+                f"Mode C Drop: {details.get('mode_c_drop_pct')}%\n"
                 f"Solde avant ordre: {round(balance, 2)} USDC"
             )
 
@@ -1264,6 +1365,9 @@ def run():
                 trade_state["ascending_triangle"] = details.get("ascending_triangle")
                 trade_state["compression_breakout"] = details.get("compression_breakout")
                 trade_state["higher_lows"] = details.get("higher_lows")
+                trade_state["tp_structure"] = details.get("tp_structure")
+                trade_state["mode_c_reversal"] = details.get("mode_c_reversal")
+                trade_state["mode_c_drop_pct"] = details.get("mode_c_drop_pct")
                 trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
