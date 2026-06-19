@@ -60,15 +60,12 @@ ATR_STOP_MULT = 2.5
 ATR_TP_MULT = 2.0
 ATR_TRAIL_MULT = 1.0
 
-# MODE C - Capitulation / Reversal après forte baisse
+# MODE C - Capitulation / rebond après forte baisse
 MODE_C_RSI_MAX = 40
 MODE_C_DROP_LOOKBACK = 8
 MODE_C_MIN_DROP_PCT = 0.035
 MODE_C_VOLUME_MULT = 1.2
 MODE_C_WICK_ATR_MULT = 0.5
-
-# MODE B assoupli : accepte une anticipation si EMA20 proche EMA50
-MODE_B_MAX_EMA_GAP_PCT = 0.012
 
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
@@ -93,11 +90,10 @@ trade_state = {
     "ascending_triangle": None,
     "compression_breakout": None,
     "higher_lows": None,
-    "tp_structure": None,
     "mode_c_reversal": None,
     "mode_c_drop_pct": None,
-    "mode_b_early_ok": None,
-    "ema_gap_pct": None,
+    "mode_c_volume_ok": None,
+    "mode_c_wick_ok": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -153,11 +149,10 @@ def ensure_trades_csv():
         "ascending_triangle",
         "compression_breakout",
         "higher_lows",
-        "tp_structure",
         "mode_c_reversal",
         "mode_c_drop_pct",
-        "mode_b_early_ok",
-        "ema_gap_pct",
+        "mode_c_volume_ok",
+        "mode_c_wick_ok",
         "entry",
         "exit",
         "exit_reason",
@@ -200,11 +195,10 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("ascending_triangle"),
         trade_state.get("compression_breakout"),
         trade_state.get("higher_lows"),
-        trade_state.get("tp_structure"),
         trade_state.get("mode_c_reversal"),
         trade_state.get("mode_c_drop_pct"),
-        trade_state.get("mode_b_early_ok"),
-        trade_state.get("ema_gap_pct"),
+        trade_state.get("mode_c_volume_ok"),
+        trade_state.get("mode_c_wick_ok"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -741,11 +735,10 @@ def reset_trade_state_after_sell(candle_time):
         "ascending_triangle": None,
         "compression_breakout": None,
         "higher_lows": None,
-        "tp_structure": None,
         "mode_c_reversal": None,
         "mode_c_drop_pct": None,
-        "mode_b_early_ok": None,
-        "ema_gap_pct": None,
+        "mode_c_volume_ok": None,
+        "mode_c_wick_ok": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -857,18 +850,6 @@ def pattern_score(df):
 
 
 
-def estimate_tp_structure(df, breakout_level):
-    try:
-        recent = df.iloc[-12:]
-        structure_low = recent["low"].min()
-        height = breakout_level - structure_low
-        if height <= 0:
-            return None
-        return round(breakout_level + height, 5)
-    except Exception:
-        return None
-
-
 def detect_mode_c_capitulation(df):
     if len(df) < 40:
         return False, 0, {
@@ -897,13 +878,11 @@ def detect_mode_c_capitulation(df):
     rsi_ok = last["rsi"] < MODE_C_RSI_MAX
     not_closing_at_low = last["close"] > (last["low"] + (last["high"] - last["low"]) * 0.45)
 
-    # V3.10 : plus réactif.
-    # Volume fort OU mèche basse forte, au lieu des deux obligatoires.
     ok = (
         drop_pct >= MODE_C_MIN_DROP_PCT
         and rsi_ok
-        and (volume_ok or wick_ok)
         and green_ok
+        and (volume_ok or wick_ok)
         and not_closing_at_low
     )
 
@@ -937,12 +916,11 @@ def buy_signal(df):
 
     patt_score, patt_details = pattern_score(df)
     mode_c_ok, mode_c_score, mode_c_details = detect_mode_c_capitulation(df)
-    tp_structure = estimate_tp_structure(df, breakout_level)
 
     breakout_strength = max(0, (last["close"] / breakout_level) - 1) if breakout_level > 0 else 0
     vwap_strength = max(0, (last["close"] / last["vwap"]) - 1) if last["vwap"] > 0 else 0
 
-    # Correction bug OBV négatif.
+    # Correction OBV négatif
     if obv_rising and last["obv_ma5"] != 0:
         obv_strength = max(0, (last["obv"] - last["obv_ma5"]) / abs(last["obv_ma5"]))
         obv_strength = min(obv_strength, 2.0)
@@ -960,7 +938,7 @@ def buy_signal(df):
         and green_candle
     )
 
-    mode_b_strict_ok = (
+    mode_b_ok = (
         patt_details["pattern_score"] >= 2.0
         and breakout_ok
         and obv_rising
@@ -968,22 +946,6 @@ def buy_signal(df):
         and green_candle
         and 45 < last["rsi"] < 85
     )
-
-    ema_gap_pct = abs(last["ema20"] - last["ema50"]) / last["close"] if last["close"] > 0 else 1
-
-    # V3.11 : Mode B Early assoupli.
-    # Permet d'acheter une compression/breakout même si le pattern_score n'est que 1.8,
-    # à condition que EMA20/EMA50 soient très proches et que le momentum revienne.
-    mode_b_early_ok = (
-        patt_details["pattern_score"] >= 1.8
-        and obv_rising
-        and green_candle
-        and breakout_ok
-        and ema_gap_pct <= MODE_B_MAX_EMA_GAP_PCT
-        and 40 < last["rsi"] < 85
-    )
-
-    mode_b_ok = mode_b_strict_ok or mode_b_early_ok
 
     signal_mode = None
     if mode_a_ok:
@@ -1021,31 +983,23 @@ def buy_signal(df):
         "signal_mode": signal_mode,
         "mode_a_ok": mode_a_ok,
         "mode_b_ok": mode_b_ok,
-        "mode_b_strict_ok": mode_b_strict_ok,
-        "mode_b_early_ok": mode_b_early_ok,
-        "ema_gap_pct": round(ema_gap_pct * 100, 3),
         "mode_c_ok": mode_c_ok,
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
         "compression_breakout": patt_details["compression_breakout"],
         "higher_lows": patt_details["higher_lows"],
-        "tp_structure": tp_structure,
         "mode_c_reversal": mode_c_ok,
         "mode_c_drop_pct": mode_c_details["mode_c_drop_pct"],
         "mode_c_volume_ok": mode_c_details["mode_c_volume_ok"],
         "mode_c_wick_ok": mode_c_details["mode_c_wick_ok"],
-        "mode_c_green_ok": mode_c_details["mode_c_green_ok"],
-        "mode_c_rsi_ok": mode_c_details["mode_c_rsi_ok"],
     }
-
 
 
 
 def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
     """
-    Envoie le résumé complet du trade, ajoute la ligne dans trades.csv,
-    envoie le rapport actuel et le fichier CSV sur Telegram.
+    Notification Telegram compacte à copier/coller dans ChatGPT après chaque trade complet.
     """
     entry = trade_state.get("entry_price")
     entry_balance = trade_state.get("entry_balance")
@@ -1073,11 +1027,8 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
         f"Triangle ascendant: {trade_state.get('ascending_triangle')}\n"
         f"Compression: {trade_state.get('compression_breakout')}\n"
         f"Higher lows: {trade_state.get('higher_lows')}\n"
-        f"TP Structure indicatif: {trade_state.get('tp_structure')}\n"
         f"Mode C Reversal: {trade_state.get('mode_c_reversal')}\n"
         f"Mode C Drop: {trade_state.get('mode_c_drop_pct')}%\n"
-        f"Mode B early: {trade_state.get('mode_b_early_ok')}\n"
-        f"EMA gap: {trade_state.get('ema_gap_pct')}%\n"
         f"Entry: {entry:.5f}\n"
         f"Sortie finale: {exit_price:.5f}\n"
         f"Raison sortie finale: {exit_reason}\n"
@@ -1096,6 +1047,7 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
 
     notify_telegram(msg)
 
+    # Journal CSV + rapport stats + envoi fichier Telegram
     append_trade_to_csv(symbol, exit_price, exit_reason, final_balance)
     notify_telegram(build_report_message(title="📊 RAPPORT ACTUEL"))
     send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv mis à jour")
@@ -1286,8 +1238,6 @@ def scan_symbols_for_best_buy():
             "| mode_a:", details.get("mode_a_ok"),
             "| mode_b:", details.get("mode_b_ok"),
             "| mode_c:", details.get("mode_c_ok"),
-            "| mode_b_early:", details.get("mode_b_early_ok"),
-            "| ema_gap%:", details.get("ema_gap_pct"),
             "| pattern_score:", round(details["pattern_score"], 4),
             "| score:", round(details["score"], 4),
         )
@@ -1313,7 +1263,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.11 MODE C RSI40 + B EARLY SOFT")
+    print("BOT MULTI V3.8C STABLE + MODE C")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1339,7 +1289,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.11 Mode C RSI40 + B Early Soft démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8C Stable + Mode C démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -1432,11 +1382,10 @@ def run():
                 f"Triangle ascendant: {details['ascending_triangle']}\n"
                 f"Compression: {details['compression_breakout']}\n"
                 f"Higher lows: {details['higher_lows']}\n"
-                f"TP Structure indicatif: {details.get('tp_structure')}\n"
-                f"Mode B early: {details.get('mode_b_early_ok')}\n"
-                f"EMA gap: {details.get('ema_gap_pct')}%\n"
                 f"Mode C Reversal: {details.get('mode_c_reversal')}\n"
                 f"Mode C Drop: {details.get('mode_c_drop_pct')}%\n"
+                f"Mode C Volume OK: {details.get('mode_c_volume_ok')}\n"
+                f"Mode C Wick OK: {details.get('mode_c_wick_ok')}\n"
                 f"Solde avant ordre: {round(balance, 2)} USDC"
             )
 
@@ -1460,11 +1409,10 @@ def run():
                 trade_state["ascending_triangle"] = details.get("ascending_triangle")
                 trade_state["compression_breakout"] = details.get("compression_breakout")
                 trade_state["higher_lows"] = details.get("higher_lows")
-                trade_state["tp_structure"] = details.get("tp_structure")
                 trade_state["mode_c_reversal"] = details.get("mode_c_reversal")
                 trade_state["mode_c_drop_pct"] = details.get("mode_c_drop_pct")
-                trade_state["mode_b_early_ok"] = details.get("mode_b_early_ok")
-                trade_state["ema_gap_pct"] = details.get("ema_gap_pct")
+                trade_state["mode_c_volume_ok"] = details.get("mode_c_volume_ok")
+                trade_state["mode_c_wick_ok"] = details.get("mode_c_wick_ok")
                 trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
