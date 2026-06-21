@@ -100,6 +100,8 @@ trade_state = {
     "mode_c_drop_pct": None,
     "mode_c_volume_ok": None,
     "mode_c_wick_ok": None,
+    "mode_d_entry_ema_low": None,
+    "mode_d_target_ema_high": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -165,6 +167,7 @@ def add_analysis_entry(symbol, last, current_price, details, signal_text):
             "mode_a": bool(details.get("mode_a_ok")),
             "mode_b": bool(details.get("mode_b_ok")),
             "mode_c": bool(details.get("mode_c_ok")),
+            "mode_d": bool(details.get("mode_d_ok")),
             "pattern_score": float(details.get("pattern_score", 0)),
             "score": float(details.get("score", 0)),
             "bull_flag": bool(details.get("bull_flag")),
@@ -239,7 +242,7 @@ def build_analysis_message(limit=20):
                 f"VWAP={r['vwap']:.5f} | "
                 f"T={r['trend']} V={r['vwap_ok']} OBV={r['obv_ok']} "
                 f"BR={r['breakout']} G={r['green']} | "
-                f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} | "
+                f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} D={r.get('mode_d')} | "
                 f"Pat={r['pattern_score']:.1f} Score={r['score']:.2f} | "
                 f"Mode={mode}\\n"
             )
@@ -299,6 +302,8 @@ def ensure_trades_csv():
         "mode_c_drop_pct",
         "mode_c_volume_ok",
         "mode_c_wick_ok",
+        "mode_d_entry_ema_low",
+        "mode_d_target_ema_high",
         "entry",
         "exit",
         "exit_reason",
@@ -345,6 +350,8 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("mode_c_drop_pct"),
         trade_state.get("mode_c_volume_ok"),
         trade_state.get("mode_c_wick_ok"),
+        trade_state.get("mode_d_entry_ema_low"),
+        trade_state.get("mode_d_target_ema_high"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -912,6 +919,8 @@ def reset_trade_state_after_sell(candle_time):
         "mode_c_drop_pct": None,
         "mode_c_volume_ok": None,
         "mode_c_wick_ok": None,
+        "mode_d_entry_ema_low": None,
+        "mode_d_target_ema_high": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -1120,6 +1129,21 @@ def buy_signal(df):
         and 45 < last["rsi"] < 85
     )
 
+    # MODE D - Pullback EMA agressif sans condition RSI.
+    # En tendance haussière EMA20 > EMA50 :
+    # achat dès que la clôture repasse au-dessus de l'EMA basse = EMA50,
+    # tant que le prix reste encore sous EMA20.
+    ema_low = min(last["ema20"], last["ema50"])
+    ema_high = max(last["ema20"], last["ema50"])
+    prev_ema_low = min(prev1["ema20"], prev1["ema50"])
+
+    mode_d_ok = (
+        trend_ok
+        and prev1["close"] <= prev_ema_low
+        and last["close"] > ema_low
+        and last["close"] < ema_high
+    )
+
     signal_mode = None
     if mode_a_ok:
         signal_mode = "MODE_A_CLASSIQUE"
@@ -1127,6 +1151,8 @@ def buy_signal(df):
         signal_mode = "MODE_B_PATTERN"
     elif mode_c_ok:
         signal_mode = "MODE_C_CAPITULATION"
+    elif mode_d_ok:
+        signal_mode = "MODE_D_EMA_PULLBACK"
 
     score = (
         breakout_strength * 100
@@ -1141,8 +1167,10 @@ def buy_signal(df):
         score += 2.0
     if mode_c_ok:
         score += 2.0
+    if mode_d_ok:
+        score += 1.5
 
-    ok = mode_a_ok or mode_b_ok or mode_c_ok
+    ok = mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok
 
     return ok, score, {
         "trend_ok": trend_ok,
@@ -1157,6 +1185,7 @@ def buy_signal(df):
         "mode_a_ok": mode_a_ok,
         "mode_b_ok": mode_b_ok,
         "mode_c_ok": mode_c_ok,
+        "mode_d_ok": mode_d_ok,
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -1166,6 +1195,8 @@ def buy_signal(df):
         "mode_c_drop_pct": mode_c_details["mode_c_drop_pct"],
         "mode_c_volume_ok": mode_c_details["mode_c_volume_ok"],
         "mode_c_wick_ok": mode_c_details["mode_c_wick_ok"],
+        "mode_d_entry_ema_low": round(ema_low, 5),
+        "mode_d_target_ema_high": round(ema_high, 5),
     }
 
 
@@ -1202,6 +1233,8 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
         f"Higher lows: {trade_state.get('higher_lows')}\n"
         f"Mode C Reversal: {trade_state.get('mode_c_reversal')}\n"
         f"Mode C Drop: {trade_state.get('mode_c_drop_pct')}%\n"
+        f"Mode D EMA basse: {trade_state.get('mode_d_entry_ema_low')}\n"
+        f"Mode D EMA haute cible: {trade_state.get('mode_d_target_ema_high')}\n"
         f"Entry: {entry:.5f}\n"
         f"Sortie finale: {exit_price:.5f}\n"
         f"Raison sortie finale: {exit_reason}\n"
@@ -1276,6 +1309,49 @@ def manage_open_position(pos, df, current_price, candle_time):
         f"PnL={pnl_pct:.2f}% ATR={atr_value:.5f} TP1={tp1_price:.5f} "
         f"Trail={trailing_display} Stop={hard_stop:.5f} RSI={last['rsi']:.2f}"
     )
+
+    # Gestion spéciale MODE D :
+    # TP1 à EMA haute, puis sortie complète si clôture sous EMA haute après TP1.
+    if trade_state.get("signal_mode") == "MODE_D_EMA_PULLBACK":
+        ema_high_now = max(last["ema20"], last["ema50"])
+
+        if not trade_state["tp1_done"] and current_price >= ema_high_now:
+            LAST_SELL_REASON = "MODE_D_TP_EMA_HIGH"
+            trade_state["tp1_price"] = round(ema_high_now, 5)
+            trade_state["tp1_exec_price"] = round(current_price, 5)
+            trade_state["tp1_qty"] = abs(pos["size"]) * 0.5
+            print("[MODE D] EMA haute touchée. Vente de 50%.")
+            notify_telegram(
+                f"🎯 <b>MODE D - TP EMA haute atteint</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"EMA haute: {ema_high_now:.5f}\n"
+                f"PnL: {pnl_pct:.2f}%\n"
+                f"Solde: {round(get_balance(), 2)} USDC\n"
+                f"Action: vente 50%"
+            )
+            if close_position_fraction(pos, 0.5, current_price):
+                trade_state["tp1_done"] = True
+            return
+
+        if trade_state["tp1_done"] and last["close"] < ema_high_now:
+            LAST_SELL_REASON = "MODE_D_CLOSE_UNDER_EMA_HIGH"
+            print("[MODE D] Clôture sous EMA haute après TP1. Sortie totale.")
+            notify_telegram(
+                f"📉 <b>MODE D - Sortie sous EMA haute</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"EMA haute: {ema_high_now:.5f}\n"
+                f"PnL: {pnl_pct:.2f}%\n"
+                f"Solde: {round(get_balance(), 2)} USDC"
+            )
+            if close_position_full(pos, current_price):
+                final_balance = round(get_balance(), 2)
+                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                reset_trade_state_after_sell(candle_time)
+            return
 
     if not trade_state["tp1_done"] and current_price >= tp1_price:
         LAST_SELL_REASON = "TP1_PARTIAL"
@@ -1411,6 +1487,7 @@ def scan_symbols_for_best_buy():
             "| mode_a:", details.get("mode_a_ok"),
             "| mode_b:", details.get("mode_b_ok"),
             "| mode_c:", details.get("mode_c_ok"),
+            "| mode_d:", details.get("mode_d_ok"),
             "| pattern_score:", round(details["pattern_score"], 4),
             "| score:", round(details["score"], 4),
         )
@@ -1427,7 +1504,7 @@ def scan_symbols_for_best_buy():
             f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} rsi={details['rsi_ok']} "
             f"vwap={details['vwap_ok']} obv={details['obv_rising']} breakout={details['breakout_ok']} "
             f"green={details['green_candle']} mode={details.get('signal_mode')} "
-            f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} "
+            f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} mode_d={details.get('mode_d_ok')} "
             f"pattern_score={round(details['pattern_score'], 4)} score={round(details['score'], 4)}"
         )
 
@@ -1452,9 +1529,9 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8D MODE C + ANALYSIS LOG")
+    print("BOT MULTI V3.8E MODE D EMA PULLBACK")
     print("Long only | 15m | Une seule position à la fois")
-    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
+    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
     if not PRIVATE_KEY or not WALLET_ADDRESS:
@@ -1478,7 +1555,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8D Mode C + Analysis Log démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8E Mode D EMA Pullback démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -1581,6 +1658,9 @@ def run():
                 f"Mode C Drop: {details.get('mode_c_drop_pct')}%\n"
                 f"Mode C Volume OK: {details.get('mode_c_volume_ok')}\n"
                 f"Mode C Wick OK: {details.get('mode_c_wick_ok')}\n"
+                f"Mode D: {details.get('mode_d_ok')}\n"
+                f"Mode D EMA basse: {details.get('mode_d_entry_ema_low')}\n"
+                f"Mode D EMA haute cible: {details.get('mode_d_target_ema_high')}\n"
                 f"Solde avant ordre: {round(balance, 2)} USDC"
             )
 
@@ -1608,7 +1688,12 @@ def run():
                 trade_state["mode_c_drop_pct"] = details.get("mode_c_drop_pct")
                 trade_state["mode_c_volume_ok"] = details.get("mode_c_volume_ok")
                 trade_state["mode_c_wick_ok"] = details.get("mode_c_wick_ok")
-                trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
+                trade_state["mode_d_entry_ema_low"] = details.get("mode_d_entry_ema_low")
+                trade_state["mode_d_target_ema_high"] = details.get("mode_d_target_ema_high")
+                if details.get("signal_mode") == "MODE_D_EMA_PULLBACK":
+                    trade_state["tp1_price"] = details.get("mode_d_target_ema_high")
+                else:
+                    trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
