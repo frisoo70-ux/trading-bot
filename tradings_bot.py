@@ -69,6 +69,8 @@ MODE_C_WICK_ATR_MULT = 0.5
 
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
+MIN_HOLD_CANDLES_AFTER_BUY = 1
+
 last_candle_times = {symbol: None for symbol in SYMBOLS}
 
 # Historique en mémoire pour commandes Telegram /analysis et /log
@@ -86,6 +88,7 @@ trade_state = {
     "highest_price": None,
     "trailing_stop": None,
     "cooldown_until_candle": None,
+    "entry_candle_time": None,
 
     # Infos pour résumé final Telegram
     "entry_balance": None,
@@ -163,6 +166,7 @@ def add_analysis_entry(symbol, last, current_price, details, signal_text):
             "obv_ok": bool(details.get("obv_rising")),
             "breakout": bool(details.get("breakout_ok")),
             "green": bool(details.get("green_candle")),
+            "close_above_ema20": bool(details.get("close_above_ema20")),
             "mode": details.get("signal_mode"),
             "mode_a": bool(details.get("mode_a_ok")),
             "mode_b": bool(details.get("mode_b_ok")),
@@ -241,7 +245,7 @@ def build_analysis_message(limit=20):
                 f"E20={r['ema20']:.5f} E50={r['ema50']:.5f} | "
                 f"VWAP={r['vwap']:.5f} | "
                 f"T={r['trend']} V={r['vwap_ok']} OBV={r['obv_ok']} "
-                f"BR={r['breakout']} G={r['green']} | "
+                f"BR={r['breakout']} G={r['green']} >E20={r.get('close_above_ema20')} | "
                 f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} D={r.get('mode_d')} | "
                 f"Pat={r['pattern_score']:.1f} Score={r['score']:.2f} | "
                 f"Mode={mode}\\n"
@@ -906,6 +910,7 @@ def reset_trade_state_after_sell(candle_time):
         "highest_price": None,
         "trailing_stop": None,
         "cooldown_until_candle": candle_time + COOLDOWN_CANDLES_AFTER_SELL * 15 * 60 * 1000,
+        "entry_candle_time": None,
 
         "entry_balance": None,
         "signal_mode": None,
@@ -941,6 +946,7 @@ def sync_state_with_position(pos):
         trade_state["tp1_done"] = False
         trade_state["highest_price"] = pos["entry"]
         trade_state["trailing_stop"] = None
+        trade_state["entry_candle_time"] = int(time.time() * 1000)
 
 
 
@@ -1111,8 +1117,11 @@ def buy_signal(df):
 
     rsi_score = max(0, 1 - abs(last["rsi"] - 62) / 10)
 
+    # MODE A : breakout en tendance confirmée.
+    # Correction : close doit être au-dessus EMA20.
     mode_a_ok = (
         trend_ok
+        and last["close"] > last["ema20"]
         and rsi_ok
         and vwap_ok
         and obv_rising
@@ -1120,8 +1129,12 @@ def buy_signal(df):
         and green_candle
     )
 
+    # MODE B : pattern premium.
+    # Correction : close doit être au-dessus EMA20.
+    # Les entrées entre EMA50 et EMA20 sont réservées au MODE D.
     mode_b_ok = (
         patt_details["pattern_score"] >= 2.0
+        and last["close"] > last["ema20"]
         and breakout_ok
         and obv_rising
         and vwap_ok
@@ -1179,6 +1192,7 @@ def buy_signal(df):
         "obv_rising": obv_rising,
         "breakout_ok": breakout_ok,
         "green_candle": green_candle,
+        "close_above_ema20": bool(last["close"] > last["ema20"]),
         "breakout_level": breakout_level,
         "score": score,
         "signal_mode": signal_mode,
@@ -1298,16 +1312,27 @@ def manage_open_position(pos, df, current_price, candle_time):
     # Sortie EMA20 moins agressive :
     # on vend uniquement après 2 clôtures 15 min consécutives sous EMA20.
     prev = df.iloc[-2]
-    ema_break = (
+    raw_ema_break = (
         last["close"] < last["ema20"]
         and prev["close"] < prev["ema20"]
     )
+
+    entry_candle_time = trade_state.get("entry_candle_time")
+    min_hold_ms = MIN_HOLD_CANDLES_AFTER_BUY * 15 * 60 * 1000
+    min_hold_active = (
+        entry_candle_time is not None
+        and candle_time is not None
+        and candle_time < entry_candle_time + min_hold_ms
+    )
+
+    ema_break = raw_ema_break and not min_hold_active
     hard_stop_hit = current_price <= hard_stop
 
     print(
         f"[POSITION] {symbol} Entry={entry:.5f} Prix={current_price:.5f} "
         f"PnL={pnl_pct:.2f}% ATR={atr_value:.5f} TP1={tp1_price:.5f} "
-        f"Trail={trailing_display} Stop={hard_stop:.5f} RSI={last['rsi']:.2f}"
+        f"Trail={trailing_display} Stop={hard_stop:.5f} RSI={last['rsi']:.2f} "
+        f"MinHold={min_hold_active}"
     )
 
     # Gestion spéciale MODE D :
@@ -1529,7 +1554,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8E MODE D EMA PULLBACK")
+    print("BOT MULTI V3.8F MODE A FIX + MIN HOLD")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1555,7 +1580,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8E Mode D EMA Pullback démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8F Mode A Fix + Min Hold démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -1661,6 +1686,8 @@ def run():
                 f"Mode D: {details.get('mode_d_ok')}\n"
                 f"Mode D EMA basse: {details.get('mode_d_entry_ema_low')}\n"
                 f"Mode D EMA haute cible: {details.get('mode_d_target_ema_high')}\n"
+                f"Close > EMA20: {details.get('close_above_ema20')}\n"
+                f"Min hold EMA20: {MIN_HOLD_CANDLES_AFTER_BUY} bougie(s)\n"
                 f"Solde avant ordre: {round(balance, 2)} USDC"
             )
 
@@ -1674,6 +1701,7 @@ def run():
                 trade_state["highest_price"] = current_price
                 trade_state["trailing_stop"] = None
                 trade_state["cooldown_until_candle"] = None
+                trade_state["entry_candle_time"] = confirmed_time
 
                 # Sauvegarde infos signal pour résumé final Telegram
                 trade_state["entry_balance"] = round(balance, 2)
