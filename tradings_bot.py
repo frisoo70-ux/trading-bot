@@ -39,7 +39,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["SOL", "XRP", "AAVE"]
+SYMBOLS = ["SOL", "XRP", "SHIB"]
 TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
 
@@ -105,6 +105,7 @@ trade_state = {
     "mode_c_wick_ok": None,
     "mode_d_entry_ema_low": None,
     "mode_d_target_ema_high": None,
+    "mode_d_type": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -172,6 +173,8 @@ def add_analysis_entry(symbol, last, current_price, details, signal_text):
             "mode_b": bool(details.get("mode_b_ok")),
             "mode_c": bool(details.get("mode_c_ok")),
             "mode_d": bool(details.get("mode_d_ok")),
+            "mode_d_d1": bool(details.get("mode_d_pullback_between_emas")),
+            "mode_d_d2": bool(details.get("mode_d_cross_both_emas")),
             "pattern_score": float(details.get("pattern_score", 0)),
             "score": float(details.get("score", 0)),
             "bull_flag": bool(details.get("bull_flag")),
@@ -246,7 +249,8 @@ def build_analysis_message(limit=20):
                 f"VWAP={r['vwap']:.5f} | "
                 f"T={r['trend']} V={r['vwap_ok']} OBV={r['obv_ok']} "
                 f"BR={r['breakout']} G={r['green']} >E20={r.get('close_above_ema20')} | "
-                f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} D={r.get('mode_d')} | "
+                f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} D={r.get('mode_d')} "
+                f"D1={r.get('mode_d_d1')} D2={r.get('mode_d_d2')} | "
                 f"Pat={r['pattern_score']:.1f} Score={r['score']:.2f} | "
                 f"Mode={mode}\\n"
             )
@@ -308,6 +312,7 @@ def ensure_trades_csv():
         "mode_c_wick_ok",
         "mode_d_entry_ema_low",
         "mode_d_target_ema_high",
+        "mode_d_type",
         "entry",
         "exit",
         "exit_reason",
@@ -356,6 +361,7 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("mode_c_wick_ok"),
         trade_state.get("mode_d_entry_ema_low"),
         trade_state.get("mode_d_target_ema_high"),
+        trade_state.get("mode_d_type"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -926,6 +932,7 @@ def reset_trade_state_after_sell(candle_time):
         "mode_c_wick_ok": None,
         "mode_d_entry_ema_low": None,
         "mode_d_target_ema_high": None,
+        "mode_d_type": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -1150,12 +1157,24 @@ def buy_signal(df):
     ema_high = max(last["ema20"], last["ema50"])
     prev_ema_low = min(prev1["ema20"], prev1["ema50"])
 
-    mode_d_ok = (
+    # MODE D v2 - Pullback EMA agressif sans condition RSI.
+    # D1 : rebond progressif, prix entre EMA basse et EMA haute.
+    mode_d_pullback_between_emas = (
         trend_ok
         and prev1["close"] <= prev_ema_low
         and last["close"] > ema_low
         and last["close"] < ema_high
     )
+
+    # D2 : rebond fort, la bougie traverse EMA basse ET EMA haute d'un coup.
+    mode_d_cross_both_emas = (
+        trend_ok
+        and prev1["close"] <= prev_ema_low
+        and last["close"] >= ema_high
+        and green_candle
+    )
+
+    mode_d_ok = mode_d_pullback_between_emas or mode_d_cross_both_emas
 
     signal_mode = None
     if mode_a_ok:
@@ -1200,6 +1219,8 @@ def buy_signal(df):
         "mode_b_ok": mode_b_ok,
         "mode_c_ok": mode_c_ok,
         "mode_d_ok": mode_d_ok,
+        "mode_d_pullback_between_emas": mode_d_pullback_between_emas,
+        "mode_d_cross_both_emas": mode_d_cross_both_emas,
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -1249,6 +1270,7 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
         f"Mode C Drop: {trade_state.get('mode_c_drop_pct')}%\n"
         f"Mode D EMA basse: {trade_state.get('mode_d_entry_ema_low')}\n"
         f"Mode D EMA haute cible: {trade_state.get('mode_d_target_ema_high')}\n"
+        f"Mode D type: {trade_state.get('mode_d_type')}\n"
         f"Entry: {entry:.5f}\n"
         f"Sortie finale: {exit_price:.5f}\n"
         f"Raison sortie finale: {exit_reason}\n"
@@ -1529,7 +1551,8 @@ def scan_symbols_for_best_buy():
             f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} rsi={details['rsi_ok']} "
             f"vwap={details['vwap_ok']} obv={details['obv_rising']} breakout={details['breakout_ok']} "
             f"green={details['green_candle']} mode={details.get('signal_mode')} "
-            f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} mode_d={details.get('mode_d_ok')} "
+            f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} "
+            f"mode_d={details.get('mode_d_ok')} d1={details.get('mode_d_pullback_between_emas')} d2={details.get('mode_d_cross_both_emas')} "
             f"pattern_score={round(details['pattern_score'], 4)} score={round(details['score'], 4)}"
         )
 
@@ -1554,7 +1577,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8F MODE A FIX + MIN HOLD")
+    print("BOT MULTI V3.8G MODE D V2")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1580,7 +1603,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8F Mode A Fix + Min Hold démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8G Mode D V2 démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -1684,6 +1707,8 @@ def run():
                 f"Mode C Volume OK: {details.get('mode_c_volume_ok')}\n"
                 f"Mode C Wick OK: {details.get('mode_c_wick_ok')}\n"
                 f"Mode D: {details.get('mode_d_ok')}\n"
+                f"Mode D type D1 entre EMA: {details.get('mode_d_pullback_between_emas')}\n"
+                f"Mode D type D2 cross double EMA: {details.get('mode_d_cross_both_emas')}\n"
                 f"Mode D EMA basse: {details.get('mode_d_entry_ema_low')}\n"
                 f"Mode D EMA haute cible: {details.get('mode_d_target_ema_high')}\n"
                 f"Close > EMA20: {details.get('close_above_ema20')}\n"
@@ -1718,6 +1743,12 @@ def run():
                 trade_state["mode_c_wick_ok"] = details.get("mode_c_wick_ok")
                 trade_state["mode_d_entry_ema_low"] = details.get("mode_d_entry_ema_low")
                 trade_state["mode_d_target_ema_high"] = details.get("mode_d_target_ema_high")
+                if details.get("mode_d_cross_both_emas"):
+                    trade_state["mode_d_type"] = "D2_CROSS_BOTH_EMAS"
+                elif details.get("mode_d_pullback_between_emas"):
+                    trade_state["mode_d_type"] = "D1_BETWEEN_EMAS"
+                else:
+                    trade_state["mode_d_type"] = None
                 if details.get("signal_mode") == "MODE_D_EMA_PULLBACK":
                     trade_state["tp1_price"] = details.get("mode_d_target_ema_high")
                 else:
