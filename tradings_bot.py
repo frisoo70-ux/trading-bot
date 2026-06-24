@@ -47,6 +47,8 @@ TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
 
 TRADES_CSV_PATH = Path("trades.csv")
+POST_TRADE_CSV_PATH = Path("post_trade_analysis.csv")
+POST_TRADE_PENDING_PATH = Path("post_trade_pending.json")
 LAST_MONTHLY_REPORT_FILE = Path("last_monthly_report.txt")
 BOT_CONFIG_PATH = Path("bot_config.json")
 
@@ -243,6 +245,195 @@ def json_safe(value):
     return value
 
 
+
+POST_TRADE_HORIZONS = [
+    ("15m", 15 * 60 * 1000),
+    ("30m", 30 * 60 * 1000),
+    ("1h", 60 * 60 * 1000),
+    ("2h", 2 * 60 * 60 * 1000),
+    ("4h", 4 * 60 * 60 * 1000),
+]
+
+
+def ensure_post_trade_csv():
+    if not POST_TRADE_CSV_PATH.exists():
+        cols = [
+            "date", "symbol", "mode", "exit_reason",
+            "entry", "exit", "real_pnl_usdc", "pnl_at_exit_pct",
+            "pnl_15m_pct", "pnl_30m_pct", "pnl_1h_pct", "pnl_2h_pct", "pnl_4h_pct",
+            "max_gain_after_exit_pct", "max_loss_after_exit_pct",
+            "exit_efficiency_pct", "verdict", "status",
+        ]
+        pd.DataFrame(columns=cols).to_csv(POST_TRADE_CSV_PATH, index=False)
+
+
+def load_pending_post_trades():
+    try:
+        if POST_TRADE_PENDING_PATH.exists():
+            with open(POST_TRADE_PENDING_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+    except Exception as e:
+        print("[ERREUR POST TRADE LOAD]", e)
+    return []
+
+
+def save_pending_post_trades(items):
+    try:
+        with open(POST_TRADE_PENDING_PATH, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print("[ERREUR POST TRADE SAVE]", e)
+
+
+def add_post_trade_tracking(symbol, exit_price, exit_reason, final_balance):
+    try:
+        ensure_post_trade_csv()
+
+        entry = trade_state.get("entry_price")
+        if not entry:
+            return
+
+        entry_balance = trade_state.get("entry_balance")
+        real_pnl = None
+        if entry_balance is not None and final_balance is not None:
+            real_pnl = round(final_balance - entry_balance, 6)
+
+        now_ms = int(time.time() * 1000)
+
+        item = {
+            "id": f"{symbol}_{now_ms}",
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "mode": trade_state.get("signal_mode"),
+            "exit_reason": exit_reason,
+            "entry": float(entry),
+            "exit": float(exit_price),
+            "real_pnl_usdc": real_pnl,
+            "pnl_at_exit_pct": round(((float(exit_price) - float(entry)) / float(entry)) * 100, 4),
+            "exit_time_ms": now_ms,
+            "horizons": {},
+            "max_price": float(exit_price),
+            "min_price": float(exit_price),
+            "status": "PENDING",
+        }
+
+        pending = load_pending_post_trades()
+        pending.append(item)
+        save_pending_post_trades(pending)
+
+        print(f"[POST TRADE] Tracking lancé pour {symbol} après sortie {exit_reason}")
+
+    except Exception as e:
+        print("[ERREUR POST TRADE ADD]", e)
+
+
+def finalize_post_trade_item(item):
+    try:
+        ensure_post_trade_csv()
+
+        entry = float(item["entry"])
+        exit_price = float(item["exit"])
+        max_price = float(item.get("max_price", exit_price))
+        min_price = float(item.get("min_price", exit_price))
+
+        max_gain_after = ((max_price - exit_price) / exit_price) * 100
+        max_loss_after = ((min_price - exit_price) / exit_price) * 100
+
+        pnl_at_exit = float(item.get("pnl_at_exit_pct", 0))
+        max_possible_from_entry = ((max_price - entry) / entry) * 100
+
+        if max_possible_from_entry > 0:
+            efficiency = (pnl_at_exit / max_possible_from_entry) * 100
+            efficiency = max(min(efficiency, 100), -100)
+        else:
+            efficiency = None
+
+        if max_gain_after >= 0.8:
+            verdict = "SORTIE_TROP_TOT"
+        elif max_loss_after <= -0.8 and max_gain_after < 0.4:
+            verdict = "BONNE_SORTIE"
+        else:
+            verdict = "NEUTRE"
+
+        row = {
+            "date": item.get("date"),
+            "symbol": item.get("symbol"),
+            "mode": item.get("mode"),
+            "exit_reason": item.get("exit_reason"),
+            "entry": item.get("entry"),
+            "exit": item.get("exit"),
+            "real_pnl_usdc": item.get("real_pnl_usdc"),
+            "pnl_at_exit_pct": item.get("pnl_at_exit_pct"),
+            "pnl_15m_pct": item.get("horizons", {}).get("15m"),
+            "pnl_30m_pct": item.get("horizons", {}).get("30m"),
+            "pnl_1h_pct": item.get("horizons", {}).get("1h"),
+            "pnl_2h_pct": item.get("horizons", {}).get("2h"),
+            "pnl_4h_pct": item.get("horizons", {}).get("4h"),
+            "max_gain_after_exit_pct": round(max_gain_after, 4),
+            "max_loss_after_exit_pct": round(max_loss_after, 4),
+            "exit_efficiency_pct": round(efficiency, 2) if efficiency is not None else None,
+            "verdict": verdict,
+            "status": "DONE",
+        }
+
+        df = pd.read_csv(POST_TRADE_CSV_PATH) if POST_TRADE_CSV_PATH.exists() else pd.DataFrame()
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        df.to_csv(POST_TRADE_CSV_PATH, index=False)
+
+        print(f"[POST TRADE] Analyse finalisée {item.get('symbol')} verdict={verdict}")
+
+    except Exception as e:
+        print("[ERREUR POST TRADE FINALIZE]", e)
+
+
+def update_post_trade_tracking(symbol, current_price):
+    try:
+        pending = load_pending_post_trades()
+        if not pending:
+            return
+
+        now_ms = int(time.time() * 1000)
+        remaining = []
+
+        for item in pending:
+            if item.get("symbol") != symbol:
+                remaining.append(item)
+                continue
+
+            exit_price = float(item["exit"])
+            current_price_f = float(current_price)
+
+            item["max_price"] = max(float(item.get("max_price", exit_price)), current_price_f)
+            item["min_price"] = min(float(item.get("min_price", exit_price)), current_price_f)
+
+            elapsed = now_ms - int(item.get("exit_time_ms", now_ms))
+
+            for label, horizon_ms in POST_TRADE_HORIZONS:
+                if elapsed >= horizon_ms and label not in item.get("horizons", {}):
+                    item.setdefault("horizons", {})[label] = round(((current_price_f - exit_price) / exit_price) * 100, 4)
+
+            if elapsed >= POST_TRADE_HORIZONS[-1][1]:
+                finalize_post_trade_item(item)
+            else:
+                remaining.append(item)
+
+        save_pending_post_trades(remaining)
+
+    except Exception as e:
+        print("[ERREUR POST TRADE UPDATE]", e)
+
+
+def load_post_trade_dataframe():
+    try:
+        ensure_post_trade_csv()
+        return pd.read_csv(POST_TRADE_CSV_PATH)
+    except Exception:
+        return pd.DataFrame()
+
+
+
 def compute_dashboard_stats():
     df = load_trades_dataframe()
     balance = round(get_balance(), 2)
@@ -265,11 +456,31 @@ def compute_dashboard_stats():
         "by_symbol": [],
         "by_exit_reason": [],
         "recent_trades": [],
+        "post_trade_analysis": [],
+        "post_trade_summary": {
+            "total": 0,
+            "sortie_trop_tot": 0,
+            "bonne_sortie": 0,
+            "neutre": 0,
+        },
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
     }
 
     if df.empty:
+        try:
+            post_df = load_post_trade_dataframe()
+            if not post_df.empty:
+                result["post_trade_analysis"] = post_df.tail(50).fillna("").to_dict(orient="records")
+                verdicts = post_df.get("verdict", pd.Series(dtype=str)).fillna("")
+                result["post_trade_summary"] = {
+                    "total": int(len(post_df)),
+                    "sortie_trop_tot": int((verdicts == "SORTIE_TROP_TOT").sum()),
+                    "bonne_sortie": int((verdicts == "BONNE_SORTIE").sum()),
+                    "neutre": int((verdicts == "NEUTRE").sum()),
+                }
+        except Exception as e:
+            print("[ERREUR POST TRADE DASHBOARD]", e)
         return result
 
     df = df.copy()
@@ -363,7 +574,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Mode E Intrabar · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Post Trade Analyzer · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -389,6 +600,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card"><h3>🧠 Signaux récents</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="analysis"></table></div></div>
   </div>
   <div class="card" style="margin-top:12px"><h3>📜 Derniers trades</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="recentTrades"></table></div></div>
+  <div class="card" style="margin-top:12px">
+    <h3>🔍 Post Trade Analyzer</h3>
+    <div class="muted" id="postTradeSummary" style="margin-bottom:8px">-</div>
+    <div class="mobileHint">Balaye le tableau vers la droite.</div>
+    <div class="scroll"><table id="postTrade"></table></div>
+  </div>
   <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
 </div>
 <script>
@@ -402,6 +619,23 @@ async function load(){const r=await fetch('/api/data'+window.location.search);co
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}`}],(d.analysis_history||[]).slice(-40).reverse());
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],(d.recent_trades||[]).slice().reverse());
+const pts=d.post_trade_summary||{};
+document.getElementById('postTradeSummary').textContent=`Total ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
+table('postTrade',[
+{label:'Date',key:'date'},
+{label:'Coin',key:'symbol'},
+{label:'Mode',get:r=>shortMode(r.mode)},
+{label:'Sortie',key:'exit_reason'},
+{label:'PnL réel',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},
+{label:'+15m',get:r=>fmt(r.pnl_15m_pct,2),cls:v=>cls(v)},
+{label:'+30m',get:r=>fmt(r.pnl_30m_pct,2),cls:v=>cls(v)},
+{label:'+1h',get:r=>fmt(r.pnl_1h_pct,2),cls:v=>cls(v)},
+{label:'+2h',get:r=>fmt(r.pnl_2h_pct,2),cls:v=>cls(v)},
+{label:'+4h',get:r=>fmt(r.pnl_4h_pct,2),cls:v=>cls(v)},
+{label:'Max après',get:r=>fmt(r.max_gain_after_exit_pct,2),cls:v=>cls(v)},
+{label:'Min après',get:r=>fmt(r.max_loss_after_exit_pct,2),cls:v=>cls(v)},
+{label:'Verdict',key:'verdict'}
+],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
 load();setInterval(load,10000);
 </script>
@@ -1785,6 +2019,7 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
 
     msg += "Copier ce message dans ChatGPT pour analyse."
 
+    add_post_trade_tracking(symbol, exit_price, exit_reason, final_balance)
     notify_telegram(msg)
 
     # Journal CSV + rapport stats + envoi fichier Telegram
@@ -2146,7 +2381,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8L MODE E INTRABAR")
+    print("BOT MULTI V3.8M POST TRADE ANALYZER")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2169,12 +2404,13 @@ def run():
     print("Solde:", start_balance, "USDC")
     print("---")
     ensure_trades_csv()
+    ensure_post_trade_csv()
     save_bot_config(load_bot_config())
     start_dashboard_server()
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8L Mode E Intrabar démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8M Post Trade Analyzer démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
