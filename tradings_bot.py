@@ -7,10 +7,13 @@ import os
 import csv
 from pathlib import Path
 import eth_account
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 # ============================================================
 # BOT MULTI-COINS V3
-# SOL / XRP / AAVE
+# SOL / XRP / kSHIB
 # Timeframe : 15 min
 # Long only
 # Une seule position ouverte à la fois
@@ -19,7 +22,7 @@ import eth_account
 # EMA20 / EMA50 / RSI14 / ATR14 / OBV_MA5 / VWAP / Breakout
 #
 # Entrée :
-# Le bot scanne SOL, XRP, AAVE.
+# Le bot scanne SOL, XRP, kSHIB.
 # Si plusieurs signaux BUY sont valides, il choisit le meilleur score.
 #
 # Sorties :
@@ -45,6 +48,10 @@ CHECK_INTERVAL = 60
 
 TRADES_CSV_PATH = Path("trades.csv")
 LAST_MONTHLY_REPORT_FILE = Path("last_monthly_report.txt")
+BOT_CONFIG_PATH = Path("bot_config.json")
+
+DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+DASHBOARD_PORT = int(os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000")))
 
 BASE_URL = "https://api.hyperliquid.xyz"
 
@@ -116,6 +123,458 @@ SIZE_DECIMALS_BY_SYMBOL = {symbol: 2 for symbol in SYMBOLS}
 LAST_ENTRY_PRICE_BY_SYMBOL = {symbol: None for symbol in SYMBOLS}
 LAST_SELL_REASON = None
 TELEGRAM_LAST_UPDATE_ID = None
+
+
+
+DEFAULT_BOT_CONFIG = {
+    "modes": {
+        "MODE_A_CLASSIQUE": True,
+        "MODE_B_PATTERN": True,
+        "MODE_C_CAPITULATION": True,
+        "MODE_D_EMA_PULLBACK": True,
+    },
+    "symbols": {
+        "SOL": True,
+        "XRP": True,
+        "kSHIB": True,
+    },
+    "dashboard": {
+        "refresh_seconds": 10
+    }
+}
+
+
+def load_bot_config():
+    try:
+        if BOT_CONFIG_PATH.exists():
+            with open(BOT_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        else:
+            cfg = {}
+
+        merged = json.loads(json.dumps(DEFAULT_BOT_CONFIG))
+
+        for section in ["modes", "symbols", "dashboard"]:
+            if isinstance(cfg.get(section), dict):
+                merged[section].update(cfg[section])
+
+        # Sécurité : si un nouveau symbole existe dans SYMBOLS, on l'ajoute actif par défaut
+        for symbol in SYMBOLS:
+            merged["symbols"].setdefault(symbol, True)
+
+        return merged
+
+    except Exception as e:
+        print("[ERREUR CONFIG LOAD]", e)
+        return json.loads(json.dumps(DEFAULT_BOT_CONFIG))
+
+
+def save_bot_config(cfg):
+    try:
+        with open(BOT_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print("[ERREUR CONFIG SAVE]", e)
+        return False
+
+
+def is_mode_enabled(mode_name):
+    cfg = load_bot_config()
+    return bool(cfg.get("modes", {}).get(mode_name, True))
+
+
+def is_symbol_enabled(symbol):
+    cfg = load_bot_config()
+    return bool(cfg.get("symbols", {}).get(symbol, True))
+
+
+def get_enabled_symbols():
+    cfg = load_bot_config()
+    return [s for s in SYMBOLS if bool(cfg.get("symbols", {}).get(s, True))]
+
+
+def dashboard_auth_ok(handler):
+    if not DASHBOARD_TOKEN:
+        return True
+
+    parsed = urlparse(handler.path)
+    query = parse_qs(parsed.query)
+
+    token_query = query.get("token", [""])[0]
+    token_header = handler.headers.get("X-Dashboard-Token", "")
+
+    return token_query == DASHBOARD_TOKEN or token_header == DASHBOARD_TOKEN
+
+
+def json_safe(value):
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    return value
+
+
+def compute_dashboard_stats():
+    df = load_trades_dataframe()
+    balance = round(get_balance(), 2)
+
+    result = {
+        "balance": balance,
+        "open_position": get_open_position(),
+        "config": load_bot_config(),
+        "summary": {
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "winrate": 0,
+            "pnl_total": 0,
+            "avg_win": 0,
+            "avg_loss": 0,
+            "profit_factor": 0,
+        },
+        "by_mode": [],
+        "by_symbol": [],
+        "by_exit_reason": [],
+        "recent_trades": [],
+        "analysis_history": ANALYSIS_HISTORY[-80:],
+        "log_history": LOG_HISTORY[-120:],
+    }
+
+    if df.empty:
+        return result
+
+    df = df.copy()
+    df["real_pnl_usdc"] = pd.to_numeric(df.get("real_pnl_usdc"), errors="coerce").fillna(0)
+    df["pnl_price_pct"] = pd.to_numeric(df.get("pnl_price_pct"), errors="coerce").fillna(0)
+
+    pnl = df["real_pnl_usdc"]
+    wins = int((pnl > 0).sum())
+    losses = int((pnl < 0).sum())
+    gross_profit = float(pnl[pnl > 0].sum())
+    gross_loss = abs(float(pnl[pnl < 0].sum()))
+
+    result["summary"] = {
+        "trades": int(len(df)),
+        "wins": wins,
+        "losses": losses,
+        "winrate": round((wins / len(df)) * 100, 2) if len(df) else 0,
+        "pnl_total": round(float(pnl.sum()), 4),
+        "avg_win": round(float(pnl[pnl > 0].mean()), 4) if wins else 0,
+        "avg_loss": round(float(pnl[pnl < 0].mean()), 4) if losses else 0,
+        "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss else None,
+    }
+
+    def grouped_stats(col):
+        if col not in df.columns:
+            return []
+
+        rows = []
+        for key, g in df.groupby(col, dropna=False):
+            gpnl = g["real_pnl_usdc"]
+            gwins = int((gpnl > 0).sum())
+            glosses = int((gpnl < 0).sum())
+            ggross_profit = float(gpnl[gpnl > 0].sum())
+            ggross_loss = abs(float(gpnl[gpnl < 0].sum()))
+
+            rows.append({
+                "name": str(key),
+                "trades": int(len(g)),
+                "wins": gwins,
+                "losses": glosses,
+                "winrate": round((gwins / len(g)) * 100, 2) if len(g) else 0,
+                "pnl": round(float(gpnl.sum()), 4),
+                "avg_pnl": round(float(gpnl.mean()), 4) if len(g) else 0,
+                "profit_factor": round(ggross_profit / ggross_loss, 3) if ggross_loss else None,
+            })
+
+        return sorted(rows, key=lambda x: x["pnl"], reverse=True)
+
+    result["by_mode"] = grouped_stats("mode")
+    result["by_symbol"] = grouped_stats("symbol")
+    result["by_exit_reason"] = grouped_stats("exit_reason")
+
+    recent = df.tail(50).fillna("").to_dict(orient="records")
+    result["recent_trades"] = [
+        {k: json_safe(v) for k, v in row.items()} for row in recent
+    ]
+
+    return result
+
+
+DASHBOARD_HTML = r"""<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Trading Bot Dashboard</title>
+  <style>
+    :root { --bg:#0b1220; --card:#111827; --card2:#172033; --txt:#e5e7eb; --muted:#9ca3af; --green:#22c55e; --red:#ef4444; --yellow:#f59e0b; --blue:#38bdf8; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Arial, sans-serif; background:var(--bg); color:var(--txt); }
+    header { padding:18px; border-bottom:1px solid #243044; position:sticky; top:0; background:rgba(11,18,32,.95); z-index:3; }
+    h1 { margin:0 0 5px; font-size:22px; }
+    .sub { color:var(--muted); font-size:13px; }
+    .wrap { padding:16px; max-width:1300px; margin:auto; }
+    .grid { display:grid; gap:14px; }
+    .cards { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .two { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .card { background:var(--card); border:1px solid #243044; border-radius:14px; padding:14px; box-shadow:0 6px 18px rgba(0,0,0,.18); }
+    .metric { font-size:25px; font-weight:700; margin-top:6px; }
+    .muted { color:var(--muted); font-size:13px; }
+    .pos { color:var(--green); }
+    .neg { color:var(--red); }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { padding:9px 8px; border-bottom:1px solid #263348; text-align:left; white-space:nowrap; }
+    th { color:var(--muted); font-weight:600; }
+    .scroll { overflow:auto; max-height:430px; }
+    .toggles { display:flex; flex-wrap:wrap; gap:10px; }
+    .toggle { display:flex; align-items:center; gap:8px; background:var(--card2); padding:10px 12px; border-radius:12px; border:1px solid #2b3950; }
+    input[type=checkbox] { width:20px; height:20px; }
+    button { background:var(--blue); border:0; padding:10px 14px; border-radius:10px; font-weight:700; cursor:pointer; color:#04121d; }
+    pre { white-space:pre-wrap; font-size:12px; max-height:360px; overflow:auto; background:#070d18; padding:12px; border-radius:10px; color:#cbd5e1; }
+    .pill { display:inline-block; border-radius:999px; padding:4px 8px; background:#243044; font-size:12px; color:#cbd5e1; }
+    @media (max-width:900px){ .cards,.two{grid-template-columns:1fr;} table{font-size:12px;} }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🤖 Trading Bot Dashboard</h1>
+  <div class="sub">Modes A/B/C/D · SOL / XRP / kSHIB · refresh auto</div>
+</header>
+<div class="wrap">
+  <div class="grid cards">
+    <div class="card"><div class="muted">Solde USDC</div><div id="balance" class="metric">-</div></div>
+    <div class="card"><div class="muted">PnL total</div><div id="pnl" class="metric">-</div></div>
+    <div class="card"><div class="muted">Winrate</div><div id="winrate" class="metric">-</div></div>
+    <div class="card"><div class="muted">Trades</div><div id="trades" class="metric">-</div></div>
+  </div>
+
+  <div class="grid two" style="margin-top:14px">
+    <div class="card">
+      <h3>⚙️ Activer / désactiver les modes</h3>
+      <div id="modeToggles" class="toggles"></div>
+      <h3>🪙 Activer / désactiver les tokens</h3>
+      <div id="symbolToggles" class="toggles"></div>
+      <div style="margin-top:14px"><button onclick="saveConfig()">Sauvegarder config</button> <span id="saveStatus" class="muted"></span></div>
+    </div>
+
+    <div class="card">
+      <h3>📌 Position ouverte</h3>
+      <pre id="position">-</pre>
+    </div>
+  </div>
+
+  <div class="grid two" style="margin-top:14px">
+    <div class="card"><h3>📊 Performance par mode</h3><div class="scroll"><table id="byMode"></table></div></div>
+    <div class="card"><h3>🪙 Performance par token</h3><div class="scroll"><table id="bySymbol"></table></div></div>
+  </div>
+
+  <div class="grid two" style="margin-top:14px">
+    <div class="card"><h3>🚪 Performance par sortie</h3><div class="scroll"><table id="byExit"></table></div></div>
+    <div class="card"><h3>🧠 Derniers signaux /analysis</h3><div class="scroll"><table id="analysis"></table></div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3>📜 Derniers trades</h3>
+    <div class="scroll"><table id="recentTrades"></table></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3>📋 Logs récents</h3>
+    <pre id="logs"></pre>
+  </div>
+</div>
+
+<script>
+let currentConfig = null;
+
+function cls(v){ return Number(v) >= 0 ? 'pos' : 'neg'; }
+function fmt(v, d=2){ if(v===null || v===undefined || v==='') return '-'; const n=Number(v); return isNaN(n)?v:n.toFixed(d); }
+
+function table(el, cols, rows){
+  const head = '<tr>' + cols.map(c=>`<th>${c.label}</th>`).join('') + '</tr>';
+  const body = (rows||[]).map(r => '<tr>' + cols.map(c=>{
+    let val = c.get ? c.get(r) : r[c.key];
+    let klass = c.cls ? c.cls(val,r) : '';
+    return `<td class="${klass}">${val ?? '-'}</td>`;
+  }).join('') + '</tr>').join('');
+  document.getElementById(el).innerHTML = head + body;
+}
+
+function renderToggles(cfg){
+  currentConfig = cfg;
+  const modeLabels = {
+    MODE_A_CLASSIQUE:'Mode A classique',
+    MODE_B_PATTERN:'Mode B pattern',
+    MODE_C_CAPITULATION:'Mode C capitulation',
+    MODE_D_EMA_PULLBACK:'Mode D EMA'
+  };
+
+  document.getElementById('modeToggles').innerHTML = Object.keys(cfg.modes).map(k=>`
+    <label class="toggle"><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}> ${modeLabels[k]||k}</label>
+  `).join('');
+
+  document.getElementById('symbolToggles').innerHTML = Object.keys(cfg.symbols).map(k=>`
+    <label class="toggle"><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}> ${k}</label>
+  `).join('');
+}
+
+async function saveConfig(){
+  document.querySelectorAll('input[type=checkbox]').forEach(i=>{
+    currentConfig[i.dataset.section][i.dataset.key] = i.checked;
+  });
+
+  const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(currentConfig)});
+  document.getElementById('saveStatus').textContent = r.ok ? '✅ sauvegardé' : '❌ erreur';
+  setTimeout(()=>document.getElementById('saveStatus').textContent='', 2500);
+  load();
+}
+
+async function load(){
+  const r = await fetch('/api/data');
+  const d = await r.json();
+
+  document.getElementById('balance').textContent = fmt(d.balance,2);
+  document.getElementById('pnl').innerHTML = `<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)} USDC</span>`;
+  document.getElementById('winrate').textContent = fmt(d.summary.winrate,1) + '%';
+  document.getElementById('trades').textContent = d.summary.trades;
+  document.getElementById('position').textContent = d.open_position ? JSON.stringify(d.open_position,null,2) : 'Aucune position ouverte';
+
+  renderToggles(d.config);
+
+  const perfCols = [
+    {label:'Nom', key:'name'},
+    {label:'Trades', key:'trades'},
+    {label:'Winrate', get:r=>fmt(r.winrate,1)+'%'},
+    {label:'PnL', get:r=>fmt(r.pnl,4), cls:v=>cls(v)},
+    {label:'Avg', get:r=>fmt(r.avg_pnl,4), cls:v=>cls(v)},
+    {label:'PF', get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}
+  ];
+  table('byMode', perfCols, d.by_mode);
+  table('bySymbol', perfCols, d.by_symbol);
+  table('byExit', perfCols, d.by_exit_reason);
+
+  table('analysis', [
+    {label:'Heure', key:'time'},
+    {label:'Coin', key:'symbol'},
+    {label:'Signal', key:'signal'},
+    {label:'Mode', key:'mode'},
+    {label:'Close', get:r=>fmt(r.close,5)},
+    {label:'RSI', get:r=>fmt(r.rsi,1)},
+    {label:'Score', get:r=>fmt(r.score,2)},
+    {label:'A/B/C/D', get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}`}
+  ], (d.analysis_history||[]).slice(-40).reverse());
+
+  table('recentTrades', [
+    {label:'Date', key:'date'},
+    {label:'Coin', key:'symbol'},
+    {label:'Mode', key:'mode'},
+    {label:'Entry', key:'entry'},
+    {label:'Exit', key:'exit'},
+    {label:'Sortie', key:'exit_reason'},
+    {label:'TP1', key:'tp1_done'},
+    {label:'PnL prix %', get:r=>fmt(r.pnl_price_pct,2), cls:v=>cls(v)},
+    {label:'PnL USDC', get:r=>fmt(r.real_pnl_usdc,4), cls:v=>cls(v)}
+  ], (d.recent_trades||[]).slice().reverse());
+
+  document.getElementById('logs').textContent = (d.log_history||[]).slice(-80).join('\n');
+}
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>"""
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def _send(self, status, content, content_type="text/html; charset=utf-8"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+
+        self.wfile.write(content)
+
+    def _json(self, obj, status=200):
+        self._send(status, json.dumps(obj, ensure_ascii=False, default=str), "application/json; charset=utf-8")
+
+    def do_GET(self):
+        if not dashboard_auth_ok(self):
+            return self._json({"error": "unauthorized"}, 401)
+
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/":
+            return self._send(200, DASHBOARD_HTML)
+
+        if parsed.path == "/api/data":
+            return self._json(compute_dashboard_stats())
+
+        if parsed.path == "/api/config":
+            return self._json(load_bot_config())
+
+        return self._json({"error": "not found"}, 404)
+
+    def do_POST(self):
+        if not dashboard_auth_ok(self):
+            return self._json({"error": "unauthorized"}, 401)
+
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/api/config":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8")
+                cfg = json.loads(body)
+                base_cfg = load_bot_config()
+
+                if isinstance(cfg.get("modes"), dict):
+                    for k in base_cfg["modes"].keys():
+                        if k in cfg["modes"]:
+                            base_cfg["modes"][k] = bool(cfg["modes"][k])
+
+                if isinstance(cfg.get("symbols"), dict):
+                    for k in base_cfg["symbols"].keys():
+                        if k in cfg["symbols"]:
+                            base_cfg["symbols"][k] = bool(cfg["symbols"][k])
+
+                save_bot_config(base_cfg)
+                return self._json({"ok": True, "config": base_cfg})
+
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+
+        return self._json({"error": "not found"}, 404)
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_dashboard_server():
+    def _run():
+        try:
+            server = ThreadingHTTPServer(("0.0.0.0", DASHBOARD_PORT), DashboardHandler)
+            print(f"[DASHBOARD] http://0.0.0.0:{DASHBOARD_PORT}")
+            server.serve_forever()
+        except Exception as e:
+            print("[ERREUR DASHBOARD]", e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
 
 
 def notify_telegram(message):
@@ -1177,6 +1636,12 @@ def buy_signal(df):
     mode_d_ok = mode_d_pullback_between_emas or mode_d_cross_both_emas
 
     signal_mode = None
+    # Activation / désactivation via dashboard
+    mode_a_ok = mode_a_ok and is_mode_enabled("MODE_A_CLASSIQUE")
+    mode_b_ok = mode_b_ok and is_mode_enabled("MODE_B_PATTERN")
+    mode_c_ok = mode_c_ok and is_mode_enabled("MODE_C_CAPITULATION")
+    mode_d_ok = mode_d_ok and is_mode_enabled("MODE_D_EMA_PULLBACK")
+
     if mode_a_ok:
         signal_mode = "MODE_A_CLASSIQUE"
     elif mode_b_ok:
@@ -1493,7 +1958,7 @@ def scan_symbols_for_best_buy():
     candidates = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    for symbol in SYMBOLS:
+    for symbol in get_enabled_symbols():
         df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
         if df is None:
             continue
@@ -1577,7 +2042,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8G MODE D V2")
+    print("BOT MULTI V3.8H DASHBOARD")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1600,15 +2065,18 @@ def run():
     print("Solde:", start_balance, "USDC")
     print("---")
     ensure_trades_csv()
+    save_bot_config(load_bot_config())
+    start_dashboard_server()
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8G Mode D V2 démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8H Dashboard démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
         f"Taille trade: {TRADE_SIZE_USD} USDC\n"
-        f"Commandes: /report /csv /analysis /log /help"
+        f"Commandes: /report /csv /analysis /log /help\n"
+        f"Dashboard: port {DASHBOARD_PORT}"
     )
 
     trades = 0
