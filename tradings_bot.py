@@ -343,7 +343,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Modes A/B/C/D · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Mode D EMA20 Exit · Modes A/B/C/D · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1715,39 +1715,41 @@ def manage_open_position(pos, df, current_price, candle_time):
     )
 
     # Gestion spéciale MODE D :
-    # TP1 à EMA haute, puis sortie complète si clôture sous EMA haute après TP1.
+    # V3.8J : plus de vente 50% sur EMA20.
+    # On garde 100% de la position tant qu'une bougie 15m ne clôture pas sous EMA20.
+    # L'ATR stop de sécurité reste géré plus bas.
     if trade_state.get("signal_mode") == "MODE_D_EMA_PULLBACK":
-        ema_high_now = max(last["ema20"], last["ema50"])
-
-        if not trade_state["tp1_done"] and current_price >= ema_high_now:
-            LAST_SELL_REASON = "MODE_D_TP_EMA_HIGH"
-            trade_state["tp1_price"] = round(ema_high_now, 5)
-            trade_state["tp1_exec_price"] = round(current_price, 5)
-            trade_state["tp1_qty"] = abs(pos["size"]) * 0.5
-            print("[MODE D] EMA haute touchée. Vente de 50%.")
+        if not min_hold_active and last["close"] < last["ema20"]:
+            LAST_SELL_REASON = "MODE_D_CLOSE_UNDER_EMA20"
+            print("[MODE D] Clôture sous EMA20. Sortie totale.")
             notify_telegram(
-                f"🎯 <b>MODE D - TP EMA haute atteint</b>\n"
+                f"📉 <b>MODE D - Clôture sous EMA20</b>\n"
                 f"Symbole: {symbol}\n"
                 f"Entry: {entry:.5f}\n"
                 f"Prix: {current_price:.5f}\n"
-                f"EMA haute: {ema_high_now:.5f}\n"
+                f"Close: {last['close']:.5f}\n"
+                f"EMA20: {last['ema20']:.5f}\n"
                 f"PnL: {pnl_pct:.2f}%\n"
                 f"Solde: {round(get_balance(), 2)} USDC\n"
-                f"Action: vente 50%"
+                f"Action: vente 100%"
             )
-            if close_position_fraction(pos, 0.5, current_price):
-                trade_state["tp1_done"] = True
+            if close_position_full(pos, current_price):
+                final_balance = round(get_balance(), 2)
+                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                reset_trade_state_after_sell(candle_time)
             return
 
-        if trade_state["tp1_done"] and last["close"] < ema_high_now:
-            LAST_SELL_REASON = "MODE_D_CLOSE_UNDER_EMA_HIGH"
-            print("[MODE D] Clôture sous EMA haute après TP1. Sortie totale.")
+        # Important : pour le Mode D, on ignore le TP1 standard et le trailing.
+        # Seules sorties : close sous EMA20 ou ATR_STOP.
+        if hard_stop_hit:
+            LAST_SELL_REASON = "ATR_STOP"
+            print("[MODE D] ATR stop touché. Sortie totale.")
             notify_telegram(
-                f"📉 <b>MODE D - Sortie sous EMA haute</b>\n"
+                f"🛑 <b>MODE D - ATR STOP</b>\n"
                 f"Symbole: {symbol}\n"
                 f"Entry: {entry:.5f}\n"
                 f"Prix: {current_price:.5f}\n"
-                f"EMA haute: {ema_high_now:.5f}\n"
+                f"Stop: {hard_stop:.5f}\n"
                 f"PnL: {pnl_pct:.2f}%\n"
                 f"Solde: {round(get_balance(), 2)} USDC"
             )
@@ -1756,6 +1758,8 @@ def manage_open_position(pos, df, current_price, candle_time):
                 send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
                 reset_trade_state_after_sell(candle_time)
             return
+
+        return
 
     if not trade_state["tp1_done"] and current_price >= tp1_price:
         LAST_SELL_REASON = "TP1_PARTIAL"
@@ -1934,7 +1938,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8I DASHBOARD IPHONE")
+    print("BOT MULTI V3.8J MODE D EMA20 EXIT")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1962,7 +1966,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8I Dashboard iPhone démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8J Mode D EMA20 Exit démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -2071,6 +2075,7 @@ def run():
                 f"Mode D type D2 cross double EMA: {details.get('mode_d_cross_both_emas')}\n"
                 f"Mode D EMA basse: {details.get('mode_d_entry_ema_low')}\n"
                 f"Mode D EMA haute cible: {details.get('mode_d_target_ema_high')}\n"
+                f"Mode D sortie: clôture sous EMA20\n"
                 f"Close > EMA20: {details.get('close_above_ema20')}\n"
                 f"Min hold EMA20: {MIN_HOLD_CANDLES_AFTER_BUY} bougie(s)\n"
                 f"Solde avant ordre: {round(balance, 2)} USDC"
@@ -2110,7 +2115,7 @@ def run():
                 else:
                     trade_state["mode_d_type"] = None
                 if details.get("signal_mode") == "MODE_D_EMA_PULLBACK":
-                    trade_state["tp1_price"] = details.get("mode_d_target_ema_high")
+                    trade_state["tp1_price"] = None
                 else:
                     trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
                 trade_state["tp1_exec_price"] = None
