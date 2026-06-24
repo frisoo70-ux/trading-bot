@@ -255,16 +255,30 @@ POST_TRADE_HORIZONS = [
 ]
 
 
+def ensure_post_trade_files():
+    try:
+        if not POST_TRADE_CSV_PATH.exists():
+            cols = [
+                "date", "symbol", "mode", "exit_reason",
+                "entry", "exit", "real_pnl_usdc", "pnl_at_exit_pct",
+                "pnl_15m_pct", "pnl_30m_pct", "pnl_1h_pct", "pnl_2h_pct", "pnl_4h_pct",
+                "max_gain_after_exit_pct", "max_loss_after_exit_pct",
+                "exit_efficiency_pct", "verdict", "status",
+            ]
+            pd.DataFrame(columns=cols).to_csv(POST_TRADE_CSV_PATH, index=False)
+            print("[POST TRADE] post_trade_analysis.csv créé")
+
+        if not POST_TRADE_PENDING_PATH.exists():
+            with open(POST_TRADE_PENDING_PATH, "w", encoding="utf-8") as f:
+                json.dump([], f)
+            print("[POST TRADE] post_trade_pending.json créé")
+
+    except Exception as e:
+        print("[ERREUR POST TRADE ENSURE]", e)
+
+
 def ensure_post_trade_csv():
-    if not POST_TRADE_CSV_PATH.exists():
-        cols = [
-            "date", "symbol", "mode", "exit_reason",
-            "entry", "exit", "real_pnl_usdc", "pnl_at_exit_pct",
-            "pnl_15m_pct", "pnl_30m_pct", "pnl_1h_pct", "pnl_2h_pct", "pnl_4h_pct",
-            "max_gain_after_exit_pct", "max_loss_after_exit_pct",
-            "exit_efficiency_pct", "verdict", "status",
-        ]
-        pd.DataFrame(columns=cols).to_csv(POST_TRADE_CSV_PATH, index=False)
+    ensure_post_trade_files()
 
 
 def load_pending_post_trades():
@@ -289,10 +303,11 @@ def save_pending_post_trades(items):
 
 def add_post_trade_tracking(symbol, exit_price, exit_reason, final_balance):
     try:
-        ensure_post_trade_csv()
+        ensure_post_trade_files()
 
         entry = trade_state.get("entry_price")
         if not entry:
+            print("[POST TRADE] Non lancé : entry_price manquant dans trade_state")
             return
 
         entry_balance = trade_state.get("entry_balance")
@@ -331,7 +346,7 @@ def add_post_trade_tracking(symbol, exit_price, exit_reason, final_balance):
 
 def finalize_post_trade_item(item):
     try:
-        ensure_post_trade_csv()
+        ensure_post_trade_files()
 
         entry = float(item["entry"])
         exit_price = float(item["exit"])
@@ -427,7 +442,7 @@ def update_post_trade_tracking(symbol, current_price):
 
 def load_post_trade_dataframe():
     try:
-        ensure_post_trade_csv()
+        ensure_post_trade_files()
         return pd.read_csv(POST_TRADE_CSV_PATH)
     except Exception:
         return pd.DataFrame()
@@ -574,7 +589,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Post Trade Analyzer · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Post Trade Fix · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1107,6 +1122,45 @@ def initialize_telegram_offset():
 
     except Exception as e:
         print("[ERREUR TELEGRAM INIT OFFSET]", e)
+
+
+
+def build_posttrade_message():
+    try:
+        ensure_post_trade_files()
+        pending = load_pending_post_trades()
+        df = load_post_trade_dataframe()
+
+        total_done = 0 if df.empty else len(df)
+
+        msg = (
+            "🔍 <b>POST TRADE ANALYZER</b>\n"
+            f"Fichier pending: {'OK' if POST_TRADE_PENDING_PATH.exists() else 'ABSENT'}\n"
+            f"Fichier analysis: {'OK' if POST_TRADE_CSV_PATH.exists() else 'ABSENT'}\n"
+            f"Analyses en attente: {len(pending)}\n"
+            f"Analyses terminées: {total_done}\n"
+        )
+
+        if pending:
+            msg += "\n<b>En attente:</b>\n"
+            for item in pending[-5:]:
+                msg += (
+                    f"- {item.get('symbol')} {item.get('mode')} "
+                    f"sortie {item.get('exit_reason')} à {item.get('exit')}\n"
+                )
+
+        if not df.empty:
+            msg += "\n<b>Dernières analyses:</b>\n"
+            for _, row in df.tail(5).iterrows():
+                msg += (
+                    f"- {row.get('symbol')} {row.get('verdict')} "
+                    f"max après: {row.get('max_gain_after_exit_pct')}%\n"
+                )
+
+        return msg
+
+    except Exception as e:
+        return f"⚠️ Erreur /posttrade: {e}"
 
 
 def check_telegram_commands():
@@ -2381,7 +2435,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8M POST TRADE ANALYZER")
+    print("BOT MULTI V3.8N POST TRADE FIX")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2404,18 +2458,18 @@ def run():
     print("Solde:", start_balance, "USDC")
     print("---")
     ensure_trades_csv()
-    ensure_post_trade_csv()
+    ensure_post_trade_files()
     save_bot_config(load_bot_config())
     start_dashboard_server()
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8M Post Trade Analyzer démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8N Post Trade Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
         f"Taille trade: {TRADE_SIZE_USD} USDC\n"
-        f"Commandes: /report /csv /analysis /log /help\n"
+        f"Commandes: /report /csv /analysis /log /posttrade /help\n"
         f"Dashboard: port {DASHBOARD_PORT}"
     )
 
