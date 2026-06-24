@@ -314,186 +314,78 @@ DASHBOARD_HTML = r"""<!doctype html>
 <html lang="fr">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>Trading Bot Dashboard</title>
   <style>
-    :root { --bg:#0b1220; --card:#111827; --card2:#172033; --txt:#e5e7eb; --muted:#9ca3af; --green:#22c55e; --red:#ef4444; --yellow:#f59e0b; --blue:#38bdf8; }
-    * { box-sizing:border-box; }
-    body { margin:0; font-family:Arial, sans-serif; background:var(--bg); color:var(--txt); }
-    header { padding:18px; border-bottom:1px solid #243044; position:sticky; top:0; background:rgba(11,18,32,.95); z-index:3; }
-    h1 { margin:0 0 5px; font-size:22px; }
-    .sub { color:var(--muted); font-size:13px; }
-    .wrap { padding:16px; max-width:1300px; margin:auto; }
-    .grid { display:grid; gap:14px; }
-    .cards { grid-template-columns:repeat(4,minmax(0,1fr)); }
-    .two { grid-template-columns:repeat(2,minmax(0,1fr)); }
-    .card { background:var(--card); border:1px solid #243044; border-radius:14px; padding:14px; box-shadow:0 6px 18px rgba(0,0,0,.18); }
-    .metric { font-size:25px; font-weight:700; margin-top:6px; }
-    .muted { color:var(--muted); font-size:13px; }
-    .pos { color:var(--green); }
-    .neg { color:var(--red); }
-    table { width:100%; border-collapse:collapse; font-size:13px; }
-    th,td { padding:9px 8px; border-bottom:1px solid #263348; text-align:left; white-space:nowrap; }
-    th { color:var(--muted); font-weight:600; }
-    .scroll { overflow:auto; max-height:430px; }
-    .toggles { display:flex; flex-wrap:wrap; gap:10px; }
-    .toggle { display:flex; align-items:center; gap:8px; background:var(--card2); padding:10px 12px; border-radius:12px; border:1px solid #2b3950; }
-    input[type=checkbox] { width:20px; height:20px; }
-    button { background:var(--blue); border:0; padding:10px 14px; border-radius:10px; font-weight:700; cursor:pointer; color:#04121d; }
-    pre { white-space:pre-wrap; font-size:12px; max-height:360px; overflow:auto; background:#070d18; padding:12px; border-radius:10px; color:#cbd5e1; }
-    .pill { display:inline-block; border-radius:999px; padding:4px 8px; background:#243044; font-size:12px; color:#cbd5e1; }
-    @media (max-width:900px){ .cards,.two{grid-template-columns:1fr;} table{font-size:12px;} }
+    :root{--bg:#07111f;--card:#101827;--card2:#172033;--txt:#e5e7eb;--muted:#9ca3af;--green:#22c55e;--red:#ef4444;--blue:#38bdf8;--border:#263348}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--txt);padding-bottom:env(safe-area-inset-bottom)}
+    header{padding:14px 14px 10px;padding-top:calc(14px + env(safe-area-inset-top));border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(7,17,31,.96);backdrop-filter:blur(10px);z-index:3}
+    h1{margin:0 0 4px;font-size:20px;line-height:1.15} h3{margin:0 0 12px;font-size:17px}.sub{color:var(--muted);font-size:12px;line-height:1.35}
+    .wrap{padding:12px;max-width:1300px;margin:auto}.grid{display:grid;gap:12px}.cards{grid-template-columns:repeat(4,minmax(0,1fr))}.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 6px 18px rgba(0,0,0,.18);overflow:hidden}
+    .metric{font-size:25px;font-weight:800;margin-top:6px;letter-spacing:-.3px}.muted{color:var(--muted);font-size:13px}.pos{color:var(--green)}.neg{color:var(--red)}
+    .scroll{overflow:auto;max-height:430px;-webkit-overflow-scrolling:touch;border-radius:10px}
+    table{width:100%;border-collapse:collapse;font-size:13px;min-width:620px}
+    th,td{padding:10px 8px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}
+    th{color:var(--muted);font-weight:700;position:sticky;top:0;background:var(--card);z-index:1}
+    .toggles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card2);padding:13px 12px;border-radius:14px;border:1px solid #2b3950;min-height:48px;font-size:14px;font-weight:650}
+    input[type=checkbox]{appearance:none;width:48px;height:28px;border-radius:999px;background:#4b5563;position:relative;flex:0 0 auto;transition:.18s;border:1px solid #64748b}
+    input[type=checkbox]::after{content:"";width:22px;height:22px;border-radius:50%;background:white;position:absolute;top:2px;left:2px;transition:.18s;box-shadow:0 2px 5px rgba(0,0,0,.35)}
+    input[type=checkbox]:checked{background:var(--green);border-color:var(--green)} input[type=checkbox]:checked::after{transform:translateX(20px)}
+    button{background:var(--blue);border:0;padding:13px 16px;border-radius:13px;font-weight:800;cursor:pointer;color:#04121d;width:100%;font-size:15px;min-height:48px}
+    pre{white-space:pre-wrap;font-size:12px;max-height:360px;overflow:auto;background:#070d18;padding:12px;border-radius:12px;color:#cbd5e1;line-height:1.35;-webkit-overflow-scrolling:touch}
+    .mobileHint{display:none;color:var(--muted);font-size:12px;margin:4px 0 8px}
+    @media(max-width:900px){.cards,.two{grid-template-columns:1fr}.wrap{padding:10px}.card{padding:13px;border-radius:15px}table{font-size:12px;min-width:720px}th,td{padding:9px 7px}.mobileHint{display:block}}
+    @media(max-width:520px){h1{font-size:18px}h3{font-size:16px}.sub{font-size:11px}.cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{font-size:22px}.card{padding:12px}.toggles{grid-template-columns:1fr}.toggle{font-size:15px;padding:14px 13px}.scroll{max-height:360px}pre{max-height:300px;font-size:11px}}
+    @media(max-width:380px){.cards{grid-template-columns:1fr}.metric{font-size:24px}}
   </style>
 </head>
 <body>
-<header>
-  <h1>🤖 Trading Bot Dashboard</h1>
-  <div class="sub">Modes A/B/C/D · SOL / XRP / kSHIB · refresh auto</div>
-</header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Modes A/B/C/D · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
-    <div class="card"><div class="muted">Solde USDC</div><div id="balance" class="metric">-</div></div>
-    <div class="card"><div class="muted">PnL total</div><div id="pnl" class="metric">-</div></div>
+    <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
+    <div class="card"><div class="muted">PnL</div><div id="pnl" class="metric">-</div></div>
     <div class="card"><div class="muted">Winrate</div><div id="winrate" class="metric">-</div></div>
     <div class="card"><div class="muted">Trades</div><div id="trades" class="metric">-</div></div>
   </div>
-
-  <div class="grid two" style="margin-top:14px">
+  <div class="grid two" style="margin-top:12px">
     <div class="card">
-      <h3>⚙️ Activer / désactiver les modes</h3>
-      <div id="modeToggles" class="toggles"></div>
-      <h3>🪙 Activer / désactiver les tokens</h3>
-      <div id="symbolToggles" class="toggles"></div>
-      <div style="margin-top:14px"><button onclick="saveConfig()">Sauvegarder config</button> <span id="saveStatus" class="muted"></span></div>
+      <h3>⚙️ Contrôle du bot</h3>
+      <div class="muted" style="margin-bottom:8px">Modes</div><div id="modeToggles" class="toggles"></div>
+      <div class="muted" style="margin:14px 0 8px">Tokens</div><div id="symbolToggles" class="toggles"></div>
+      <div style="margin-top:14px"><button onclick="saveConfig()">Sauvegarder</button><div id="saveStatus" class="muted" style="margin-top:8px"></div></div>
     </div>
-
-    <div class="card">
-      <h3>📌 Position ouverte</h3>
-      <pre id="position">-</pre>
-    </div>
+    <div class="card"><h3>📌 Position ouverte</h3><pre id="position">-</pre></div>
   </div>
-
-  <div class="grid two" style="margin-top:14px">
-    <div class="card"><h3>📊 Performance par mode</h3><div class="scroll"><table id="byMode"></table></div></div>
-    <div class="card"><h3>🪙 Performance par token</h3><div class="scroll"><table id="bySymbol"></table></div></div>
+  <div class="grid two" style="margin-top:12px">
+    <div class="card"><h3>📊 Par mode</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="byMode"></table></div></div>
+    <div class="card"><h3>🪙 Par token</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="bySymbol"></table></div></div>
   </div>
-
-  <div class="grid two" style="margin-top:14px">
-    <div class="card"><h3>🚪 Performance par sortie</h3><div class="scroll"><table id="byExit"></table></div></div>
-    <div class="card"><h3>🧠 Derniers signaux /analysis</h3><div class="scroll"><table id="analysis"></table></div></div>
+  <div class="grid two" style="margin-top:12px">
+    <div class="card"><h3>🚪 Par sortie</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="byExit"></table></div></div>
+    <div class="card"><h3>🧠 Signaux récents</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="analysis"></table></div></div>
   </div>
-
-  <div class="card" style="margin-top:14px">
-    <h3>📜 Derniers trades</h3>
-    <div class="scroll"><table id="recentTrades"></table></div>
-  </div>
-
-  <div class="card" style="margin-top:14px">
-    <h3>📋 Logs récents</h3>
-    <pre id="logs"></pre>
-  </div>
+  <div class="card" style="margin-top:12px"><h3>📜 Derniers trades</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="recentTrades"></table></div></div>
+  <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
 </div>
-
 <script>
-let currentConfig = null;
-
-function cls(v){ return Number(v) >= 0 ? 'pos' : 'neg'; }
-function fmt(v, d=2){ if(v===null || v===undefined || v==='') return '-'; const n=Number(v); return isNaN(n)?v:n.toFixed(d); }
-
-function table(el, cols, rows){
-  const head = '<tr>' + cols.map(c=>`<th>${c.label}</th>`).join('') + '</tr>';
-  const body = (rows||[]).map(r => '<tr>' + cols.map(c=>{
-    let val = c.get ? c.get(r) : r[c.key];
-    let klass = c.cls ? c.cls(val,r) : '';
-    return `<td class="${klass}">${val ?? '-'}</td>`;
-  }).join('') + '</tr>').join('');
-  document.getElementById(el).innerHTML = head + body;
-}
-
-function renderToggles(cfg){
-  currentConfig = cfg;
-  const modeLabels = {
-    MODE_A_CLASSIQUE:'Mode A classique',
-    MODE_B_PATTERN:'Mode B pattern',
-    MODE_C_CAPITULATION:'Mode C capitulation',
-    MODE_D_EMA_PULLBACK:'Mode D EMA'
-  };
-
-  document.getElementById('modeToggles').innerHTML = Object.keys(cfg.modes).map(k=>`
-    <label class="toggle"><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}> ${modeLabels[k]||k}</label>
-  `).join('');
-
-  document.getElementById('symbolToggles').innerHTML = Object.keys(cfg.symbols).map(k=>`
-    <label class="toggle"><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}> ${k}</label>
-  `).join('');
-}
-
-async function saveConfig(){
-  document.querySelectorAll('input[type=checkbox]').forEach(i=>{
-    currentConfig[i.dataset.section][i.dataset.key] = i.checked;
-  });
-
-  const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(currentConfig)});
-  document.getElementById('saveStatus').textContent = r.ok ? '✅ sauvegardé' : '❌ erreur';
-  setTimeout(()=>document.getElementById('saveStatus').textContent='', 2500);
-  load();
-}
-
-async function load(){
-  const r = await fetch('/api/data');
-  const d = await r.json();
-
-  document.getElementById('balance').textContent = fmt(d.balance,2);
-  document.getElementById('pnl').innerHTML = `<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)} USDC</span>`;
-  document.getElementById('winrate').textContent = fmt(d.summary.winrate,1) + '%';
-  document.getElementById('trades').textContent = d.summary.trades;
-  document.getElementById('position').textContent = d.open_position ? JSON.stringify(d.open_position,null,2) : 'Aucune position ouverte';
-
-  renderToggles(d.config);
-
-  const perfCols = [
-    {label:'Nom', key:'name'},
-    {label:'Trades', key:'trades'},
-    {label:'Winrate', get:r=>fmt(r.winrate,1)+'%'},
-    {label:'PnL', get:r=>fmt(r.pnl,4), cls:v=>cls(v)},
-    {label:'Avg', get:r=>fmt(r.avg_pnl,4), cls:v=>cls(v)},
-    {label:'PF', get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}
-  ];
-  table('byMode', perfCols, d.by_mode);
-  table('bySymbol', perfCols, d.by_symbol);
-  table('byExit', perfCols, d.by_exit_reason);
-
-  table('analysis', [
-    {label:'Heure', key:'time'},
-    {label:'Coin', key:'symbol'},
-    {label:'Signal', key:'signal'},
-    {label:'Mode', key:'mode'},
-    {label:'Close', get:r=>fmt(r.close,5)},
-    {label:'RSI', get:r=>fmt(r.rsi,1)},
-    {label:'Score', get:r=>fmt(r.score,2)},
-    {label:'A/B/C/D', get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}`}
-  ], (d.analysis_history||[]).slice(-40).reverse());
-
-  table('recentTrades', [
-    {label:'Date', key:'date'},
-    {label:'Coin', key:'symbol'},
-    {label:'Mode', key:'mode'},
-    {label:'Entry', key:'entry'},
-    {label:'Exit', key:'exit'},
-    {label:'Sortie', key:'exit_reason'},
-    {label:'TP1', key:'tp1_done'},
-    {label:'PnL prix %', get:r=>fmt(r.pnl_price_pct,2), cls:v=>cls(v)},
-    {label:'PnL USDC', get:r=>fmt(r.real_pnl_usdc,4), cls:v=>cls(v)}
-  ], (d.recent_trades||[]).slice().reverse());
-
-  document.getElementById('logs').textContent = (d.log_history||[]).slice(-80).join('\n');
-}
-
-load();
-setInterval(load, 10000);
+let currentConfig=null;
+function cls(v){return Number(v)>=0?'pos':'neg'} function fmt(v,d=2){if(v===null||v===undefined||v==='')return'-';const n=Number(v);return isNaN(n)?v:n.toFixed(d)}
+function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').replace('_CLASSIQUE','').replace('_PATTERN','').replace('_CAPITULATION','').replace('_EMA_PULLBACK','')}
+function table(el,cols,rows){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map(r=>'<tr>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>').join('');document.getElementById(el).innerHTML=head+body}
+function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}</span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('')}
+async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
+async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);
+const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
+table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}`}],(d.analysis_history||[]).slice(-40).reverse());
+table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],(d.recent_trades||[]).slice().reverse());
+document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
+load();setInterval(load,10000);
 </script>
-</body>
-</html>"""
+</body></html>"""
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -2042,7 +1934,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8H DASHBOARD")
+    print("BOT MULTI V3.8I DASHBOARD IPHONE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2070,7 +1962,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8H Dashboard démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8I Dashboard iPhone démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
