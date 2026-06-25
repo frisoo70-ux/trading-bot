@@ -339,9 +339,85 @@ def add_post_trade_tracking(symbol, exit_price, exit_reason, final_balance):
         save_pending_post_trades(pending)
 
         print(f"[POST TRADE] Tracking lancé pour {symbol} après sortie {exit_reason}")
+        print(f"[POST TRADE] Pending total = {len(pending)}")
 
     except Exception as e:
         print("[ERREUR POST TRADE ADD]", e)
+
+
+
+def add_post_trade_tracking_direct(
+    symbol,
+    mode,
+    entry_price,
+    exit_price,
+    exit_reason,
+    entry_balance=None,
+    final_balance=None,
+):
+    """
+    Version robuste du Post Trade Analyzer.
+    Elle ne dépend pas de trade_state, donc elle fonctionne même si le state est nettoyé.
+    """
+    try:
+        ensure_post_trade_files()
+
+        if entry_price is None or exit_price is None:
+            print("[POST TRADE DIRECT] Non lancé : entry ou exit manquant")
+            return False
+
+        entry_f = float(entry_price)
+        exit_f = float(exit_price)
+
+        real_pnl = None
+        if entry_balance is not None and final_balance is not None:
+            try:
+                real_pnl = round(float(final_balance) - float(entry_balance), 6)
+            except Exception:
+                real_pnl = None
+
+        now_ms = int(time.time() * 1000)
+
+        item = {
+            "id": f"{symbol}_{now_ms}",
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "mode": mode,
+            "exit_reason": exit_reason,
+            "entry": entry_f,
+            "exit": exit_f,
+            "real_pnl_usdc": real_pnl,
+            "pnl_at_exit_pct": round(((exit_f - entry_f) / entry_f) * 100, 4),
+            "exit_time_ms": now_ms,
+            "horizons": {},
+            "max_price": exit_f,
+            "min_price": exit_f,
+            "status": "PENDING",
+        }
+
+        pending = load_pending_post_trades()
+
+        # Anti-doublon simple : même symbole + même sortie dans les 10 dernières secondes
+        for old in pending[-5:]:
+            if (
+                old.get("symbol") == symbol
+                and abs(float(old.get("exit", 0)) - exit_f) < 1e-9
+                and abs(int(old.get("exit_time_ms", 0)) - now_ms) < 10000
+            ):
+                print("[POST TRADE DIRECT] Doublon évité")
+                return True
+
+        pending.append(item)
+        save_pending_post_trades(pending)
+
+        print(f"[POST TRADE DIRECT] Tracking lancé pour {symbol} après sortie {exit_reason}")
+        print(f"[POST TRADE DIRECT] Pending total = {len(pending)}")
+        return True
+
+    except Exception as e:
+        print("[ERREUR POST TRADE DIRECT]", e)
+        return False
+
 
 
 def finalize_post_trade_item(item):
@@ -472,8 +548,10 @@ def compute_dashboard_stats():
         "by_exit_reason": [],
         "recent_trades": [],
         "post_trade_analysis": [],
+        "post_trade_pending": [],
         "post_trade_summary": {
             "total": 0,
+            "pending": 0,
             "sortie_trop_tot": 0,
             "bonne_sortie": 0,
             "neutre": 0,
@@ -482,20 +560,27 @@ def compute_dashboard_stats():
         "log_history": LOG_HISTORY[-120:],
     }
 
+    try:
+        pending_items = load_pending_post_trades()
+        result["post_trade_pending"] = pending_items[-50:]
+
+        post_df = load_post_trade_dataframe()
+        if not post_df.empty:
+            result["post_trade_analysis"] = post_df.tail(50).fillna("").to_dict(orient="records")
+            verdicts = post_df.get("verdict", pd.Series(dtype=str)).fillna("")
+            result["post_trade_summary"] = {
+                "total": int(len(post_df)),
+                "pending": int(len(pending_items)),
+                "sortie_trop_tot": int((verdicts == "SORTIE_TROP_TOT").sum()),
+                "bonne_sortie": int((verdicts == "BONNE_SORTIE").sum()),
+                "neutre": int((verdicts == "NEUTRE").sum()),
+            }
+        else:
+            result["post_trade_summary"]["pending"] = int(len(pending_items))
+    except Exception as e:
+        print("[ERREUR POST TRADE DASHBOARD]", e)
+
     if df.empty:
-        try:
-            post_df = load_post_trade_dataframe()
-            if not post_df.empty:
-                result["post_trade_analysis"] = post_df.tail(50).fillna("").to_dict(orient="records")
-                verdicts = post_df.get("verdict", pd.Series(dtype=str)).fillna("")
-                result["post_trade_summary"] = {
-                    "total": int(len(post_df)),
-                    "sortie_trop_tot": int((verdicts == "SORTIE_TROP_TOT").sum()),
-                    "bonne_sortie": int((verdicts == "BONNE_SORTIE").sum()),
-                    "neutre": int((verdicts == "NEUTRE").sum()),
-                }
-        except Exception as e:
-            print("[ERREUR POST TRADE DASHBOARD]", e)
         return result
 
     df = df.copy()
@@ -589,7 +674,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Post Trade Fix · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Post Trade Hook Fix · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -618,6 +703,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="card" style="margin-top:12px">
     <h3>🔍 Post Trade Analyzer</h3>
     <div class="muted" id="postTradeSummary" style="margin-bottom:8px">-</div>
+    <h3 style="margin-top:12px">⏳ Analyses en attente</h3>
+    <div class="mobileHint">Ces lignes apparaissent juste après la clôture du trade.</div>
+    <div class="scroll"><table id="postTradePending"></table></div>
+    <h3 style="margin-top:14px">✅ Analyses terminées</h3>
     <div class="mobileHint">Balaye le tableau vers la droite.</div>
     <div class="scroll"><table id="postTrade"></table></div>
   </div>
@@ -635,7 +724,19 @@ const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'W
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}`}],(d.analysis_history||[]).slice(-40).reverse());
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],(d.recent_trades||[]).slice().reverse());
 const pts=d.post_trade_summary||{};
-document.getElementById('postTradeSummary').textContent=`Total ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
+document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
+table('postTradePending',[
+{label:'Date',key:'date'},
+{label:'Coin',key:'symbol'},
+{label:'Mode',get:r=>shortMode(r.mode)},
+{label:'Sortie',key:'exit_reason'},
+{label:'Entry',key:'entry'},
+{label:'Exit',key:'exit'},
+{label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},
+{label:'Max suivi',get:r=>fmt(((Number(r.max_price||r.exit)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},
+{label:'Min suivi',get:r=>fmt(((Number(r.min_price||r.exit)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},
+{label:'Status',key:'status'}
+],(d.post_trade_pending||[]).slice().reverse());
 table('postTrade',[
 {label:'Date',key:'date'},
 {label:'Coin',key:'symbol'},
@@ -1125,6 +1226,58 @@ def initialize_telegram_offset():
 
 
 
+
+def repair_posttrade_from_last_trade():
+    """
+    Crée une analyse pending à partir de la dernière ligne de trades.csv.
+    Utile si un résumé de trade est sorti mais que le Post Trade Analyzer n'a pas accroché.
+    """
+    try:
+        df = load_trades_dataframe()
+        if df.empty:
+            return "Aucun trade dans trades.csv."
+
+        last = df.tail(1).iloc[0].to_dict()
+        pending = load_pending_post_trades()
+
+        symbol = last.get("symbol")
+        exit_price = last.get("exit")
+        entry_price = last.get("entry")
+        exit_reason = last.get("exit_reason")
+        mode = last.get("mode")
+
+        if not symbol or entry_price in [None, ""] or exit_price in [None, ""]:
+            return "Dernier trade incomplet dans trades.csv."
+
+        # éviter doublon
+        for item in pending:
+            if (
+                item.get("symbol") == symbol
+                and str(item.get("entry")) == str(entry_price)
+                and str(item.get("exit")) == str(exit_price)
+                and item.get("exit_reason") == exit_reason
+            ):
+                return "Le dernier trade est déjà dans pending."
+
+        ok = add_post_trade_tracking_direct(
+            symbol=symbol,
+            mode=mode,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            entry_balance=last.get("balance_before"),
+            final_balance=last.get("balance_after"),
+        )
+
+        if ok:
+            return f"Réparation OK : dernier trade {symbol} ajouté au Post Trade Analyzer."
+        return "Réparation échouée."
+
+    except Exception as e:
+        return f"Erreur réparation posttrade: {e}"
+
+
+
 def build_posttrade_message():
     try:
         ensure_post_trade_files()
@@ -1139,6 +1292,7 @@ def build_posttrade_message():
             f"Fichier analysis: {'OK' if POST_TRADE_CSV_PATH.exists() else 'ABSENT'}\n"
             f"Analyses en attente: {len(pending)}\n"
             f"Analyses terminées: {total_done}\n"
+            f"Hook direct: ACTIF\n"
         )
 
         if pending:
@@ -2073,7 +2227,15 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
 
     msg += "Copier ce message dans ChatGPT pour analyse."
 
-    add_post_trade_tracking(symbol, exit_price, exit_reason, final_balance)
+    add_post_trade_tracking_direct(
+        symbol=symbol,
+        mode=trade_state.get("signal_mode"),
+        entry_price=entry,
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        entry_balance=entry_balance,
+        final_balance=final_balance,
+    )
     notify_telegram(msg)
 
     # Journal CSV + rapport stats + envoi fichier Telegram
@@ -2435,7 +2597,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8N POST TRADE FIX")
+    print("BOT MULTI V3.8P POST TRADE HOOK FIX")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2464,12 +2626,12 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8N Post Trade Fix démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.8P Post Trade Hook Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
         f"Taille trade: {TRADE_SIZE_USD} USDC\n"
-        f"Commandes: /report /csv /analysis /log /posttrade /help\n"
+        f"Commandes: /report /csv /analysis /log /posttrade /posttrade_repair /help\n"
         f"Dashboard: port {DASHBOARD_PORT}"
     )
 
