@@ -97,6 +97,14 @@ MODE_F_VOLUME_MULT = 1.3
 MODE_F_RSI_MAX = 65
 MODE_F_ATR_STOP_MULT = 2.5
 
+# SMART EXIT - modes de retournement C / E / F
+SMART_EXIT_REVERSAL_MODES = ["MODE_C_CAPITULATION", "MODE_E_EARLY_MOMENTUM", "MODE_F_CANDLE_REVERSAL"]
+SMART_EXIT_CLOSE_SCORE = 7
+SMART_EXIT_TIGHTEN_SCORE = 4
+SMART_EXIT_VOLUME_MULT = 1.3
+SMART_EXIT_ATR_STOP_MULT = 2.5
+POST_TRADE_FORCE_FINALIZE_AFTER_MS = 4 * 60 * 60 * 1000
+
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
 MIN_HOLD_CANDLES_AFTER_BUY = 1
@@ -490,6 +498,7 @@ def finalize_post_trade_item(item):
 
 def update_post_trade_tracking(symbol, current_price):
     try:
+        force_finalize_expired_post_trades()
         pending = load_pending_post_trades()
         if not pending:
             return
@@ -535,6 +544,7 @@ def load_post_trade_dataframe():
 
 
 def compute_dashboard_stats():
+    force_finalize_expired_post_trades()
     df = load_trades_dataframe()
     balance = round(get_balance(), 2)
 
@@ -683,7 +693,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.1 Mode F Candle · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.2 Smart Exit · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1437,7 +1447,7 @@ def build_help_message():
         "/log : derniers logs bougies\n"
         "/posttrade : état Post Trade Analyzer\n"
         "/posttrade_pending : analyses en attente\n"
-        "/posttrade_repair : ajoute le dernier trade au Post Trade si besoin\n"
+        "/posttrade_repair : ajoute le dernier trade au Post Trade si besoin\n        /posttrade_finalize : force la finalisation des analyses expirées\n"
         "/posttrade_export : recevoir post_trade_analysis.csv\n"
         "/score : performance par mode/token\n"
         "/dashboard : rappel accès dashboard\n"
@@ -1523,6 +1533,10 @@ def check_telegram_commands():
 
             if cmd.startswith("/posttrade_repair"):
                 notify_telegram(repair_posttrade_from_last_trade())
+                continue
+
+            if cmd.startswith("/posttrade_finalize"):
+                notify_telegram(build_posttrade_finalize_message())
                 continue
 
             if cmd.startswith("/posttrade_pending"):
@@ -2449,6 +2463,174 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
     send_telegram_document(TRADES_CSV_PATH, caption="📎 trades.csv mis à jour")
 
 
+
+def bearish_reversal_patterns(df):
+    try:
+        if len(df) < 30:
+            return 0, {"patterns": []}
+
+        last = df.iloc[-1]
+        p1 = df.iloc[-2]
+        p2 = df.iloc[-3]
+
+        def body(c): return abs(float(c["close"]) - float(c["open"]))
+        def rng(c): return max(float(c["high"]) - float(c["low"]), 1e-12)
+        def upper_wick(c): return float(c["high"]) - max(float(c["open"]), float(c["close"]))
+        def lower_wick(c): return min(float(c["open"]), float(c["close"])) - float(c["low"])
+        def green(c): return float(c["close"]) > float(c["open"])
+        def red(c): return float(c["close"]) < float(c["open"])
+
+        volume_ma20 = df["volume"].rolling(20).mean().iloc[-1]
+        volume_ratio = (float(last["volume"]) / volume_ma20) if volume_ma20 and volume_ma20 > 0 else 0
+
+        last_body = body(last)
+        last_range = rng(last)
+
+        bearish_engulfing = (
+            green(p1) and red(last)
+            and float(last["open"]) >= float(p1["close"])
+            and float(last["close"]) <= float(p1["open"])
+            and body(last) >= 0.8 * body(p1)
+        )
+        shooting_star = (
+            upper_wick(last) >= 2.0 * max(last_body, 1e-12)
+            and lower_wick(last) <= 0.7 * max(last_body, 1e-12)
+            and float(last["close"]) <= float(last["low"]) + 0.45 * last_range
+        )
+        evening_star = (
+            green(p2) and body(p1) <= 0.55 * body(p2)
+            and red(last)
+            and float(last["close"]) <= (float(p2["open"]) + float(p2["close"])) / 2
+        )
+        bearish_harami = (
+            green(p1) and red(last)
+            and float(last["open"]) <= float(p1["close"])
+            and float(last["close"]) >= float(p1["open"])
+            and body(last) <= 0.65 * body(p1)
+        )
+        tweezer_top = (
+            abs(float(last["high"]) - float(p1["high"])) <= max(float(last["atr"]) * 0.15, float(last["close"]) * 0.001)
+            and green(p1) and red(last)
+            and float(last["close"]) < float(p1["close"])
+        )
+        strong_red_volume = red(last) and volume_ratio >= SMART_EXIT_VOLUME_MULT and body(last) / last_range >= 0.55
+
+        patterns = []
+        score = 0.0
+        for name, ok, weight in [
+            ("bearish_engulfing", bearish_engulfing, 4.0),
+            ("shooting_star", shooting_star, 3.0),
+            ("evening_star", evening_star, 4.0),
+            ("bearish_harami", bearish_harami, 2.0),
+            ("tweezer_top", tweezer_top, 2.5),
+            ("strong_red_volume", strong_red_volume, 3.0),
+        ]:
+            if ok:
+                patterns.append(name)
+                score += weight
+
+        return score, {
+            "patterns": patterns,
+            "volume_ratio": round(volume_ratio, 2),
+            "score": round(score, 4),
+        }
+    except Exception as e:
+        print("[ERREUR BEARISH PATTERN]", e)
+        return 0, {"patterns": []}
+
+
+def smart_exit_reversal_decision(df, current_price, entry_price):
+    try:
+        if len(df) < 30:
+            return False, False, 0, {}
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        bearish_score, bearish_details = bearish_reversal_patterns(df)
+
+        volume_ma20 = df["volume"].rolling(20).mean().iloc[-1]
+        volume_ratio = (float(last["volume"]) / volume_ma20) if volume_ma20 and volume_ma20 > 0 else 0
+
+        close_under_ema20 = float(last["close"]) < float(last["ema20"])
+        two_closes_under_ema20 = close_under_ema20 and float(prev["close"]) < float(prev["ema20"])
+        close_under_ema50 = float(last["close"]) < float(last["ema50"])
+        obv_bad = float(last["obv"]) < float(last["obv_ma5"])
+        rsi_weak = float(last["rsi"]) < 45
+        red_volume = float(last["close"]) < float(last["open"]) and volume_ratio >= SMART_EXIT_VOLUME_MULT
+        pnl_pct = ((float(current_price) - float(entry_price)) / float(entry_price)) * 100 if entry_price else 0
+
+        score = bearish_score
+        if close_under_ema20: score += 2
+        if two_closes_under_ema20: score += 2
+        if close_under_ema50: score += 3
+        if obv_bad: score += 2
+        if rsi_weak: score += 1
+        if red_volume: score += 3
+        if pnl_pct <= -0.7 and (close_under_ema20 or obv_bad): score += 2
+
+        details = {
+            "score": round(score, 2),
+            "bearish_patterns": ",".join(bearish_details.get("patterns", [])),
+            "close_under_ema20": close_under_ema20,
+            "two_closes_under_ema20": two_closes_under_ema20,
+            "close_under_ema50": close_under_ema50,
+            "obv_bad": obv_bad,
+            "rsi_weak": rsi_weak,
+            "red_volume": red_volume,
+            "volume_ratio": round(volume_ratio, 2),
+            "pnl_pct": round(pnl_pct, 3),
+        }
+
+        return score >= SMART_EXIT_CLOSE_SCORE, score >= SMART_EXIT_TIGHTEN_SCORE, score, details
+    except Exception as e:
+        print("[ERREUR SMART EXIT]", e)
+        return False, False, 0, {}
+
+
+def force_finalize_expired_post_trades():
+    try:
+        pending = load_pending_post_trades()
+        if not pending:
+            return 0
+
+        now_ms = int(time.time() * 1000)
+        remaining = []
+        finalized = 0
+
+        for item in pending:
+            elapsed = now_ms - int(item.get("exit_time_ms", now_ms))
+
+            if elapsed >= POST_TRADE_FORCE_FINALIZE_AFTER_MS:
+                exit_price = float(item.get("exit", 0) or 0)
+                fallback_price = float(item.get("max_price", exit_price) or exit_price)
+                item.setdefault("horizons", {})
+                for label, _horizon_ms in POST_TRADE_HORIZONS:
+                    if label not in item["horizons"]:
+                        item["horizons"][label] = round(((fallback_price - exit_price) / exit_price) * 100, 4) if exit_price > 0 else None
+                finalize_post_trade_item(item)
+                finalized += 1
+            else:
+                remaining.append(item)
+
+        if finalized:
+            save_pending_post_trades(remaining)
+            print(f"[POST TRADE] Force finalize expired = {finalized}")
+
+        return finalized
+    except Exception as e:
+        print("[ERREUR POST TRADE FORCE FINALIZE]", e)
+        return 0
+
+
+def build_posttrade_finalize_message():
+    try:
+        count = force_finalize_expired_post_trades()
+        return f"✅ PostTrade finalize lancé. Analyses finalisées: {count}"
+    except Exception as e:
+        return f"⚠️ Erreur finalize posttrade: {e}"
+
+
+
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
@@ -2606,6 +2788,70 @@ def manage_open_position(pos, df, current_price, candle_time):
                 send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
                 reset_trade_state_after_sell(candle_time)
             return
+
+        return
+
+    # SMART EXIT pour les modes de retournement C / E / F
+    if trade_state.get("signal_mode") in SMART_EXIT_REVERSAL_MODES:
+        hard_stop = entry - SMART_EXIT_ATR_STOP_MULT * atr_value
+
+        if current_price <= hard_stop:
+            LAST_SELL_REASON = "SMART_EXIT_ATR_STOP"
+            print("[SMART EXIT] ATR stop touché. Sortie totale.")
+            notify_telegram(
+                f"🛑 <b>SMART EXIT - ATR STOP</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Mode: {trade_state.get('signal_mode')}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"Stop: {hard_stop:.5f}\n"
+                f"PnL: {pnl_pct:.2f}%"
+            )
+            if close_position_full(pos, current_price):
+                final_balance = round(get_balance(), 2)
+                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                reset_trade_state_after_sell(candle_time)
+            return
+
+        smart_close, smart_tighten, smart_score, smart_details = smart_exit_reversal_decision(df, current_price, entry)
+
+        if smart_close and not min_hold_active:
+            LAST_SELL_REASON = "SMART_EXIT_REVERSAL_SCORE"
+            print(f"[SMART EXIT] Sortie score={smart_score} details={smart_details}")
+            notify_telegram(
+                f"📉 <b>SMART EXIT - Sortie retournement</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Mode: {trade_state.get('signal_mode')}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"PnL: {pnl_pct:.2f}%\n"
+                f"Score sortie: {smart_score:.2f}\n"
+                f"Patterns: {smart_details.get('bearish_patterns')}\n"
+                f"OBV faible: {smart_details.get('obv_bad')}\n"
+                f"Volume vendeur: {smart_details.get('red_volume')}\n"
+                f"Sous EMA20: {smart_details.get('close_under_ema20')}"
+            )
+            if close_position_full(pos, current_price):
+                final_balance = round(get_balance(), 2)
+                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                reset_trade_state_after_sell(candle_time)
+            return
+
+        if smart_tighten:
+            tightened_stop = current_price - 0.8 * atr_value
+            current_trail = trade_state.get("trailing_stop")
+            if current_trail is None or tightened_stop > current_trail:
+                trade_state["trailing_stop"] = tightened_stop
+                print(f"[SMART EXIT] Trailing resserré à {tightened_stop:.5f} score={smart_score}")
+
+            if trade_state.get("trailing_stop") is not None and current_price <= trade_state["trailing_stop"]:
+                LAST_SELL_REASON = "SMART_EXIT_TIGHT_TRAIL"
+                print("[SMART EXIT] Trailing resserré touché. Sortie totale.")
+                if close_position_full(pos, current_price):
+                    final_balance = round(get_balance(), 2)
+                    send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                    reset_trade_state_after_sell(candle_time)
+                return
 
         return
 
@@ -2802,7 +3048,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.1 MODE F CANDLE REVERSAL")
+    print("BOT MULTI V4.2 SMART EXIT")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2831,7 +3077,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.1 Mode F Candle Reversal démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.2 Smart Exit démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
