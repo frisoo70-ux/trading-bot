@@ -91,6 +91,12 @@ MODE_E_INTRABAR_MIN_MOVE_PCT = 0.003
 MODE_E_INTRABAR_VOLUME_MULT = 1.5
 MODE_E_INTRABAR_MAX_DISTANCE_EMA20_PCT = 0.018
 
+# MODE F - Candle Reversal
+MODE_F_MIN_PATTERN_SCORE = 2.0
+MODE_F_VOLUME_MULT = 1.3
+MODE_F_RSI_MAX = 65
+MODE_F_ATR_STOP_MULT = 2.5
+
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
 MIN_HOLD_CANDLES_AFTER_BUY = 1
@@ -134,6 +140,8 @@ trade_state = {
     "mode_e_body_ratio": None,
     "mode_e_intrabar": None,
     "mode_e_intrabar_move_pct": None,
+    "mode_f_pattern": None,
+    "mode_f_score": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -154,6 +162,7 @@ DEFAULT_BOT_CONFIG = {
         "MODE_C_CAPITULATION": True,
         "MODE_D_EMA_PULLBACK": True,
         "MODE_E_EARLY_MOMENTUM": True,
+        "MODE_F_CANDLE_REVERSAL": True,
     },
     "symbols": {
         "SOL": True,
@@ -674,7 +683,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.0 Clean PostTrade · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.1 Mode F Candle · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -717,11 +726,11 @@ let currentConfig=null;
 function cls(v){return Number(v)>=0?'pos':'neg'} function fmt(v,d=2){if(v===null||v===undefined||v==='')return'-';const n=Number(v);return isNaN(n)?v:n.toFixed(d)}
 function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').replace('_CLASSIQUE','').replace('_PATTERN','').replace('_CAPITULATION','').replace('_EMA_PULLBACK','')}
 function table(el,cols,rows){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map(r=>'<tr>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>').join('');document.getElementById(el).innerHTML=head+body}
-function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA, sortie sous EMA20.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('')}
+function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E',MODE_F_CANDLE_REVERSAL:'Mode F'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA, sortie sous EMA20.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('')}
 async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
-table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}`}],(d.analysis_history||[]).slice(-40).reverse());
+table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`}],(d.analysis_history||[]).slice(-40).reverse());
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],(d.recent_trades||[]).slice().reverse());
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
@@ -895,7 +904,9 @@ def add_analysis_entry(symbol, last, current_price, details, signal_text):
             "mode_c": bool(details.get("mode_c_ok")),
             "mode_d": bool(details.get("mode_d_ok")),
             "mode_e": bool(details.get("mode_e_ok")),
+            "mode_f": bool(details.get("mode_f_ok")),
             "mode_e_intrabar": bool(details.get("mode_e_intrabar")),
+            "mode_f_pattern": details.get("mode_f_pattern"),
             "mode_d_d1": bool(details.get("mode_d_pullback_between_emas")),
             "mode_d_d2": bool(details.get("mode_d_cross_both_emas")),
             "pattern_score": float(details.get("pattern_score", 0)),
@@ -1040,6 +1051,8 @@ def ensure_trades_csv():
         "mode_e_body_ratio",
         "mode_e_intrabar",
         "mode_e_intrabar_move_pct",
+        "mode_f_pattern",
+        "mode_f_score",
         "entry",
         "exit",
         "exit_reason",
@@ -1093,6 +1106,8 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("mode_e_body_ratio"),
         trade_state.get("mode_e_intrabar"),
         trade_state.get("mode_e_intrabar_move_pct"),
+        trade_state.get("mode_f_pattern"),
+        trade_state.get("mode_f_score"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -1890,6 +1905,8 @@ def reset_trade_state_after_sell(candle_time):
         "mode_e_body_ratio": None,
         "mode_e_intrabar": None,
         "mode_e_intrabar_move_pct": None,
+        "mode_f_pattern": None,
+        "mode_f_score": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -2052,6 +2069,51 @@ def detect_mode_c_capitulation(df):
 
 
 
+
+
+def candle_reversal_patterns(df):
+    """MODE F - Candle Reversal : détecte patterns haussiers de bougies."""
+    try:
+        if len(df) < 30:
+            return 0, {"patterns": [], "score": 0}
+        last, p1, p2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+        def body(c): return abs(float(c["close"]) - float(c["open"]))
+        def rng(c): return max(float(c["high"]) - float(c["low"]), 1e-12)
+        def upper_wick(c): return float(c["high"]) - max(float(c["open"]), float(c["close"]))
+        def lower_wick(c): return min(float(c["open"]), float(c["close"])) - float(c["low"])
+        def green(c): return float(c["close"]) > float(c["open"])
+        def red(c): return float(c["close"]) < float(c["open"])
+
+        volume_ma20 = df["volume"].rolling(20).mean().iloc[-1]
+        volume_ratio = (float(last["volume"]) / volume_ma20) if volume_ma20 and volume_ma20 > 0 else 0
+        base_close = float(df["close"].iloc[-8])
+        recent_drop = (base_close - float(last["close"])) / base_close if base_close > 0 else 0
+        after_drop = recent_drop > 0.005 or float(last["close"]) < float(last["ema20"])
+        last_body = body(last); last_range = rng(last)
+        lower = lower_wick(last); upper = upper_wick(last)
+
+        hammer = after_drop and lower >= 2.0 * max(last_body, 1e-12) and upper <= 0.7 * max(last_body, 1e-12) and float(last["close"]) >= float(last["low"]) + 0.55 * last_range
+        bullish_engulfing = red(p1) and green(last) and float(last["open"]) <= float(p1["close"]) and float(last["close"]) >= float(p1["open"]) and body(last) >= 0.9 * body(p1)
+        morning_star = red(p2) and body(p1) <= 0.55 * body(p2) and green(last) and float(last["close"]) >= (float(p2["open"]) + float(p2["close"])) / 2
+        low_tolerance = max(float(last["atr"]) * 0.15, float(last["close"]) * 0.001)
+        tweezer_bottom = after_drop and abs(float(last["low"]) - float(p1["low"])) <= low_tolerance and red(p1) and green(last) and float(last["close"]) > float(p1["close"])
+        inside_bar_breakout = float(p1["high"]) <= float(p2["high"]) and float(p1["low"]) >= float(p2["low"]) and float(last["close"]) > float(p1["high"]) and green(last)
+        bullish_harami = red(p1) and green(last) and float(last["open"]) >= float(p1["close"]) and float(last["close"]) <= float(p1["open"]) and body(last) <= 0.65 * body(p1)
+        three_white_soldiers = green(p2) and green(p1) and green(last) and float(p1["close"]) > float(p2["close"]) and float(last["close"]) > float(p1["close"]) and body(p2) > 0 and body(p1) > 0 and body(last) > 0
+        long_lower_wick_volume = after_drop and lower >= 1.8 * max(last_body, 1e-12) and volume_ratio >= MODE_F_VOLUME_MULT and green(last)
+
+        weights = [("hammer", hammer, 1.6),("bullish_engulfing", bullish_engulfing, 2.2),("morning_star", morning_star, 2.6),("tweezer_bottom", tweezer_bottom, 1.8),("inside_bar_breakout", inside_bar_breakout, 1.8),("bullish_harami", bullish_harami, 1.4),("three_white_soldiers", three_white_soldiers, 2.2),("long_lower_wick_volume", long_lower_wick_volume, 2.4)]
+        patterns=[]; score=0.0
+        for name, ok, weight in weights:
+            if ok:
+                patterns.append(name); score += weight
+        if volume_ratio >= MODE_F_VOLUME_MULT: score += 0.5
+        if float(last["obv"]) > float(last["obv_ma5"]): score += 0.5
+        if float(last["close"]) > float(last["ema20"]): score += 0.5
+        return score, {"patterns": patterns, "hammer": hammer, "bullish_engulfing": bullish_engulfing, "morning_star": morning_star, "tweezer_bottom": tweezer_bottom, "inside_bar_breakout": inside_bar_breakout, "bullish_harami": bullish_harami, "three_white_soldiers": three_white_soldiers, "long_lower_wick_volume": long_lower_wick_volume, "volume_ratio": round(volume_ratio,2), "score": round(score,4)}
+    except Exception as e:
+        print("[ERREUR MODE F CANDLE]", e)
+        return 0, {"patterns": [], "score": 0}
 
 def mode_e_intrabar_signal(df, current_price):
     """
@@ -2225,6 +2287,10 @@ def buy_signal(df):
         and MODE_E_MIN_RSI <= last["rsi"] <= MODE_E_MAX_RSI
     )
 
+    mode_f_score, mode_f_details = candle_reversal_patterns(df)
+    mode_f_confirmed = (obv_rising or volume_ratio >= MODE_F_VOLUME_MULT or last["close"] > last["ema20"])
+    mode_f_ok = (mode_f_score >= MODE_F_MIN_PATTERN_SCORE and mode_f_confirmed and last["rsi"] <= MODE_F_RSI_MAX)
+
     signal_mode = None
     # Activation / désactivation via dashboard
     mode_a_ok = mode_a_ok and is_mode_enabled("MODE_A_CLASSIQUE")
@@ -2232,6 +2298,7 @@ def buy_signal(df):
     mode_c_ok = mode_c_ok and is_mode_enabled("MODE_C_CAPITULATION")
     mode_d_ok = mode_d_ok and is_mode_enabled("MODE_D_EMA_PULLBACK")
     mode_e_ok = mode_e_ok and is_mode_enabled("MODE_E_EARLY_MOMENTUM")
+    mode_f_ok = mode_f_ok and is_mode_enabled("MODE_F_CANDLE_REVERSAL")
 
     if mode_a_ok:
         signal_mode = "MODE_A_CLASSIQUE"
@@ -2243,6 +2310,8 @@ def buy_signal(df):
         signal_mode = "MODE_D_EMA_PULLBACK"
     elif mode_e_ok:
         signal_mode = "MODE_E_EARLY_MOMENTUM"
+    elif mode_f_ok:
+        signal_mode = "MODE_F_CANDLE_REVERSAL"
 
     score = (
         breakout_strength * 100
@@ -2261,8 +2330,10 @@ def buy_signal(df):
         score += 1.5
     if mode_e_ok:
         score += 2.5 + min(volume_ratio, 5.0) + min(body_ratio * 2, 2.0)
+    if mode_f_ok:
+        score += 2.0 + mode_f_score
 
-    ok = mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok
+    ok = mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok or mode_f_ok
 
     return ok, score, {
         "trend_ok": trend_ok,
@@ -2287,6 +2358,10 @@ def buy_signal(df):
         "mode_e_intrabar": False,
         "mode_e_intrabar_move_pct": None,
         "mode_e_intrabar_distance_ema20_pct": None,
+        "mode_f_ok": mode_f_ok,
+        "mode_f_pattern": ",".join(mode_f_details.get("patterns", [])),
+        "mode_f_score": round(mode_f_score, 4),
+        "mode_f_details": mode_f_details,
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -2727,9 +2802,9 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.0 CLEAN POSTTRADE")
+    print("BOT MULTI V4.1 MODE F CANDLE REVERSAL")
     print("Long only | 15m | Une seule position à la fois")
-    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E")
+    print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
     if not PRIVATE_KEY or not WALLET_ADDRESS:
@@ -2756,7 +2831,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.0 Clean PostTrade démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.1 Mode F Candle Reversal démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -2914,6 +2989,8 @@ def run():
                 trade_state["mode_e_body_ratio"] = details.get("mode_e_body_ratio")
                 trade_state["mode_e_intrabar"] = details.get("mode_e_intrabar")
                 trade_state["mode_e_intrabar_move_pct"] = details.get("mode_e_intrabar_move_pct")
+                trade_state["mode_f_pattern"] = details.get("mode_f_pattern")
+                trade_state["mode_f_score"] = details.get("mode_f_score")
                 if details.get("signal_mode") in ["MODE_D_EMA_PULLBACK", "MODE_E_EARLY_MOMENTUM"]:
                     trade_state["tp1_price"] = None
                 else:
