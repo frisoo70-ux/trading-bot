@@ -150,6 +150,7 @@ trade_state = {
     "mode_e_intrabar_move_pct": None,
     "mode_f_pattern": None,
     "mode_f_score": None,
+    "mode_f_details_text": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -543,6 +544,173 @@ def load_post_trade_dataframe():
 
 
 
+
+def build_trade_ai_comment(row):
+    """
+    Analyse simple et explicable d'un trade.
+    Ne modifie pas les décisions du bot : uniquement dashboard.
+    """
+    try:
+        mode = str(row.get("mode", ""))
+        symbol = str(row.get("symbol", ""))
+        pnl = float(row.get("real_pnl_usdc", 0) or 0)
+        pnl_pct = float(row.get("pnl_price_pct", 0) or 0)
+        exit_reason = str(row.get("exit_reason", ""))
+        pattern_f = str(row.get("mode_f_pattern", "") or "")
+        details_f = str(row.get("mode_f_details_text", "") or "")
+
+        verdict = "NEUTRE"
+        if pnl > 0:
+            verdict = "TRADE GAGNANT"
+        elif pnl < 0:
+            verdict = "TRADE PERDANT"
+
+        comments = []
+        comments.append(f"Verdict: {verdict}.")
+        comments.append(f"Mode utilisé: {mode} sur {symbol}.")
+
+        if "MODE_F" in mode:
+            if pattern_f:
+                comments.append(f"Entrée Mode F détectée sur pattern: {format_mode_f_patterns(pattern_f)}.")
+            if details_f:
+                comments.append("Le pattern détecté indique un possible retournement haussier, mais il doit idéalement être confirmé par volume, OBV ou reprise EMA20.")
+            if pnl < 0:
+                comments.append("Ce trade Mode F perdant suggère que le retournement n'a pas été confirmé suffisamment vite.")
+                comments.append("À surveiller: volume faible, prix sous EMA20 ou OBV encore fragile au moment de l'entrée.")
+
+        if "MODE_C" in mode:
+            comments.append("Mode C = tentative de rebond après capitulation. Ce mode peut acheter tôt, mais doit être surveillé par Smart Exit.")
+            if pnl < 0:
+                comments.append("Le rebond n'a pas pris. Un filtre volume/OBV plus strict pourrait réduire ce type d'entrée.")
+
+        if "MODE_E" in mode:
+            comments.append("Mode E = impulsion précoce. Le point clé est de vérifier si le volume et l'OBV confirment réellement l'accélération.")
+            if pnl < 0:
+                comments.append("La perte peut indiquer un faux départ d'impulsion.")
+
+        if "EMA20" in exit_reason:
+            comments.append("Sortie liée à EMA20 : le trade n'a pas réussi à se maintenir au-dessus du support dynamique court terme.")
+        if "TRAIL" in exit_reason:
+            comments.append("Sortie trailing : le bot a protégé une partie du mouvement après progression.")
+        if "ATR_STOP" in exit_reason or "STOP" in exit_reason:
+            comments.append("Sortie stop : le scénario initial a été invalidé par la volatilité.")
+
+        if pnl_pct > 1:
+            comments.append("Trade propre : le mouvement a dépassé +1%, ce type de configuration mérite d'être comparé aux autres trades du même mode.")
+        elif pnl_pct < -0.5:
+            comments.append("Perte significative : à comparer avec le contexte d'entrée pour trouver le filtre manquant.")
+        else:
+            comments.append("Trade quasi neutre : le coût réel vient surtout du spread/frais/slippage.")
+
+        return "\n".join(comments)
+
+    except Exception as e:
+        return f"Analyse IA indisponible: {e}"
+
+
+def compute_ai_recommendations():
+    """
+    Génère des recommandations simples depuis l'historique réel.
+    Objectif : aide à la décision, pas auto-trading.
+    """
+    recs = []
+    try:
+        df = load_trades_dataframe()
+        if df.empty:
+            return ["Pas encore assez de trades pour générer des recommandations IA."]
+
+        df = df.copy()
+        df["real_pnl_usdc"] = pd.to_numeric(df.get("real_pnl_usdc"), errors="coerce").fillna(0)
+        df["pnl_price_pct"] = pd.to_numeric(df.get("pnl_price_pct"), errors="coerce").fillna(0)
+
+        total = len(df)
+        if total < 5:
+            recs.append(f"Seulement {total} trade(s) enregistré(s). Les recommandations restent peu fiables.")
+        else:
+            recs.append(f"Analyse basée sur {total} trade(s).")
+
+        # Par mode
+        if "mode" in df.columns:
+            by_mode = df.groupby("mode")["real_pnl_usdc"].agg(["count", "sum", "mean"])
+            if not by_mode.empty:
+                best = by_mode.sort_values("sum", ascending=False).head(1)
+                worst = by_mode.sort_values("sum", ascending=True).head(1)
+                for mode, row in best.iterrows():
+                    recs.append(f"Mode le plus rentable actuellement: {mode} avec {row['sum']:.3f} USDC sur {int(row['count'])} trade(s).")
+                for mode, row in worst.iterrows():
+                    if row["sum"] < 0:
+                        recs.append(f"Mode à surveiller: {mode} perd {abs(row['sum']):.3f} USDC sur {int(row['count'])} trade(s).")
+
+        # Par token
+        if "symbol" in df.columns:
+            by_symbol = df.groupby("symbol")["real_pnl_usdc"].agg(["count", "sum", "mean"])
+            if not by_symbol.empty:
+                worst_sym = by_symbol.sort_values("sum", ascending=True).head(1)
+                for sym, row in worst_sym.iterrows():
+                    if row["sum"] < 0:
+                        recs.append(f"Token à surveiller: {sym} est négatif de {row['sum']:.3f} USDC.")
+
+        # Patterns Mode F
+        if "mode_f_pattern" in df.columns:
+            fdf = df[df["mode_f_pattern"].fillna("").astype(str) != ""]
+            if not fdf.empty:
+                pattern_rows = []
+                for _, r in fdf.iterrows():
+                    patterns = str(r.get("mode_f_pattern", "")).split(",")
+                    for p in patterns:
+                        p = p.strip()
+                        if p:
+                            pattern_rows.append({"pattern": p, "pnl": r["real_pnl_usdc"]})
+                if pattern_rows:
+                    pdf = pd.DataFrame(pattern_rows)
+                    perf = pdf.groupby("pattern")["pnl"].agg(["count", "sum", "mean"])
+                    bestp = perf.sort_values("mean", ascending=False).head(1)
+                    worstp = perf.sort_values("mean", ascending=True).head(1)
+                    for p, row in bestp.iterrows():
+                        recs.append(f"Pattern Mode F le plus prometteur: {mode_f_pattern_label(p)} | moyenne {row['mean']:.3f} USDC.")
+                    for p, row in worstp.iterrows():
+                        if row["mean"] < 0:
+                            recs.append(f"Pattern Mode F à filtrer/prudence: {mode_f_pattern_label(p)} | moyenne {row['mean']:.3f} USDC.")
+
+        # Post Trade Analyzer
+        try:
+            post_df = load_post_trade_dataframe()
+            if not post_df.empty and "verdict" in post_df.columns:
+                too_early = int((post_df["verdict"] == "SORTIE_TROP_TOT").sum())
+                good_exit = int((post_df["verdict"] == "BONNE_SORTIE").sum())
+                if too_early > good_exit:
+                    recs.append("Les sorties semblent parfois trop précoces : envisager trailing plus large ou Smart Exit moins sensible.")
+                elif good_exit > too_early:
+                    recs.append("Les sorties semblent globalement protectrices : conserver la logique actuelle pour l'instant.")
+        except Exception:
+            pass
+
+        if len(recs) == 1:
+            recs.append("Accumule encore des trades pour obtenir des recommandations plus fiables.")
+
+        return recs[:12]
+
+    except Exception as e:
+        return [f"Erreur IA recommandations: {e}"]
+
+
+def enrich_recent_trades_for_dashboard(rows):
+    enriched = []
+    for idx, row in enumerate(rows):
+        r = dict(row)
+        r["_trade_id"] = idx
+        r["_ai_comment"] = build_trade_ai_comment(r)
+        if r.get("mode_f_pattern"):
+            r["_mode_f_pattern_label"] = format_mode_f_patterns(r.get("mode_f_pattern"))
+            r["_mode_f_pattern_details"] = format_mode_f_pattern_details(r.get("mode_f_pattern"))
+        else:
+            r["_mode_f_pattern_label"] = "-"
+            r["_mode_f_pattern_details"] = ""
+        enriched.append(r)
+    return enriched
+
+
+
 def compute_dashboard_stats():
     force_finalize_expired_post_trades()
     df = load_trades_dataframe()
@@ -575,6 +743,7 @@ def compute_dashboard_stats():
             "bonne_sortie": 0,
             "neutre": 0,
         },
+        "ai_recommendations": compute_ai_recommendations(),
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
     }
@@ -653,9 +822,10 @@ def compute_dashboard_stats():
     result["by_exit_reason"] = grouped_stats("exit_reason")
 
     recent = df.tail(50).fillna("").to_dict(orient="records")
-    result["recent_trades"] = [
+    safe_recent = [
         {k: json_safe(v) for k, v in row.items()} for row in recent
     ]
+    result["recent_trades"] = enrich_recent_trades_for_dashboard(safe_recent)
 
     return result
 
@@ -687,13 +857,21 @@ DASHBOARD_HTML = r"""<!doctype html>
     button{background:var(--blue);border:0;padding:13px 16px;border-radius:13px;font-weight:800;cursor:pointer;color:#04121d;width:100%;font-size:15px;min-height:48px}
     pre{white-space:pre-wrap;font-size:12px;max-height:360px;overflow:auto;background:#070d18;padding:12px;border-radius:12px;color:#cbd5e1;line-height:1.35;-webkit-overflow-scrolling:touch}
     .mobileHint{display:none;color:var(--muted);font-size:12px;margin:4px 0 8px}
+    tr.clickable{cursor:pointer}
+    tr.clickable:hover{background:#1f2a3c}
+    .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:99;padding:16px;overflow:auto}
+    .modalBox{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:16px;max-width:760px;margin:40px auto;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+    .modalClose{float:right;width:auto;min-height:36px;padding:8px 12px;background:#334155;color:#e5e7eb}
+    .detailGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
+    .detailItem{background:var(--card2);padding:10px;border-radius:12px;border:1px solid #2b3950}
+    .aiBox{background:#071827;border:1px solid #164e63;border-radius:12px;padding:12px;white-space:pre-wrap;line-height:1.35}
     @media(max-width:900px){.cards,.two{grid-template-columns:1fr}.wrap{padding:10px}.card{padding:13px;border-radius:15px}table{font-size:12px;min-width:720px}th,td{padding:9px 7px}.mobileHint{display:block}}
     @media(max-width:520px){h1{font-size:18px}h3{font-size:16px}.sub{font-size:11px}.cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{font-size:22px}.card{padding:12px}.toggles{grid-template-columns:1fr}.toggle{font-size:15px;padding:14px 13px}.scroll{max-height:360px}pre{max-height:300px;font-size:11px}}
     @media(max-width:380px){.cards{grid-template-columns:1fr}.metric{font-size:24px}}
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.2 Smart Exit · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.4 Dashboard IA · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -729,19 +907,51 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="mobileHint">Balaye le tableau vers la droite.</div>
     <div class="scroll"><table id="postTrade"></table></div>
   </div>
+  <div class="card" style="margin-top:12px">
+    <h3>🧠 IA Coach</h3>
+    <div id="aiCoach" class="aiBox">-</div>
+  </div>
+
   <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
+
+  <div id="tradeModal" class="modal">
+    <div class="modalBox">
+      <button class="modalClose" onclick="closeTradeModal()">Fermer</button>
+      <h3>🔎 Analyse détaillée du trade</h3>
+      <div id="tradeDetailContent"></div>
+    </div>
+  </div>
 </div>
 <script>
 let currentConfig=null;
 function cls(v){return Number(v)>=0?'pos':'neg'} function fmt(v,d=2){if(v===null||v===undefined||v==='')return'-';const n=Number(v);return isNaN(n)?v:n.toFixed(d)}
 function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').replace('_CLASSIQUE','').replace('_PATTERN','').replace('_CAPITULATION','').replace('_EMA_PULLBACK','')}
-function table(el,cols,rows){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map(r=>'<tr>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>').join('');document.getElementById(el).innerHTML=head+body}
+function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
+let lastTrades=[];
+function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function closeTradeModal(){document.getElementById('tradeModal').style.display='none'}
+function openTradeModal(i){const r=lastTrades[i];if(!r)return;const html=`<div class="detailGrid">
+<div class="detailItem"><b>Coin</b><br>${esc(r.symbol)}</div>
+<div class="detailItem"><b>Mode</b><br>${esc(r.mode)}</div>
+<div class="detailItem"><b>Entry</b><br>${esc(r.entry)}</div>
+<div class="detailItem"><b>Exit</b><br>${esc(r.exit)}</div>
+<div class="detailItem"><b>PnL %</b><br>${esc(r.pnl_price_pct)}</div>
+<div class="detailItem"><b>PnL USDC</b><br>${esc(r.real_pnl_usdc)}</div>
+<div class="detailItem"><b>Sortie</b><br>${esc(r.exit_reason)}</div>
+<div class="detailItem"><b>Pattern F</b><br>${esc(r._mode_f_pattern_label||'-')}</div>
+</div>
+<h3 style="margin-top:16px">🕯️ Détail pattern</h3>
+<div class="aiBox">${esc(r._mode_f_pattern_details||'Aucun pattern Mode F enregistré pour ce trade.')}</div>
+<h3 style="margin-top:16px">🧠 Analyse IA</h3>
+<div class="aiBox">${esc(r._ai_comment||'-')}</div>`;document.getElementById('tradeDetailContent').innerHTML=html;document.getElementById('tradeModal').style.display='block'}
 function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E',MODE_F_CANDLE_REVERSAL:'Mode F'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA, sortie sous EMA20.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('')}
 async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
-table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`}],(d.analysis_history||[]).slice(-40).reverse());
-table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],(d.recent_trades||[]).slice().reverse());
+table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
+lastTrades=(d.recent_trades||[]).slice().reverse();
+table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)},{label:'Pattern F',get:r=>r._mode_f_pattern_label||r.mode_f_pattern||'-'}],lastTrades,true);
+document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
 table('postTradePending',[
@@ -916,7 +1126,8 @@ def add_analysis_entry(symbol, last, current_price, details, signal_text):
             "mode_e": bool(details.get("mode_e_ok")),
             "mode_f": bool(details.get("mode_f_ok")),
             "mode_e_intrabar": bool(details.get("mode_e_intrabar")),
-            "mode_f_pattern": details.get("mode_f_pattern"),
+            "mode_f_pattern": details.get("mode_f_pattern_label"),
+            "mode_f_details_text": details.get("mode_f_details_text"),
             "mode_d_d1": bool(details.get("mode_d_pullback_between_emas")),
             "mode_d_d2": bool(details.get("mode_d_cross_both_emas")),
             "pattern_score": float(details.get("pattern_score", 0)),
@@ -1063,6 +1274,7 @@ def ensure_trades_csv():
         "mode_e_intrabar_move_pct",
         "mode_f_pattern",
         "mode_f_score",
+        "mode_f_details_text",
         "entry",
         "exit",
         "exit_reason",
@@ -1118,6 +1330,7 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("mode_e_intrabar_move_pct"),
         trade_state.get("mode_f_pattern"),
         trade_state.get("mode_f_score"),
+        trade_state.get("mode_f_details_text"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -1921,6 +2134,7 @@ def reset_trade_state_after_sell(candle_time):
         "mode_e_intrabar_move_pct": None,
         "mode_f_pattern": None,
         "mode_f_score": None,
+        "mode_f_details_text": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -2082,6 +2296,55 @@ def detect_mode_c_capitulation(df):
     }
 
 
+
+
+
+
+def mode_f_pattern_label(pattern_key):
+    labels = {
+        "hammer": "Marteau / Hammer",
+        "bullish_engulfing": "Englobante haussière",
+        "morning_star": "Morning Star",
+        "tweezer_bottom": "Tweezer Bottom / Double creux",
+        "inside_bar_breakout": "Inside Bar Breakout",
+        "bullish_harami": "Bullish Harami",
+        "three_white_soldiers": "Three White Soldiers",
+        "long_lower_wick_volume": "Longue mèche basse + volume",
+    }
+    return labels.get(str(pattern_key), str(pattern_key))
+
+
+def mode_f_pattern_explanation(pattern_key):
+    explanations = {
+        "hammer": "Rejet vendeur : longue mèche basse après baisse.",
+        "bullish_engulfing": "Bougie verte qui englobe le corps rouge précédent.",
+        "morning_star": "Séquence rouge + hésitation + reprise verte.",
+        "tweezer_bottom": "Deux plus bas proches : support défendu.",
+        "inside_bar_breakout": "Compression puis cassure du plus haut de l'inside bar.",
+        "bullish_harami": "Petite bougie verte contenue dans la rouge précédente.",
+        "three_white_soldiers": "Trois bougies vertes consécutives avec clôtures montantes.",
+        "long_lower_wick_volume": "Rejet vendeur confirmé par volume.",
+    }
+    return explanations.get(str(pattern_key), "")
+
+
+def format_mode_f_patterns(patterns):
+    if not patterns:
+        return "Aucun pattern Mode F identifié"
+    if isinstance(patterns, str):
+        patterns = [p for p in patterns.split(",") if p]
+    return ", ".join([mode_f_pattern_label(p) for p in patterns])
+
+
+def format_mode_f_pattern_details(patterns):
+    if not patterns:
+        return "Aucun détail disponible."
+    if isinstance(patterns, str):
+        patterns = [p for p in patterns.split(",") if p]
+    lines = []
+    for p in patterns:
+        lines.append(f"✅ {mode_f_pattern_label(p)} : {mode_f_pattern_explanation(p)}")
+    return "\\n".join(lines)
 
 
 
@@ -2374,6 +2637,8 @@ def buy_signal(df):
         "mode_e_intrabar_distance_ema20_pct": None,
         "mode_f_ok": mode_f_ok,
         "mode_f_pattern": ",".join(mode_f_details.get("patterns", [])),
+        "mode_f_pattern_label": format_mode_f_patterns(mode_f_details.get("patterns", [])),
+        "mode_f_details_text": format_mode_f_pattern_details(mode_f_details.get("patterns", [])),
         "mode_f_score": round(mode_f_score, 4),
         "mode_f_details": mode_f_details,
         "pattern_score": patt_details["pattern_score"],
@@ -3048,7 +3313,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.2 SMART EXIT")
+    print("BOT MULTI V4.4 DASHBOARD IA")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -3077,7 +3342,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.2 Smart Exit démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.4 Dashboard IA démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -3237,6 +3502,7 @@ def run():
                 trade_state["mode_e_intrabar_move_pct"] = details.get("mode_e_intrabar_move_pct")
                 trade_state["mode_f_pattern"] = details.get("mode_f_pattern")
                 trade_state["mode_f_score"] = details.get("mode_f_score")
+                trade_state["mode_f_details_text"] = details.get("mode_f_details_text")
                 if details.get("signal_mode") in ["MODE_D_EMA_PULLBACK", "MODE_E_EARLY_MOMENTUM"]:
                     trade_state["tp1_price"] = None
                 else:
