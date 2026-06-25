@@ -674,7 +674,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · Post Trade Hook Fix · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.0 Clean PostTrade · Modes A/B/C/D/E · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1317,6 +1317,119 @@ def build_posttrade_message():
         return f"⚠️ Erreur /posttrade: {e}"
 
 
+
+def build_posttrade_pending_message():
+    try:
+        ensure_post_trade_files()
+        pending = load_pending_post_trades()
+
+        if not pending:
+            return "⏳ <b>POST TRADE PENDING</b>\nAucune analyse en attente."
+
+        msg = f"⏳ <b>POST TRADE PENDING</b>\nAnalyses en attente: {len(pending)}\n"
+        for item in pending[-10:]:
+            msg += (
+                f"\n<b>{item.get('symbol')}</b> {item.get('mode')}\n"
+                f"Sortie: {item.get('exit_reason')}\n"
+                f"Entry: {item.get('entry')} | Exit: {item.get('exit')}\n"
+                f"PnL sortie: {item.get('pnl_at_exit_pct')}%\n"
+                f"Max suivi: {round(((float(item.get('max_price', item.get('exit'))) - float(item.get('exit'))) / float(item.get('exit'))) * 100, 4) if item.get('exit') else 'N/A'}%\n"
+                f"Min suivi: {round(((float(item.get('min_price', item.get('exit'))) - float(item.get('exit'))) / float(item.get('exit'))) * 100, 4) if item.get('exit') else 'N/A'}%\n"
+            )
+
+        return msg
+
+    except Exception as e:
+        return f"⚠️ Erreur /posttrade_pending: {e}"
+
+
+def export_posttrade_csv():
+    try:
+        ensure_post_trade_files()
+        if POST_TRADE_CSV_PATH.exists():
+            send_telegram_document(str(POST_TRADE_CSV_PATH), "post_trade_analysis.csv")
+            return "📎 post_trade_analysis.csv envoyé."
+        return "Aucun fichier post_trade_analysis.csv."
+    except Exception as e:
+        return f"⚠️ Erreur export posttrade: {e}"
+
+
+def build_score_message():
+    try:
+        df = load_trades_dataframe()
+        if df.empty:
+            return "📊 SCORE\nAucun trade enregistré."
+
+        df = df.copy()
+        df["real_pnl_usdc"] = pd.to_numeric(df.get("real_pnl_usdc"), errors="coerce").fillna(0)
+
+        msg = "🧠 <b>SCORE MODES / TOKENS</b>\n"
+
+        try:
+            by_mode = df.groupby("mode")["real_pnl_usdc"].agg(["count", "sum", "mean"])
+            msg += "\n<b>Par mode</b>\n"
+            for mode, row in by_mode.iterrows():
+                msg += f"- {mode}: {int(row['count'])} trades | PnL {row['sum']:.3f} | Moy {row['mean']:.3f}\n"
+        except Exception:
+            pass
+
+        try:
+            by_symbol = df.groupby("symbol")["real_pnl_usdc"].agg(["count", "sum", "mean"])
+            msg += "\n<b>Par token</b>\n"
+            for symbol, row in by_symbol.iterrows():
+                msg += f"- {symbol}: {int(row['count'])} trades | PnL {row['sum']:.3f} | Moy {row['mean']:.3f}\n"
+        except Exception:
+            pass
+
+        return msg
+
+    except Exception as e:
+        return f"⚠️ Erreur /score: {e}"
+
+
+def build_dashboard_message():
+    try:
+        token_part = ""
+        if DASHBOARD_TOKEN:
+            token_part = "?token=TON_TOKEN"
+        return (
+            "🌐 <b>DASHBOARD</b>\n"
+            f"Port: {DASHBOARD_PORT}\n"
+            f"URL Railway: ouvre ton domaine Railway {token_part}\n"
+            "Sections: contrôle modes, stats, trades, Post Trade Analyzer."
+        )
+    except Exception as e:
+        return f"⚠️ Erreur /dashboard: {e}"
+
+
+def build_backtest_message():
+    return (
+        "🧪 <b>BACKTEST</b>\n"
+        "Le moteur complet de backtest n'est pas encore activé dans cette V4.0.\n"
+        "Priorité actuelle: Post Trade Analyzer fiable + dashboard + commandes Telegram.\n"
+        "Prochaine étape: backtest paramétrable par token / mode / période."
+    )
+
+
+
+def build_help_message():
+    return (
+        "🤖 <b>COMMANDES DISPONIBLES</b>\n"
+        "/report : rapport global des trades\n"
+        "/stats : statistiques rapides\n"
+        "/csv : recevoir trades.csv\n"
+        "/analysis : derniers signaux par coin\n"
+        "/log : derniers logs bougies\n"
+        "/posttrade : état Post Trade Analyzer\n"
+        "/posttrade_pending : analyses en attente\n"
+        "/posttrade_repair : ajoute le dernier trade au Post Trade si besoin\n"
+        "/posttrade_export : recevoir post_trade_analysis.csv\n"
+        "/score : performance par mode/token\n"
+        "/dashboard : rappel accès dashboard\n"
+        "/backtest : statut backtest\n"
+        "/help : aide"
+    )
+
 def check_telegram_commands():
     """
     Commandes disponibles :
@@ -1393,19 +1506,36 @@ def check_telegram_commands():
                 send_long_telegram_message(build_log_message(limit))
                 continue
 
+            if cmd.startswith("/posttrade_repair"):
+                notify_telegram(repair_posttrade_from_last_trade())
+                continue
+
+            if cmd.startswith("/posttrade_pending"):
+                send_long_telegram_message(build_posttrade_pending_message())
+                continue
+
+            if cmd.startswith("/posttrade_export"):
+                notify_telegram(export_posttrade_csv())
+                continue
+
+            if cmd.startswith("/posttrade"):
+                send_long_telegram_message(build_posttrade_message())
+                continue
+
+            if cmd.startswith("/score"):
+                send_long_telegram_message(build_score_message())
+                continue
+
+            if cmd.startswith("/backtest"):
+                notify_telegram(build_backtest_message())
+                continue
+
+            if cmd.startswith("/dashboard"):
+                notify_telegram(build_dashboard_message())
+                continue
+
             if cmd == "/help":
-                notify_telegram(
-                    "🤖 <b>Commandes disponibles</b>\n"
-                    "/report ou report - Rapport actuel\n"
-                    "/stats ou stats - Rapport actuel\n"
-                    "/csv ou csv - Recevoir trades.csv\n"
-                    "/analysis - 20 dernières bougies par coin\n"
-                    "/analysis 40 - 40 dernières bougies par coin\n"
-                    "/analysis 96 - 24h de bougies par coin\n"
-                    "/log - 100 dernières lignes de log\n"
-                    "/log 200 - 200 dernières lignes de log\n"
-                    "/help ou help - Afficher cette aide"
-                )
+                notify_telegram(build_help_message())
                 continue
 
             if cmd.startswith("/"):
@@ -2597,7 +2727,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.8P POST TRADE HOOK FIX")
+    print("BOT MULTI V4.0 CLEAN POSTTRADE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2626,7 +2756,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.8P Post Trade Hook Fix démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.0 Clean PostTrade démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
