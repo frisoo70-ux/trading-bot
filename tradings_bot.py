@@ -98,8 +98,26 @@ MODE_F_RSI_MAX = 65
 MODE_F_ATR_STOP_MULT = 2.5
 
 # SMART EXIT - modes de retournement C / E / F
-SMART_EXIT_REVERSAL_MODES = ["MODE_C_CAPITULATION", "MODE_E_EARLY_MOMENTUM", "MODE_F_CANDLE_REVERSAL"]
+SMART_EXIT_REVERSAL_MODES = ["MODE_C_CAPITULATION", "MODE_D_EMA_PULLBACK", "MODE_E_EARLY_MOMENTUM", "MODE_F_CANDLE_REVERSAL"]
 SMART_EXIT_CLOSE_SCORE = 7
+SMART_EXIT_MODE_THRESHOLDS = {
+    "MODE_C_CAPITULATION": 6.5,
+    "MODE_D_EMA_PULLBACK": 5.5,
+    "MODE_E_EARLY_MOMENTUM": 4.5,
+    "MODE_F_CANDLE_REVERSAL": 5.0,
+}
+SMART_EXIT_MODE_TIGHTEN_THRESHOLDS = {
+    "MODE_C_CAPITULATION": 4.0,
+    "MODE_D_EMA_PULLBACK": 3.5,
+    "MODE_E_EARLY_MOMENTUM": 3.0,
+    "MODE_F_CANDLE_REVERSAL": 3.5,
+}
+SMART_EXIT_HEALTH_EXIT_LEVEL = {
+    "MODE_C_CAPITULATION": 35,
+    "MODE_D_EMA_PULLBACK": 40,
+    "MODE_E_EARLY_MOMENTUM": 55,
+    "MODE_F_CANDLE_REVERSAL": 45,
+}
 SMART_EXIT_TIGHTEN_SCORE = 4
 SMART_EXIT_VOLUME_MULT = 1.3
 SMART_EXIT_ATR_STOP_MULT = 2.5
@@ -153,6 +171,8 @@ trade_state = {
     "mode_f_pattern": None,
     "mode_f_score": None,
     "mode_f_details_text": None,
+    "smart_exit_score": None,
+    "smart_exit_health": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -878,7 +898,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.5 Post Trade Pro · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.6 Smart Exit Unified · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1282,6 +1302,8 @@ def ensure_trades_csv():
         "mode_f_pattern",
         "mode_f_score",
         "mode_f_details_text",
+        "smart_exit_score",
+        "smart_exit_health",
         "entry",
         "exit",
         "exit_reason",
@@ -1338,6 +1360,8 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         trade_state.get("mode_f_pattern"),
         trade_state.get("mode_f_score"),
         trade_state.get("mode_f_details_text"),
+        trade_state.get("smart_exit_score"),
+        trade_state.get("smart_exit_health"),
         round(entry, 8),
         round(exit_price, 8),
         exit_reason,
@@ -2142,6 +2166,8 @@ def reset_trade_state_after_sell(candle_time):
         "mode_f_pattern": None,
         "mode_f_score": None,
         "mode_f_details_text": None,
+        "smart_exit_score": None,
+        "smart_exit_health": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -2702,6 +2728,8 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
         f"Mode E Body ratio: {trade_state.get('mode_e_body_ratio')}\n"
         f"Mode E Intrabar: {trade_state.get('mode_e_intrabar')}\n"
         f"Mode E Intrabar move: {trade_state.get('mode_e_intrabar_move_pct')}%\n"
+        f"Smart Exit score: {trade_state.get('smart_exit_score')}\n"
+        f"Smart Exit health: {trade_state.get('smart_exit_health')} / 100\n"
         f"Entry: {entry:.5f}\n"
         f"Sortie finale: {exit_price:.5f}\n"
         f"Raison sortie finale: {exit_reason}\n"
@@ -2811,13 +2839,21 @@ def bearish_reversal_patterns(df):
         return 0, {"patterns": []}
 
 
-def smart_exit_reversal_decision(df, current_price, entry_price):
+def smart_exit_reversal_decision(df, current_price, entry_price, mode=None):
+    """
+    Smart Exit unifié pour D / C / E / F.
+    Score de faiblesse + Trend Health Score 0-100.
+    Plus le score est haut, plus il faut sortir.
+    Plus le health est bas, plus la position est dangereuse.
+    """
     try:
         if len(df) < 30:
             return False, False, 0, {}
 
         last = df.iloc[-1]
         prev = df.iloc[-2]
+        p2 = df.iloc[-3]
+
         bearish_score, bearish_details = bearish_reversal_patterns(df)
 
         volume_ma20 = df["volume"].rolling(20).mean().iloc[-1]
@@ -2827,35 +2863,114 @@ def smart_exit_reversal_decision(df, current_price, entry_price):
         two_closes_under_ema20 = close_under_ema20 and float(prev["close"]) < float(prev["ema20"])
         close_under_ema50 = float(last["close"]) < float(last["ema50"])
         obv_bad = float(last["obv"]) < float(last["obv_ma5"])
-        rsi_weak = float(last["rsi"]) < 45
-        red_volume = float(last["close"]) < float(last["open"]) and volume_ratio >= SMART_EXIT_VOLUME_MULT
+
+        rsi = float(last["rsi"])
+        rsi_prev = float(prev["rsi"])
+        rsi_drop = rsi_prev - rsi
+        rsi_weak = rsi < 45
+        rsi_momentum_loss = rsi_drop >= 5
+
+        red_candle = float(last["close"]) < float(last["open"])
+        prev_red = float(prev["close"]) < float(prev["open"])
+        two_red_candles = red_candle and prev_red
+        red_volume = red_candle and volume_ratio >= SMART_EXIT_VOLUME_MULT
+
+        no_new_high_2 = float(last["high"]) <= max(float(prev["high"]), float(p2["high"]))
+        lower_high = float(last["high"]) < float(prev["high"])
+        lower_close = float(last["close"]) < float(prev["close"])
+
         pnl_pct = ((float(current_price) - float(entry_price)) / float(entry_price)) * 100 if entry_price else 0
 
-        score = bearish_score
-        if close_under_ema20: score += 2
-        if two_closes_under_ema20: score += 2
-        if close_under_ema50: score += 3
-        if obv_bad: score += 2
-        if rsi_weak: score += 1
-        if red_volume: score += 3
-        if pnl_pct <= -0.7 and (close_under_ema20 or obv_bad): score += 2
+        score = float(bearish_score)
+        if close_under_ema20:
+            score += 2.0
+        if two_closes_under_ema20:
+            score += 1.5
+        if close_under_ema50:
+            score += 2.5
+        if obv_bad:
+            score += 1.5
+        if rsi_weak:
+            score += 1.0
+        if rsi_momentum_loss:
+            score += 1.0
+        if red_volume:
+            score += 2.0
+        if two_red_candles:
+            score += 1.0
+        if no_new_high_2:
+            score += 0.8
+        if lower_high and lower_close:
+            score += 1.0
+
+        recent_high = max(float(last["high"]), float(prev["high"]), float(p2["high"]))
+        best_gain_pct = ((recent_high - float(entry_price)) / float(entry_price)) * 100 if entry_price else 0
+        giveback_pct = best_gain_pct - pnl_pct
+
+        if best_gain_pct >= 0.8 and giveback_pct >= 0.45:
+            score += 2.0
+        if best_gain_pct >= 1.5 and giveback_pct >= 0.8:
+            score += 2.0
+
+        if pnl_pct <= -0.7 and (close_under_ema20 or obv_bad):
+            score += 2.0
+
+        mode_key = str(mode or "")
+        close_threshold = SMART_EXIT_MODE_THRESHOLDS.get(mode_key, SMART_EXIT_CLOSE_SCORE)
+        tighten_threshold = SMART_EXIT_MODE_TIGHTEN_THRESHOLDS.get(mode_key, SMART_EXIT_TIGHTEN_SCORE)
+        health_exit_level = SMART_EXIT_HEALTH_EXIT_LEVEL.get(mode_key, 40)
+
+        health = 100.0
+        health -= min(score * 7.0, 70)
+        if close_under_ema20:
+            health -= 8
+        if close_under_ema50:
+            health -= 12
+        if obv_bad:
+            health -= 8
+        if rsi_momentum_loss:
+            health -= 6
+        if two_red_candles:
+            health -= 6
+        if best_gain_pct >= 0.8 and giveback_pct >= 0.45:
+            health -= 10
+        health = max(0, min(100, health))
+
+        should_tighten = score >= tighten_threshold or health <= (health_exit_level + 15)
+        should_close = score >= close_threshold or health <= health_exit_level
 
         details = {
             "score": round(score, 2),
+            "health": round(health, 1),
+            "mode": mode_key,
+            "close_threshold": close_threshold,
+            "tighten_threshold": tighten_threshold,
+            "health_exit_level": health_exit_level,
             "bearish_patterns": ",".join(bearish_details.get("patterns", [])),
+            "bearish_pattern_score": bearish_score,
             "close_under_ema20": close_under_ema20,
             "two_closes_under_ema20": two_closes_under_ema20,
             "close_under_ema50": close_under_ema50,
             "obv_bad": obv_bad,
+            "rsi": round(rsi, 2),
+            "rsi_drop": round(rsi_drop, 2),
             "rsi_weak": rsi_weak,
+            "rsi_momentum_loss": rsi_momentum_loss,
+            "two_red_candles": two_red_candles,
             "red_volume": red_volume,
+            "no_new_high_2": no_new_high_2,
+            "lower_high": lower_high,
+            "lower_close": lower_close,
             "volume_ratio": round(volume_ratio, 2),
             "pnl_pct": round(pnl_pct, 3),
+            "best_gain_pct": round(best_gain_pct, 3),
+            "giveback_pct": round(giveback_pct, 3),
         }
 
-        return score >= SMART_EXIT_CLOSE_SCORE, score >= SMART_EXIT_TIGHTEN_SCORE, score, details
+        return should_close, should_tighten, score, details
+
     except Exception as e:
-        print("[ERREUR SMART EXIT]", e)
+        print("[ERREUR SMART EXIT UNIFIED]", e)
         return False, False, 0, {}
 
 
@@ -3216,7 +3331,10 @@ def manage_open_position(pos, df, current_price, candle_time):
                 reset_trade_state_after_sell(candle_time)
             return
 
-        smart_close, smart_tighten, smart_score, smart_details = smart_exit_reversal_decision(df, current_price, entry)
+        smart_close, smart_tighten, smart_score, smart_details = smart_exit_reversal_decision(df, current_price, entry, trade_state.get("signal_mode"))
+
+        trade_state["smart_exit_score"] = round(smart_score, 2)
+        trade_state["smart_exit_health"] = smart_details.get("health")
 
         if smart_close and not min_hold_active:
             LAST_SELL_REASON = "SMART_EXIT_REVERSAL_SCORE"
@@ -3451,7 +3569,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.5 POST TRADE PRO")
+    print("BOT MULTI V4.6 SMART EXIT UNIFIED")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -3480,7 +3598,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.5 Post Trade Pro démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.6 Smart Exit Unified démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
