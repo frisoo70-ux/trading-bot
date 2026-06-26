@@ -104,6 +104,8 @@ SMART_EXIT_TIGHTEN_SCORE = 4
 SMART_EXIT_VOLUME_MULT = 1.3
 SMART_EXIT_ATR_STOP_MULT = 2.5
 POST_TRADE_FORCE_FINALIZE_AFTER_MS = 4 * 60 * 60 * 1000
+POST_TRADE_RECALC_HISTORICAL_ENABLED = True
+POST_TRADE_DATA_MISSING_STATUS = "DATA_MISSING"
 
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
@@ -674,6 +676,11 @@ def compute_ai_recommendations():
 
         # Post Trade Analyzer
         try:
+            pending_items = load_pending_post_trades()
+            missing = [x for x in pending_items if str(x.get("status","")).startswith("DATA_MISSING") or str(x.get("status","")).startswith("PENDING_HISTORY")]
+            if missing:
+                recs.append(f"PostTrade: {len(missing)} analyse(s) attendent des bougies historiques ou ont des données manquantes.")
+
             post_df = load_post_trade_dataframe()
             if not post_df.empty and "verdict" in post_df.columns:
                 too_early = int((post_df["verdict"] == "SORTIE_TROP_TOT").sum())
@@ -871,7 +878,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.4 Dashboard IA · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.5 Post Trade Pro · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -964,7 +971,7 @@ table('postTradePending',[
 {label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},
 {label:'Max suivi',get:r=>fmt(((Number(r.max_price||r.exit)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},
 {label:'Min suivi',get:r=>fmt(((Number(r.min_price||r.exit)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},
-{label:'Status',key:'status'}
+{label:'Status',key:'status'},{label:'Raison',get:r=>r.missing_reason||''}
 ],(d.post_trade_pending||[]).slice().reverse());
 table('postTrade',[
 {label:'Date',key:'date'},
@@ -979,7 +986,7 @@ table('postTrade',[
 {label:'+4h',get:r=>fmt(r.pnl_4h_pct,2),cls:v=>cls(v)},
 {label:'Max après',get:r=>fmt(r.max_gain_after_exit_pct,2),cls:v=>cls(v)},
 {label:'Min après',get:r=>fmt(r.max_loss_after_exit_pct,2),cls:v=>cls(v)},
-{label:'Verdict',key:'verdict'}
+{label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
 load();setInterval(load,10000);
@@ -2852,7 +2859,136 @@ def smart_exit_reversal_decision(df, current_price, entry_price):
         return False, False, 0, {}
 
 
+
+def candle_time_ms(candle):
+    try:
+        for k in ["t", "T", "time", "timestamp"]:
+            if k in candle:
+                return int(candle[k])
+    except Exception:
+        pass
+    return None
+
+def candle_close_price(candle):
+    try:
+        return float(candle.get("c", candle.get("close")))
+    except Exception:
+        return None
+
+def candle_high_price(candle):
+    try:
+        return float(candle.get("h", candle.get("high")))
+    except Exception:
+        return None
+
+def candle_low_price(candle):
+    try:
+        return float(candle.get("l", candle.get("low")))
+    except Exception:
+        return None
+
+def fetch_historical_candles_for_posttrade(symbol, start_ms, end_ms):
+    try:
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": "15m",
+                "startTime": int(start_ms),
+                "endTime": int(end_ms),
+            },
+        }
+        r = requests.post(BASE_URL + "/info", json=payload, timeout=15)
+        data = r.json()
+        if isinstance(data, list):
+            return data
+        print("[POST TRADE HIST] Réponse candles inattendue:", str(data)[:200])
+        return []
+    except Exception as e:
+        print("[ERREUR POST TRADE HIST CANDLES]", e)
+        return []
+
+def recalc_post_trade_from_history(item):
+    """
+    Recalcule une analyse post-trade depuis les bougies historiques 15m.
+    Evite les analyses terminées à 0.00 après redémarrage ou absence de tick.
+    """
+    try:
+        if not POST_TRADE_RECALC_HISTORICAL_ENABLED:
+            return False, item
+
+        symbol = item.get("symbol")
+        exit_price = float(item.get("exit", 0) or 0)
+        exit_time_ms = int(item.get("exit_time_ms", 0) or 0)
+
+        if not symbol or exit_price <= 0 or exit_time_ms <= 0:
+            item["status"] = POST_TRADE_DATA_MISSING_STATUS
+            item["missing_reason"] = "symbol/exit/exit_time_ms manquant"
+            return False, item
+
+        end_ms = exit_time_ms + POST_TRADE_FORCE_FINALIZE_AFTER_MS + (20 * 60 * 1000)
+        start_ms = max(0, exit_time_ms - (20 * 60 * 1000))
+        candles = fetch_historical_candles_for_posttrade(symbol, start_ms, end_ms)
+
+        if not candles:
+            item["status"] = POST_TRADE_DATA_MISSING_STATUS
+            item["missing_reason"] = "aucune bougie historique récupérée"
+            return False, item
+
+        after = []
+        for c in candles:
+            t = candle_time_ms(c)
+            if t is not None and t >= exit_time_ms:
+                after.append(c)
+
+        if not after:
+            item["status"] = POST_TRADE_DATA_MISSING_STATUS
+            item["missing_reason"] = "aucune bougie après la sortie"
+            return False, item
+
+        item.setdefault("horizons", {})
+
+        for label, horizon_ms in POST_TRADE_HORIZONS:
+            target = exit_time_ms + horizon_ms
+            selected = None
+            for c in after:
+                t = candle_time_ms(c)
+                if t is not None and t >= target:
+                    selected = c
+                    break
+
+            if selected is None:
+                item["status"] = "PENDING_HISTORY"
+                item["missing_reason"] = f"horizon {label} pas encore disponible"
+                return False, item
+
+            close_p = candle_close_price(selected)
+            if close_p is not None:
+                item["horizons"][label] = round(((close_p - exit_price) / exit_price) * 100, 4)
+
+        highs = [candle_high_price(c) for c in after if candle_high_price(c) is not None]
+        lows = [candle_low_price(c) for c in after if candle_low_price(c) is not None]
+        if highs:
+            item["max_price"] = max(highs)
+        if lows:
+            item["min_price"] = min(lows)
+
+        item["status"] = "READY_FROM_HISTORY"
+        item["missing_reason"] = ""
+        return True, item
+
+    except Exception as e:
+        print("[ERREUR POST TRADE RECALC HISTORY]", e)
+        item["status"] = POST_TRADE_DATA_MISSING_STATUS
+        item["missing_reason"] = str(e)
+        return False, item
+
+
 def force_finalize_expired_post_trades():
+    """
+    Finalise les pending expirés après 4h avec recalcul historique.
+    Si les bougies ne sont pas disponibles, le trade reste en pending avec status DATA_MISSING/PENDING_HISTORY.
+    """
     try:
         pending = load_pending_post_trades()
         if not pending:
@@ -2866,31 +3002,33 @@ def force_finalize_expired_post_trades():
             elapsed = now_ms - int(item.get("exit_time_ms", now_ms))
 
             if elapsed >= POST_TRADE_FORCE_FINALIZE_AFTER_MS:
-                exit_price = float(item.get("exit", 0) or 0)
-                fallback_price = float(item.get("max_price", exit_price) or exit_price)
-                item.setdefault("horizons", {})
-                for label, _horizon_ms in POST_TRADE_HORIZONS:
-                    if label not in item["horizons"]:
-                        item["horizons"][label] = round(((fallback_price - exit_price) / exit_price) * 100, 4) if exit_price > 0 else None
-                finalize_post_trade_item(item)
-                finalized += 1
+                ok, updated_item = recalc_post_trade_from_history(item)
+
+                if ok:
+                    finalize_post_trade_item(updated_item)
+                    finalized += 1
+                else:
+                    remaining.append(updated_item)
             else:
                 remaining.append(item)
 
+        save_pending_post_trades(remaining)
+
         if finalized:
-            save_pending_post_trades(remaining)
-            print(f"[POST TRADE] Force finalize expired = {finalized}")
+            print(f"[POST TRADE] Historical finalize = {finalized}")
 
         return finalized
+
     except Exception as e:
         print("[ERREUR POST TRADE FORCE FINALIZE]", e)
         return 0
 
 
+
 def build_posttrade_finalize_message():
     try:
         count = force_finalize_expired_post_trades()
-        return f"✅ PostTrade finalize lancé. Analyses finalisées: {count}"
+        return f"✅ PostTrade finalize historique lancé. Analyses finalisées: {count}. Les données manquantes restent en pending avec un statut explicite."
     except Exception as e:
         return f"⚠️ Erreur finalize posttrade: {e}"
 
@@ -3313,7 +3451,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.4 DASHBOARD IA")
+    print("BOT MULTI V4.5 POST TRADE PRO")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -3342,7 +3480,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.4 Dashboard IA démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.5 Post Trade Pro démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
