@@ -898,7 +898,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.6 Smart Exit Unified · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.7 Smart Exit Enforced · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -3149,6 +3149,106 @@ def build_posttrade_finalize_message():
 
 
 
+
+def is_smart_exit_mode():
+    return trade_state.get("signal_mode") in SMART_EXIT_REVERSAL_MODES
+
+
+def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_value, pnl_pct, candle_time, min_hold_active):
+    """
+    V4.7 FIX :
+    Pour les modes C / D / E / F, on force l'évaluation Smart Exit AVANT toute ancienne sortie EMA20.
+    Retourne True si la fonction a pris la main et qu'il ne faut pas exécuter la suite legacy.
+    """
+    global LAST_SELL_REASON
+
+    try:
+        if not is_smart_exit_mode():
+            return False
+
+        hard_stop = entry - SMART_EXIT_ATR_STOP_MULT * atr_value
+
+        smart_close, smart_tighten, smart_score, smart_details = smart_exit_reversal_decision(
+            df, current_price, entry, trade_state.get("signal_mode")
+        )
+
+        trade_state["smart_exit_score"] = round(smart_score, 2)
+        trade_state["smart_exit_health"] = smart_details.get("health")
+
+        print(
+            f"[SMART EXIT CHECK] {symbol} mode={trade_state.get('signal_mode')} "
+            f"score={smart_score:.2f} health={smart_details.get('health')} "
+            f"close={smart_close} tighten={smart_tighten} pnl={pnl_pct:.2f}%"
+        )
+
+        if current_price <= hard_stop:
+            LAST_SELL_REASON = "SMART_EXIT_ATR_STOP"
+            print("[SMART EXIT] ATR stop touché. Sortie totale.")
+            notify_telegram(
+                f"🛑 <b>SMART EXIT - ATR STOP</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Mode: {trade_state.get('signal_mode')}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"Stop: {hard_stop:.5f}\n"
+                f"PnL: {pnl_pct:.2f}%\n"
+                f"Health: {smart_details.get('health')} / 100"
+            )
+            if close_position_full(pos, current_price):
+                final_balance = round(get_balance(), 2)
+                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                reset_trade_state_after_sell(candle_time)
+            return True
+
+        if smart_close and not min_hold_active:
+            LAST_SELL_REASON = "SMART_EXIT_UNIFIED"
+            print(f"[SMART EXIT] Sortie unifiée score={smart_score} details={smart_details}")
+            notify_telegram(
+                f"📉 <b>SMART EXIT UNIFIÉ - Sortie</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Mode: {trade_state.get('signal_mode')}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"PnL: {pnl_pct:.2f}%\n"
+                f"Score sortie: {smart_score:.2f}\n"
+                f"Health: {smart_details.get('health')} / 100\n"
+                f"Seuil mode: {smart_details.get('close_threshold')}\n"
+                f"2 rouges: {smart_details.get('two_red_candles')}\n"
+                f"OBV faible: {smart_details.get('obv_bad')}\n"
+                f"Giveback: {smart_details.get('giveback_pct')}%\n"
+                f"Sous EMA20: {smart_details.get('close_under_ema20')}"
+            )
+            if close_position_full(pos, current_price):
+                final_balance = round(get_balance(), 2)
+                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                reset_trade_state_after_sell(candle_time)
+            return True
+
+        if smart_tighten:
+            tightened_stop = current_price - 0.8 * atr_value
+            current_trail = trade_state.get("trailing_stop")
+            if current_trail is None or tightened_stop > current_trail:
+                trade_state["trailing_stop"] = tightened_stop
+                print(f"[SMART EXIT] Trailing resserré à {tightened_stop:.5f} score={smart_score:.2f}")
+
+            if trade_state.get("trailing_stop") is not None and current_price <= trade_state["trailing_stop"]:
+                LAST_SELL_REASON = "SMART_EXIT_TIGHT_TRAIL"
+                print("[SMART EXIT] Trailing resserré touché. Sortie totale.")
+                if close_position_full(pos, current_price):
+                    final_balance = round(get_balance(), 2)
+                    send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                    reset_trade_state_after_sell(candle_time)
+                return True
+
+        # Pour C/D/E/F, on empêche les anciennes sorties EMA20 legacy.
+        return True
+
+    except Exception as e:
+        print("[ERREUR APPLY SMART EXIT]", e)
+        return False
+
+
+
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
@@ -3215,7 +3315,11 @@ def manage_open_position(pos, df, current_price, candle_time):
     # V3.8J : plus de vente 50% sur EMA20.
     # On garde 100% de la position tant qu'une bougie 15m ne clôture pas sous EMA20.
     # L'ATR stop de sécurité reste géré plus bas.
-    if trade_state.get("signal_mode") == "MODE_D_EMA_PULLBACK":
+    # V4.7 : Smart Exit obligatoire avant toute ancienne logique de sortie pour C/D/E/F
+    if apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_value, pnl_pct, candle_time, min_hold_active):
+        return
+
+    if trade_state.get("signal_mode") == "MODE_D_EMA_PULLBACK" and not is_smart_exit_mode():
         if not min_hold_active and last["close"] < last["ema20"]:
             LAST_SELL_REASON = "MODE_D_CLOSE_UNDER_EMA20"
             print("[MODE D] Clôture sous EMA20. Sortie totale.")
@@ -3261,7 +3365,7 @@ def manage_open_position(pos, df, current_price, candle_time):
     # Gestion spéciale MODE E :
     # Pas de TP1, pas de vente partielle.
     # Sorties : 2 clôtures sous EMA20 ou ATR stop x2.5.
-    if trade_state.get("signal_mode") == "MODE_E_EARLY_MOMENTUM":
+    if trade_state.get("signal_mode") == "MODE_E_EARLY_MOMENTUM" and not is_smart_exit_mode():
         mode_e_stop = entry - MODE_E_ATR_STOP_MULT * atr_value
         mode_e_ema_break = (
             not min_hold_active
@@ -3569,7 +3673,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.6 SMART EXIT UNIFIED")
+    print("BOT MULTI V4.7 SMART EXIT ENFORCED")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -3598,7 +3702,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.6 Smart Exit Unified démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.7 Smart Exit Enforced démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
