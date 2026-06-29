@@ -51,6 +51,7 @@ POST_TRADE_CSV_PATH = Path("post_trade_analysis.csv")
 POST_TRADE_PENDING_PATH = Path("post_trade_pending.json")
 LAST_MONTHLY_REPORT_FILE = Path("last_monthly_report.txt")
 BOT_CONFIG_PATH = Path("bot_config.json")
+ADAPTIVE_CONFIG_PATH = Path("adaptive_config.json")
 
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
 DASHBOARD_PORT = int(os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000")))
@@ -122,6 +123,16 @@ SMART_EXIT_TIGHTEN_SCORE = 4
 SMART_EXIT_VOLUME_MULT = 1.3
 SMART_EXIT_ATR_STOP_MULT = 2.5
 POST_TRADE_FORCE_FINALIZE_AFTER_MS = 4 * 60 * 60 * 1000
+
+# ADAPTIVE INTELLIGENCE V4.8
+ADAPTIVE_ENABLED_DEFAULT = True
+ADAPTIVE_MIN_TRADES_MODE = 3
+ADAPTIVE_MIN_TRADES_PATTERN = 2
+ADAPTIVE_MIN_TRADES_TOKEN = 3
+ADAPTIVE_MIN_MULT = 0.70
+ADAPTIVE_MAX_MULT = 1.30
+ADAPTIVE_HARD_BLOCK_MULT = 0.65
+ADAPTIVE_RECENT_TRADES_WINDOW = 50
 POST_TRADE_RECALC_HISTORICAL_ENABLED = True
 POST_TRADE_DATA_MISSING_STATUS = "DATA_MISSING"
 
@@ -738,6 +749,161 @@ def enrich_recent_trades_for_dashboard(rows):
 
 
 
+
+def clamp_adaptive(x, lo=ADAPTIVE_MIN_MULT, hi=ADAPTIVE_MAX_MULT):
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return 1.0
+
+def default_adaptive_config():
+    return {
+        "enabled": ADAPTIVE_ENABLED_DEFAULT,
+        "mode_multipliers": {},
+        "pattern_multipliers": {},
+        "token_multipliers": {},
+        "mode_stats": {},
+        "pattern_stats": {},
+        "token_stats": {},
+        "last_updated": None,
+    }
+
+def load_adaptive_config():
+    try:
+        if ADAPTIVE_CONFIG_PATH.exists():
+            with open(ADAPTIVE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cfg = default_adaptive_config()
+            if isinstance(data, dict):
+                cfg.update(data)
+            return cfg
+    except Exception as e:
+        print("[ADAPTIVE] load error", e)
+    return default_adaptive_config()
+
+def save_adaptive_config(cfg):
+    try:
+        with open(ADAPTIVE_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print("[ADAPTIVE] save error", e)
+
+def adaptive_perf_to_multiplier(count, total_pnl, avg_pnl, min_trades):
+    try:
+        count = int(count)
+        total_pnl = float(total_pnl)
+        avg_pnl = float(avg_pnl)
+        if count < min_trades:
+            return 1.0
+        mult = 1.0
+        mult += max(min(avg_pnl * 0.70, 0.18), -0.18)
+        mult += max(min(total_pnl * 0.08, 0.10), -0.10)
+        return round(clamp_adaptive(mult), 3)
+    except Exception:
+        return 1.0
+
+def rebuild_adaptive_config_from_trades():
+    try:
+        cfg = load_adaptive_config()
+        df = load_trades_dataframe()
+        if df.empty:
+            save_adaptive_config(cfg)
+            return cfg
+
+        df = df.copy().tail(ADAPTIVE_RECENT_TRADES_WINDOW)
+        df["real_pnl_usdc"] = pd.to_numeric(df.get("real_pnl_usdc"), errors="coerce").fillna(0)
+
+        mode_mult, mode_stats = {}, {}
+        if "mode" in df.columns:
+            for mode, g in df.groupby("mode"):
+                pnl = g["real_pnl_usdc"]
+                count = int(len(g)); total = float(pnl.sum()); avg = float(pnl.mean()) if count else 0
+                wins = int((pnl > 0).sum()); winrate = round((wins/count)*100,2) if count else 0
+                mult = adaptive_perf_to_multiplier(count,total,avg,ADAPTIVE_MIN_TRADES_MODE)
+                mode_mult[str(mode)] = mult
+                mode_stats[str(mode)] = {"trades":count,"wins":wins,"winrate":winrate,"pnl":round(total,4),"avg":round(avg,4),"multiplier":mult}
+
+        token_mult, token_stats = {}, {}
+        if "symbol" in df.columns:
+            for symbol, g in df.groupby("symbol"):
+                pnl = g["real_pnl_usdc"]
+                count = int(len(g)); total = float(pnl.sum()); avg = float(pnl.mean()) if count else 0
+                wins = int((pnl > 0).sum()); winrate = round((wins/count)*100,2) if count else 0
+                mult = adaptive_perf_to_multiplier(count,total,avg,ADAPTIVE_MIN_TRADES_TOKEN)
+                token_mult[str(symbol)] = mult
+                token_stats[str(symbol)] = {"trades":count,"wins":wins,"winrate":winrate,"pnl":round(total,4),"avg":round(avg,4),"multiplier":mult}
+
+        pattern_rows=[]
+        if "mode_f_pattern" in df.columns:
+            for _, r in df.iterrows():
+                for p in str(r.get("mode_f_pattern","") or "").split(","):
+                    p=p.strip()
+                    if p:
+                        pattern_rows.append({"pattern":p,"pnl":float(r.get("real_pnl_usdc",0) or 0)})
+        pattern_mult, pattern_stats = {}, {}
+        if pattern_rows:
+            pdf=pd.DataFrame(pattern_rows)
+            for pat,g in pdf.groupby("pattern"):
+                pnl=g["pnl"]; count=int(len(g)); total=float(pnl.sum()); avg=float(pnl.mean()) if count else 0
+                wins=int((pnl>0).sum()); winrate=round((wins/count)*100,2) if count else 0
+                mult=adaptive_perf_to_multiplier(count,total,avg,ADAPTIVE_MIN_TRADES_PATTERN)
+                pattern_mult[str(pat)]=mult
+                label=mode_f_pattern_label(pat) if "mode_f_pattern_label" in globals() else pat
+                pattern_stats[str(pat)]={"trades":count,"wins":wins,"winrate":winrate,"pnl":round(total,4),"avg":round(avg,4),"multiplier":mult,"label":label}
+
+        cfg["mode_multipliers"]=mode_mult
+        cfg["token_multipliers"]=token_mult
+        cfg["pattern_multipliers"]=pattern_mult
+        cfg["mode_stats"]=mode_stats
+        cfg["token_stats"]=token_stats
+        cfg["pattern_stats"]=pattern_stats
+        cfg["last_updated"]=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_adaptive_config(cfg)
+        return cfg
+    except Exception as e:
+        print("[ADAPTIVE] rebuild error", e)
+        return load_adaptive_config()
+
+def get_adaptive_multiplier(symbol, mode, details=None):
+    try:
+        cfg = load_adaptive_config()
+        if not cfg.get("enabled", True):
+            return 1.0, {"enabled": False}
+        mode_mult=float(cfg.get("mode_multipliers",{}).get(str(mode),1.0))
+        token_mult=float(cfg.get("token_multipliers",{}).get(str(symbol),1.0))
+        pattern_mult=1.0
+        if details:
+            pats=[p for p in str(details.get("mode_f_pattern","") or "").split(",") if p]
+            vals=[float(cfg.get("pattern_multipliers",{}).get(p,1.0)) for p in pats]
+            if vals: pattern_mult=min(vals)
+        final=clamp_adaptive(mode_mult*token_mult*pattern_mult)
+        return final, {"enabled":True,"mode_mult":round(mode_mult,3),"token_mult":round(token_mult,3),"pattern_mult":round(pattern_mult,3),"final_mult":round(final,3)}
+    except Exception as e:
+        return 1.0, {"enabled": False, "error": str(e)}
+
+def should_adaptive_block(symbol, mode, details=None):
+    mult, info = get_adaptive_multiplier(symbol, mode, details)
+    return mult <= ADAPTIVE_HARD_BLOCK_MULT, mult, info
+
+def build_adaptive_message():
+    try:
+        cfg = rebuild_adaptive_config_from_trades()
+        msg = "🧠 <b>ADAPTIVE INTELLIGENCE V4.8</b>\n"
+        msg += f"Enabled: {cfg.get('enabled')}\nDernière MAJ: {cfg.get('last_updated')}\n\n"
+        msg += "<b>Modes</b>\n"
+        for k,v in cfg.get("mode_stats",{}).items():
+            msg += f"- {k}: x{v.get('multiplier')} | {v.get('trades')} trades | PnL {v.get('pnl')} | WR {v.get('winrate')}%\n"
+        msg += "\n<b>Tokens</b>\n"
+        for k,v in cfg.get("token_stats",{}).items():
+            msg += f"- {k}: x{v.get('multiplier')} | {v.get('trades')} trades | PnL {v.get('pnl')} | WR {v.get('winrate')}%\n"
+        msg += "\n<b>Patterns</b>\n"
+        for k,v in cfg.get("pattern_stats",{}).items():
+            msg += f"- {v.get('label',k)}: x{v.get('multiplier')} | {v.get('trades')} trades | PnL {v.get('pnl')} | WR {v.get('winrate')}%\n"
+        return msg
+    except Exception as e:
+        return f"⚠️ Erreur adaptive: {e}"
+
+
 def compute_dashboard_stats():
     force_finalize_expired_post_trades()
     df = load_trades_dataframe()
@@ -771,6 +937,7 @@ def compute_dashboard_stats():
             "neutre": 0,
         },
         "ai_recommendations": compute_ai_recommendations(),
+        "adaptive": rebuild_adaptive_config_from_trades(),
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
     }
@@ -898,7 +1065,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.7 Smart Exit Enforced · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence · Modes A/B/C/D/E/F/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -935,6 +1102,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="scroll"><table id="postTrade"></table></div>
   </div>
   <div class="card" style="margin-top:12px">
+    <h3>🧬 Adaptive Intelligence</h3>
+    <div id="adaptiveBox" class="aiBox">-</div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
     <h3>🧠 IA Coach</h3>
     <div id="aiCoach" class="aiBox">-</div>
   </div>
@@ -956,6 +1128,17 @@ function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').repla
 function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
 let lastTrades=[];
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function renderAdaptive(a){
+ if(!a){return '-'}
+ let out=`Enabled: ${a.enabled}\nMAJ: ${a.last_updated||'-'}\n`;
+ out+='\nModes:\n';
+ Object.entries(a.mode_stats||{}).forEach(([k,v])=>{out+=`• ${k}: x${v.multiplier} | ${v.trades} trades | PnL ${v.pnl} | WR ${v.winrate}%\n`});
+ out+='\nTokens:\n';
+ Object.entries(a.token_stats||{}).forEach(([k,v])=>{out+=`• ${k}: x${v.multiplier} | ${v.trades} trades | PnL ${v.pnl} | WR ${v.winrate}%\n`});
+ out+='\nPatterns:\n';
+ Object.entries(a.pattern_stats||{}).forEach(([k,v])=>{out+=`• ${v.label||k}: x${v.multiplier} | ${v.trades} trades | PnL ${v.pnl} | WR ${v.winrate}%\n`});
+ return out;
+}
 function closeTradeModal(){document.getElementById('tradeModal').style.display='none'}
 function openTradeModal(i){const r=lastTrades[i];if(!r)return;const html=`<div class="detailGrid">
 <div class="detailItem"><b>Coin</b><br>${esc(r.symbol)}</div>
@@ -978,6 +1161,7 @@ const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'W
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
 lastTrades=(d.recent_trades||[]).slice().reverse();
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)},{label:'Pattern F',get:r=>r._mode_f_pattern_label||r.mode_f_pattern||'-'}],lastTrades,true);
+document.getElementById('adaptiveBox').textContent=renderAdaptive(d.adaptive);
 document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
@@ -1694,7 +1878,7 @@ def build_help_message():
         "/posttrade_repair : ajoute le dernier trade au Post Trade si besoin\n        /posttrade_finalize : force la finalisation des analyses expirées\n"
         "/posttrade_export : recevoir post_trade_analysis.csv\n"
         "/score : performance par mode/token\n"
-        "/dashboard : rappel accès dashboard\n"
+        "/dashboard : rappel accès dashboard\n        /adaptive : état intelligence adaptative\n"
         "/backtest : statut backtest\n"
         "/help : aide"
     )
@@ -1801,6 +1985,10 @@ def check_telegram_commands():
 
             if cmd.startswith("/backtest"):
                 notify_telegram(build_backtest_message())
+                continue
+
+            if cmd.startswith("/adaptive"):
+                send_long_telegram_message(build_adaptive_message())
                 continue
 
             if cmd.startswith("/dashboard"):
@@ -3653,6 +3841,19 @@ def scan_symbols_for_best_buy():
         )
 
         if ok:
+            adaptive_block, adaptive_mult, adaptive_info = should_adaptive_block(symbol, details.get("signal_mode"), details)
+            details["adaptive_multiplier"] = adaptive_mult
+            details["adaptive_info"] = adaptive_info
+            score_before_adaptive = score
+            score = round(score * adaptive_mult, 4)
+            details["score_before_adaptive"] = score_before_adaptive
+            details["score"] = score
+            if adaptive_block:
+                ok = False
+                print(f"[ADAPTIVE BLOCK] {symbol} {details.get('signal_mode')} mult={adaptive_mult} score_before={score_before_adaptive}")
+
+
+        if ok:
             candidates.append({
                 "symbol": symbol,
                 "df": df,
@@ -3673,7 +3874,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.7 SMART EXIT ENFORCED")
+    print("BOT MULTI V4.8 ADAPTIVE INTELLIGENCE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -3702,7 +3903,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.7 Smart Exit Enforced démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.8 Adaptive Intelligence démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -3790,6 +3991,9 @@ def run():
                 f"Prix: {current_price:.5f}\n"
                 f"Score: {best['score']:.4f}\n"
                 f"Mode: {details.get('signal_mode')}\n"
+                f"Score avant adaptive: {details.get('score_before_adaptive')}\n"
+                f"Adaptive multiplier: {details.get('adaptive_multiplier')}\n"
+                f"Adaptive info: {details.get('adaptive_info')}\n"
                 f"RSI: {last['rsi']:.2f}\n"
                 f"ATR: {last['atr']:.5f}\n"
                 f"EMA20: {last['ema20']:.5f}\n"
