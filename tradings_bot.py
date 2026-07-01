@@ -1,4 +1,3 @@
-# PREMIUM_IPHONE_UI_TARGET
 import time
 import json
 import requests
@@ -127,17 +126,6 @@ LAST_SELL_REASON = None
 TELEGRAM_LAST_UPDATE_ID = None
 LOG_HISTORY = []
 ANALYSIS_HISTORY = []
-
-
-
-def add_dashboard_log(message):
-    try:
-        ts = datetime.now().strftime("%H:%M:%S")
-        LOG_HISTORY.append(f"[{ts}] {message}")
-        if len(LOG_HISTORY) > 500:
-            del LOG_HISTORY[:-500]
-    except Exception:
-        pass
 
 
 def notify_telegram(message):
@@ -514,84 +502,30 @@ def dashboard_ai_recommendations():
     recs = []
     try:
         df = load_trades_dataframe()
-
         if df.empty:
-            recs.append("Aucun trade clôturé pour le moment.")
-            recs.append("IA Coach sera plus précis après 10 à 20 trades.")
-            recs.append("Le bot surveille uniquement les modes A classique, B Pattern Early et C Capitulation Soft.")
-            recs.append("Priorité actuelle : attendre une confluence claire plutôt que forcer un achat.")
-            return recs
-
+            return ["Aucun trade enregistré pour le moment."]
         df = df.copy()
         df["real_pnl_usdc"] = pd.to_numeric(df.get("real_pnl_usdc"), errors="coerce").fillna(0)
-        df["pnl_price_pct"] = pd.to_numeric(df.get("pnl_price_pct"), errors="coerce").fillna(0)
-
-        total = len(df)
-        pnl = df["real_pnl_usdc"]
-        wins = int((pnl > 0).sum())
-        losses = int((pnl < 0).sum())
-        winrate = round((wins / total) * 100, 1) if total else 0
-        total_pnl = round(float(pnl.sum()), 4)
-
-        recs.append(f"Analyse basée sur {total} trade(s).")
-        recs.append(f"Résultat global : {total_pnl} USDC | Winrate {winrate}%.")
-
-        if total < 10:
-            recs.append("Échantillon encore faible : éviter de tirer des conclusions définitives.")
-
+        recs.append(f"Analyse basée sur {len(df)} trade(s).")
         if "mode" in df.columns:
             by_mode = df.groupby("mode")["real_pnl_usdc"].agg(["count", "sum", "mean"])
-            if not by_mode.empty:
-                best = by_mode.sort_values("sum", ascending=False).head(1)
-                worst = by_mode.sort_values("sum", ascending=True).head(1)
-
-                for mode, r in best.iterrows():
-                    recs.append(f"Mode le plus rentable actuellement : {mode} avec {r['sum']:.3f} USDC sur {int(r['count'])} trade(s).")
-
-                for mode, r in worst.iterrows():
-                    if r["sum"] < 0:
-                        recs.append(f"Mode à surveiller : {mode} perd {abs(r['sum']):.3f} USDC sur {int(r['count'])} trade(s).")
-
+            best = by_mode.sort_values("sum", ascending=False).head(1)
+            worst = by_mode.sort_values("sum", ascending=True).head(1)
+            for mode, r in best.iterrows():
+                recs.append(f"Mode le plus rentable: {mode} avec {r['sum']:.3f} USDC sur {int(r['count'])} trade(s).")
+            for mode, r in worst.iterrows():
+                if r["sum"] < 0:
+                    recs.append(f"Mode à surveiller: {mode} perd {abs(r['sum']):.3f} USDC.")
         if "symbol" in df.columns:
             by_sym = df.groupby("symbol")["real_pnl_usdc"].agg(["count", "sum", "mean"])
-            if not by_sym.empty:
-                best_sym = by_sym.sort_values("sum", ascending=False).head(1)
-                worst_sym = by_sym.sort_values("sum", ascending=True).head(1)
-
-                for sym, r in best_sym.iterrows():
-                    recs.append(f"Token le plus favorable : {sym} avec {r['sum']:.3f} USDC.")
-
-                for sym, r in worst_sym.iterrows():
-                    if r["sum"] < 0:
-                        recs.append(f"Token à surveiller : {sym} est négatif de {r['sum']:.3f} USDC.")
-
-        if "exit_reason" in df.columns:
-            by_exit = df.groupby("exit_reason")["real_pnl_usdc"].agg(["count", "sum"])
-            if not by_exit.empty:
-                worst_exit = by_exit.sort_values("sum", ascending=True).head(1)
-                for reason, r in worst_exit.iterrows():
-                    if r["sum"] < 0:
-                        recs.append(f"Sortie à analyser : {reason} représente {r['sum']:.3f} USDC.")
-
-        try:
-            post_df = load_post_trade_dataframe()
-            if not post_df.empty:
-                too_early = int(post_df.get("verdict", pd.Series(dtype=str)).astype(str).str.contains("TROP_TOT", na=False).sum())
-                good = int(post_df.get("verdict", pd.Series(dtype=str)).astype(str).str.contains("BONNE", na=False).sum())
-                if too_early > good:
-                    recs.append("Post Trade : certaines sorties semblent trop précoces.")
-                elif good > too_early:
-                    recs.append("Post Trade : les sorties semblent globalement protectrices.")
-        except Exception:
-            pass
-
-        if len(recs) < 4:
-            recs.append("Continue à accumuler des trades pour améliorer la qualité des recommandations.")
-
-        return recs[:10]
-
+            worst = by_sym.sort_values("sum", ascending=True).head(1)
+            for sym, r in worst.iterrows():
+                if r["sum"] < 0:
+                    recs.append(f"Token à surveiller: {sym} est négatif de {r['sum']:.3f} USDC.")
+        return recs[:8]
     except Exception as e:
-        return [f"Erreur IA Coach : {e}"]
+        return [f"Erreur IA Coach: {e}"]
+
 
 
 def get_live_trade_snapshot():
@@ -686,14 +620,12 @@ def get_dashboard_stats():
         "by_symbol": [],
         "by_exit_reason": [],
         "recent_trades": [],
-        "completed_trades": [],
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
-        "last_scan_status": {k: v for k, v in last_candle_times.items()},
         "ai_recommendations": dashboard_ai_recommendations(),
         "post_trade_pending": load_pending_post_trades(),
         "post_trade_analysis": [] if load_post_trade_dataframe().empty else load_post_trade_dataframe().tail(80).fillna("").to_dict(orient="records"),
-        "dashboard_name": "V3.10 Premium iPhone Dashboard Data Fix Pro",
+        "dashboard_name": "V3.10 Rebase Dashboard Pro Live Pro",
     }
 
     if df.empty:
@@ -744,7 +676,6 @@ def get_dashboard_stats():
     result["by_exit_reason"] = grouped_stats("exit_reason")
     recent = df.tail(60).fillna("").to_dict(orient="records")
     result["recent_trades"] = [{k: json_safe(v) for k, v in row.items()} for row in recent]
-    result["completed_trades"] = result["recent_trades"]
     return result
 
 
@@ -753,133 +684,139 @@ DASHBOARD_HTML = r"""
 <html lang="fr">
 <head>
 <meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<title>BOT MULTI Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<title>Bot Trading Dashboard</title>
 <style>
-:root{
-  --bg:#020817;--panel:#07111f;--card:#0b1426;--card2:#101b30;--line:#1e2c44;
-  --text:#f3f7ff;--muted:#8fa2bd;--green:#21e56b;--red:#ff4d5d;--yellow:#ffd43b;
-  --blue:#35a8ff;--purple:#7c4dff;--cyan:#22d3ee;--shadow:0 18px 50px rgba(0,0,0,.38);
-}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Arial,sans-serif;background:
- radial-gradient(circle at 12% 0%,rgba(53,168,255,.17),transparent 28%),
- radial-gradient(circle at 94% 8%,rgba(124,77,255,.18),transparent 30%),
- linear-gradient(180deg,#020817 0%,#06101e 100%) fixed}
-body{padding:16px 12px 102px;max-width:1080px;margin:auto}
-.topbar{display:flex;align-items:center;justify-content:space-between;margin:6px 0 16px;gap:10px}
-.brand{display:flex;align-items:center;gap:12px;min-width:0}.botIcon{width:50px;height:50px;border-radius:18px;background:linear-gradient(135deg,#0ea5e9,#4f46e5);display:grid;place-items:center;font-size:26px;box-shadow:0 0 30px rgba(53,168,255,.28)}
-.title{font-size:22px;font-weight:950;letter-spacing:.2px;line-height:1}.subtitle{font-size:12px;color:#6ee7ff;font-weight:900;margin-top:4px;white-space:nowrap}.status{display:flex;align-items:center;gap:8px;background:rgba(33,229,107,.12);border:1px solid rgba(33,229,107,.24);color:var(--green);padding:9px 11px;border-radius:14px;font-size:12px;font-weight:900}.dot{width:9px;height:9px;background:var(--green);border-radius:50%;box-shadow:0 0 12px var(--green)}
-.iconBtn{width:42px;height:42px;border-radius:14px;background:rgba(11,20,38,.88);border:1px solid var(--line);display:grid;place-items:center;font-size:19px}.headerBtns{display:flex;gap:8px}
-
-.card{background:linear-gradient(180deg,rgba(15,27,48,.96),rgba(7,17,31,.96));border:1px solid var(--line);border-radius:20px;padding:14px;box-shadow:var(--shadow)}.section{margin-top:14px}.sectionHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.sectionTitle{font-size:16px;font-weight:950;letter-spacing:.1px}.link{font-size:12px;color:#a8bad2;font-weight:800}
-.kpiGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.kpi{position:relative;overflow:hidden;min-height:108px}.kpi .label{font-size:11px;text-transform:uppercase;color:#b7c6df;font-weight:900;letter-spacing:.35px}.kpi .value{font-size:24px;font-weight:950;margin-top:12px}.kpi .sub{font-size:12px;color:var(--muted);font-weight:800;margin-top:6px}.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.muted{color:var(--muted)}
-.spark{position:absolute;right:10px;bottom:8px;width:86px;height:38px;opacity:.85}.spark path{fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
-
-.liveCard{border-color:rgba(33,229,107,.22);background:radial-gradient(circle at 82% 20%,rgba(33,229,107,.15),transparent 34%),linear-gradient(180deg,rgba(15,27,48,.98),rgba(7,17,31,.98))}
-.liveTop{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:12px}.pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:950;background:rgba(33,229,107,.13);border:1px solid rgba(33,229,107,.22);color:var(--green)}
-.liveGrid{display:grid;grid-template-columns:1fr;gap:12px}.coinBig{font-size:32px;font-weight:950;letter-spacing:.2px}.liveRows{display:grid;gap:10px;margin-top:12px}.row{display:flex;justify-content:space-between;color:#cbd7ea;font-size:13px}.row b{color:#fff}
-.pnlBox{text-align:center;border-top:1px solid var(--line);padding-top:12px}.pnlBox .pnl{font-size:27px;font-weight:950}.miniChart{height:60px;margin-top:8px;background:linear-gradient(180deg,rgba(33,229,107,.15),transparent);border-radius:14px;overflow:hidden}.miniChart svg{width:100%;height:100%}
-.levels{display:grid;gap:10px;margin-top:14px}.barRow{display:grid;grid-template-columns:78px 1fr 68px;gap:10px;align-items:center;color:#cbd7ea;font-size:12px}.bar{height:8px;background:#22314a;border-radius:99px;overflow:hidden}.bar>span{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--blue),var(--green))}.bar.redbar>span{background:linear-gradient(90deg,#ef4444,var(--red))}
-
-.modeToggles{display:flex;gap:8px;overflow:auto;padding-bottom:2px}.toggle{flex:0 0 auto;border:1px solid var(--line);background:#121d31;color:#fff;border-radius:13px;padding:10px 12px;font-weight:950}.toggle.on{background:linear-gradient(135deg,#16a34a,#22c55e);color:#03140a}.toggle.off{background:#334155;color:#9eb0c9}
-.marketGrid{display:grid;grid-template-columns:1fr;gap:10px}.market{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:12px;border-radius:18px;background:rgba(13,25,45,.82);border:1px solid var(--line)}.coinIcon{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;background:#111827;font-size:19px}.pair{font-weight:950}.price{font-size:13px;color:#cbd7ea;margin-top:3px}.statusTag{padding:5px 8px;border-radius:10px;font-size:10px;font-weight:950;background:rgba(255,212,59,.14);color:var(--yellow);text-align:center}
-.desktopGrid{display:grid;gap:14px}.donutWrap{display:flex;align-items:center;gap:12px}.donut{width:112px;height:112px;border-radius:50%;background:conic-gradient(var(--green) 0 62%,var(--blue) 62% 84%,var(--yellow) 84% 100%);display:grid;place-items:center}.donutInner{width:72px;height:72px;border-radius:50%;background:#0b1426;display:grid;place-items:center;text-align:center;font-weight:950}.legend{display:grid;gap:8px;font-size:12px}.scoreCircle{width:112px;height:112px;border-radius:50%;background:conic-gradient(var(--yellow) 0 68%,#263244 68% 100%);display:grid;place-items:center}.scoreInner{width:78px;height:78px;border-radius:50%;background:#0b1426;display:grid;place-items:center;text-align:center}.scoreInner b{font-size:28px}
-table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:10px 8px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}th{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.2px}.scroll{overflow:auto}.tradeCoin{font-weight:950}.badge{padding:4px 8px;border-radius:9px;font-weight:950;font-size:10px;background:rgba(53,168,255,.13);color:#86d6ff}.exitGood{color:var(--green);font-weight:900}.exitBad{color:var(--red);font-weight:900}
-.aiBox,pre{white-space:pre-wrap;background:rgba(3,12,25,.68);border:1px solid var(--line);border-radius:15px;padding:12px;line-height:1.35;color:#dce7ff;font-size:12px;max-height:330px;overflow:auto}tr.clickable{cursor:pointer}tr.clickable:hover{background:#1c2a42}
-.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:99;padding:16px;overflow:auto}.modalBox{background:#0b1426;border:1px solid var(--line);border-radius:22px;padding:16px;max-width:760px;margin:40px auto}.modalClose{float:right;background:#334155;color:#fff;border:0;border-radius:11px;padding:8px 12px}.detailGrid{display:grid;grid-template-columns:1fr;gap:10px}.detailItem{background:#111c31;border:1px solid var(--line);border-radius:14px;padding:12px;font-size:13px}
-.bottomNav{position:fixed;left:0;right:0;bottom:0;background:rgba(5,12,24,.88);backdrop-filter:blur(18px);border-top:1px solid var(--line);padding:10px 14px 18px;display:flex;justify-content:space-around;z-index:50}.navItem{color:#9fb0ca;text-align:center;font-size:11px;font-weight:850}.navIcon{font-size:22px;margin-bottom:4px}.navItem.active{color:#fff}.navItem.active .navIcon{background:linear-gradient(135deg,var(--purple),#4f46e5);border-radius:16px;padding:10px 15px;box-shadow:0 0 24px rgba(124,77,255,.35)}
-@media(min-width:860px){body{padding-bottom:24px}.kpiGrid{grid-template-columns:repeat(4,1fr)}.liveGrid{grid-template-columns:1fr 1fr}.pnlBox{border-top:0;border-left:1px solid var(--line);padding-top:0;padding-left:12px}.marketGrid{grid-template-columns:repeat(3,1fr)}.desktopGrid{grid-template-columns:1fr 1fr}.detailGrid{grid-template-columns:1fr 1fr}.bottomNav{display:none}}
+:root{--bg:#0f172a;--card:#111827;--card2:#172033;--text:#e5e7eb;--muted:#94a3b8;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--border:#263244}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial;padding:12px}
+h1{font-size:22px;margin:8px 0 12px} h3{margin:0 0 10px;font-size:16px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:12px;box-shadow:0 6px 18px rgba(0,0,0,.18)}
+.k{color:var(--muted);font-size:12px}.v{font-size:20px;font-weight:700;margin-top:4px}.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.muted{color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}th{color:var(--muted);font-weight:600}.scroll{overflow:auto}
+button{border:0;border-radius:12px;padding:10px 12px;background:#2563eb;color:white;font-weight:700;min-height:42px}button.off{background:#475569}.modeRow{display:flex;gap:8px;flex-wrap:wrap}
+pre{white-space:pre-wrap;background:#07111f;border-radius:12px;padding:10px;max-height:340px;overflow:auto;font-size:12px;color:#cbd5e1}
+.aiBox{background:#071827;border:1px solid #164e63;border-radius:12px;padding:12px;white-space:pre-wrap;line-height:1.35}
+tr.clickable{cursor:pointer}tr.clickable:hover{background:#1f2a3c}.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:99;padding:16px;overflow:auto}.modalBox{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:16px;max-width:760px;margin:40px auto}.modalClose{float:right;background:#334155}.detailGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.detailItem{background:var(--card2);padding:10px;border-radius:12px;border:1px solid #2b3950}
+@media(max-width:760px){body{padding:10px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.card{padding:10px;border-radius:14px}.v{font-size:18px}table{font-size:12px}th,td{padding:7px}.detailGrid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<div class="topbar">
-  <div class="brand"><div class="botIcon">🤖</div><div><div class="title">BOT MULTI</div><div class="subtitle">V3.10 PREMIUM IPHONE DASHBOARD DATA FIX</div></div></div>
-  <div class="status"><span class="dot"></span>EN LIGNE</div>
-  <div class="headerBtns"><div class="iconBtn">🔔</div><div class="iconBtn">🌙</div></div>
+<h1>📊 Bot Trading Dashboard <span class="muted" id="dashName"></span></h1>
+
+<div class="grid">
+ <div class="card"><div class="k">Solde</div><div class="v" id="balance">-</div></div>
+ <div class="card"><div class="k">Trades</div><div class="v" id="trades">-</div></div>
+ <div class="card"><div class="k">Winrate</div><div class="v" id="winrate">-</div></div>
+ <div class="card"><div class="k">PnL total</div><div class="v" id="pnl">-</div></div>
 </div>
 
-<div class="kpiGrid">
-  <div class="card kpi"><div class="label">PNL TOTAL</div><div class="value" id="pnl">-</div><div class="sub">USDC</div><svg class="spark green" viewBox="0 0 100 40"><path d="M0,34 L14,34 L26,28 L38,29 L49,18 L60,21 L72,14 L86,16 L100,8"/></svg></div>
-  <div class="card kpi"><div class="label">TRADES</div><div class="value" id="trades">-</div><div class="sub"><span class="green" id="wins">0W</span> / <span class="red" id="losses">0L</span></div></div>
-  <div class="card kpi"><div class="label">WINRATE</div><div class="value" id="winrate">-</div><div class="sub">taux réussite</div></div>
-  <div class="card kpi"><div class="label">SOLDE WALLET</div><div class="value" id="balance">-</div><div class="sub">USDC</div></div>
+<div class="card" style="margin-top:12px">
+ <h3>⚙️ Modes actifs V3.10</h3>
+ <div class="modeRow" id="modes"></div>
+ <div class="muted" style="margin-top:8px">Modes conservés : A classique, B pattern early, C capitulation soft.</div>
 </div>
 
-<section class="section card liveCard">
-  <div class="liveTop"><div class="sectionTitle"><span class="dot"></span> LIVE TRADING EN COURS</div><div class="link" id="liveUpdate">temps réel</div></div>
-  <div class="liveGrid">
-    <div>
-      <div><span class="coinBig" id="liveSymbol">Aucune</span> <span class="pill">LONG ONLY</span></div>
-      <div class="liveRows">
-        <div class="row"><span>Entrée</span><b id="liveEntry">-</b></div>
-        <div class="row"><span>Prix actuel</span><b id="livePrice" class="green">-</b></div>
-        <div class="row"><span>Quantité</span><b id="liveQty">-</b></div>
-        <div class="row"><span>Mode</span><b id="liveMode">-</b></div>
-        <div class="row"><span>Score</span><b id="liveScore">-</b></div>
-      </div>
-    </div>
-    <div class="pnlBox">
-      <div class="muted">PNL LIVE</div><div class="pnl" id="livePnlUsdc">-</div><div class="pnl" id="livePnlPct">-</div>
-      <div class="miniChart"><svg viewBox="0 0 100 50"><path d="M0,40 L10,30 L20,32 L30,23 L42,22 L50,12 L62,18 L70,10 L82,13 L100,6" stroke="#21e56b" stroke-width="3" fill="none"/></svg></div>
-    </div>
-  </div>
-  <div class="levels">
-    <div class="barRow"><span>TP1</span><div class="bar"><span id="tpBar" style="width:60%"></span></div><b id="liveTp1">-</b></div>
-    <div class="barRow"><span>STOP ATR</span><div class="bar redbar"><span id="stopBar" style="width:55%"></span></div><b id="liveStop">-</b></div>
-    <div class="barRow"><span>TRAILING</span><div class="bar"><span id="trailBar" style="width:20%"></span></div><b id="liveTrail">-</b></div>
-  </div>
-</section>
-
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">⚙️ MODES ACTIFS</div><div class="link">A / B Early / C Soft</div></div><div class="modeToggles" id="modes"></div></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">MARCHÉS SURVEILLÉS</div><div class="link">15m</div></div><div class="marketGrid" id="markets"></div></section>
-
-<div class="desktopGrid section">
-  <section class="card"><div class="sectionHead"><div class="sectionTitle">PERFORMANCE PAR MODE</div><div class="link">PnL</div></div><div class="donutWrap"><div class="donut"><div class="donutInner"><div>Total<br><span id="donutTotal" class="green">-</span><br><small>USDC</small></div></div></div><div class="legend" id="modeLegend"></div></div></section>
-  <section class="card"><div class="sectionHead"><div class="sectionTitle">POST TRADE SCORE</div><div class="link">qualité</div></div><div class="donutWrap"><div class="scoreCircle"><div class="scoreInner"><b id="postScore">-</b><small>/100</small></div></div><div class="legend" id="postLegend"></div></div></section>
+<div class="card" style="margin-top:12px">
+ <h3>🔥 Live Trading en cours</h3>
+ <div class="grid">
+  <div class="card"><div class="k">Coin</div><div class="v" id="liveSymbol">-</div></div>
+  <div class="card"><div class="k">Mode</div><div class="v" id="liveMode">-</div></div>
+  <div class="card"><div class="k">PnL live</div><div class="v" id="livePnlPct">-</div></div>
+  <div class="card"><div class="k">PnL USDC estimé</div><div class="v" id="livePnlUsdc">-</div></div>
+ </div>
+ <div class="scroll" style="margin-top:10px">
+  <table id="liveTradeTable"></table>
+ </div>
 </div>
 
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">📋 TRADES TERMINÉS</div><div class="link">Cliquer pour détail</div></div><div class="scroll"><table id="recentTrades"></table></div></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">🧪 POST TRADE EN ATTENTE</div></div><div class="scroll"><table id="postPending"></table></div></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">✅ ANALYSES TERMINÉES</div></div><div class="scroll"><table id="postDone"></table></div></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">🧠 IA COACH</div></div><div id="aiCoach" class="aiBox">-</div></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">🕯️ DERNIERS SIGNAUX</div></div><div class="scroll"><table id="signals"></table></div></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">📍 POSITION BRUTE</div></div><pre id="pos">-</pre></section>
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">📋 LOGS</div></div><pre id="logs"></pre></section>
+<div class="card" style="margin-top:12px">
+ <h3>📍 Position ouverte brute</h3>
+ <pre id="pos">-</pre>
+</div>
 
-<div id="tradeModal" class="modal"><div class="modalBox"><button class="modalClose" onclick="closeTradeModal()">Fermer</button><h3>🔎 Analyse détaillée du trade</h3><div id="tradeDetailContent"></div></div></div>
+<div class="card" style="margin-top:12px"><h3>📈 Performance par mode</h3><div class="scroll"><table id="byMode"></table></div></div>
+<div class="card" style="margin-top:12px"><h3>🪙 Performance par token</h3><div class="scroll"><table id="bySymbol"></table></div></div>
+<div class="card" style="margin-top:12px"><h3>📋 Trades récents</h3><div class="scroll"><table id="recentTrades"></table></div></div>
 
-<div class="bottomNav"><div class="navItem active"><div class="navIcon">⌂</div>Dashboard</div><div class="navItem"><div class="navIcon">〽</div>Live</div><div class="navItem"><div class="navIcon">▣</div>Trades</div><div class="navItem"><div class="navIcon">▥</div>Stats</div><div class="navItem"><div class="navIcon">⚙</div>Réglages</div></div>
+<div class="card" style="margin-top:12px"><h3>🧪 Post Trade Analyzer - en attente</h3><div class="scroll"><table id="postPending"></table></div></div>
+<div class="card" style="margin-top:12px"><h3>✅ Post Trade Analyzer - terminées</h3><div class="scroll"><table id="postDone"></table></div></div>
+
+<div class="card" style="margin-top:12px"><h3>🧠 IA Coach</h3><div id="aiCoach" class="aiBox">-</div></div>
+<div class="card" style="margin-top:12px"><h3>🕯️ Derniers signaux</h3><div class="scroll"><table id="signals"></table></div></div>
+<div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
+
+<div id="tradeModal" class="modal">
+ <div class="modalBox">
+  <button class="modalClose" onclick="closeTradeModal()">Fermer</button>
+  <h3>🔎 Analyse détaillée du trade</h3>
+  <div id="tradeDetailContent"></div>
+ </div>
+</div>
 
 <script>
 let lastTrades=[];
 function cls(v){let n=Number(v); if(isNaN(n))return ''; return n>0?'green':(n<0?'red':'')}
 function fmt(v,d=2){let n=Number(v); return isNaN(n)?(v??'-'):n.toFixed(d)}
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-function table(el,cols,rows,clickable=false){rows=rows||[];const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';if(!rows.length){document.getElementById(el).innerHTML=head+`<tr><td colspan="${cols.length}" class="muted">Aucune donnée disponible</td></tr>`;return}const body=rows.map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
+function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
 function closeTradeModal(){document.getElementById('tradeModal').style.display='none'}
-function openTradeModal(i){const r=lastTrades[i];if(!r)return;document.getElementById('tradeDetailContent').innerHTML=`<div class="detailGrid"><div class="detailItem"><b>Date</b><br>${esc(r.date)}</div><div class="detailItem"><b>Coin</b><br>${esc(r.symbol)}</div><div class="detailItem"><b>Mode</b><br>${esc(r.mode)}</div><div class="detailItem"><b>Sortie</b><br>${esc(r.exit_reason)}</div><div class="detailItem"><b>Entry</b><br>${esc(r.entry)}</div><div class="detailItem"><b>Exit</b><br>${esc(r.exit)}</div><div class="detailItem"><b>PnL %</b><br>${esc(r.pnl_price_pct)}</div><div class="detailItem"><b>PnL USDC</b><br>${esc(r.real_pnl_usdc)}</div></div><h3 style="margin-top:16px">🧠 Lecture rapide</h3><div class="aiBox">Mode ${esc(r.mode)} sur ${esc(r.symbol)}. Sortie ${esc(r.exit_reason)}. PnL réel ${esc(r.real_pnl_usdc)} USDC.</div>`;document.getElementById('tradeModal').style.display='block'}
+function openTradeModal(i){const r=lastTrades[i];if(!r)return;document.getElementById('tradeDetailContent').innerHTML=`<div class="detailGrid">
+<div class="detailItem"><b>Date</b><br>${esc(r.date)}</div><div class="detailItem"><b>Coin</b><br>${esc(r.symbol)}</div>
+<div class="detailItem"><b>Mode</b><br>${esc(r.mode)}</div><div class="detailItem"><b>Sortie</b><br>${esc(r.exit_reason)}</div>
+<div class="detailItem"><b>Entry</b><br>${esc(r.entry)}</div><div class="detailItem"><b>Exit</b><br>${esc(r.exit)}</div>
+<div class="detailItem"><b>PnL %</b><br>${esc(r.pnl_price_pct)}</div><div class="detailItem"><b>PnL USDC</b><br>${esc(r.real_pnl_usdc)}</div>
+</div><h3 style="margin-top:16px">🧠 Lecture rapide</h3><div class="aiBox">Mode ${esc(r.mode)} sur ${esc(r.symbol)}. Sortie ${esc(r.exit_reason)}. PnL réel ${esc(r.real_pnl_usdc)} USDC.</div>`;document.getElementById('tradeModal').style.display='block'}
 async function toggleMode(m){await fetch('/api/toggle_mode?mode='+encodeURIComponent(m),{method:'POST'});load()}
-function renderModes(cfg){const modes=cfg.modes||{};document.getElementById('modes').innerHTML=Object.entries(modes).map(([m,on])=>`<button class="toggle ${on?'on':'off'}" onclick="toggleMode('${m}')">${on?'✅':'❌'} ${m.replace('MODE_','')}</button>`).join('')}
 function renderLiveTrade(live){
- if(!live||!live.in_position){document.getElementById('liveSymbol').textContent='Aucune';document.getElementById('liveMode').textContent='-';document.getElementById('liveEntry').textContent='-';document.getElementById('livePrice').textContent='-';document.getElementById('liveQty').textContent='-';document.getElementById('liveScore').textContent='-';document.getElementById('livePnlPct').textContent='-';document.getElementById('livePnlPct').className='pnl';document.getElementById('livePnlUsdc').textContent='-';document.getElementById('livePnlUsdc').className='pnl';document.getElementById('liveTp1').textContent='-';document.getElementById('liveStop').textContent='-';document.getElementById('liveTrail').textContent='-';document.getElementById('liveUpdate').textContent='Aucune position';return}
- document.getElementById('liveSymbol').textContent=live.symbol||'-';document.getElementById('liveMode').textContent=(live.mode||'-').replace('MODE_','');document.getElementById('liveEntry').textContent=fmt(live.entry,6);document.getElementById('livePrice').textContent=fmt(live.current_price,6);document.getElementById('liveQty').textContent=fmt(live.size,6);document.getElementById('liveScore').textContent=live.score??'-';document.getElementById('livePnlPct').textContent=fmt(live.pnl_pct,3)+'%';document.getElementById('livePnlPct').className='pnl '+cls(live.pnl_pct);document.getElementById('livePnlUsdc').textContent=fmt(live.pnl_usdc_est,4)+' USDC';document.getElementById('livePnlUsdc').className='pnl '+cls(live.pnl_usdc_est);document.getElementById('liveTp1').textContent=live.tp1_price??'-';document.getElementById('liveStop').textContent=live.hard_stop??'-';document.getElementById('liveTrail').textContent=live.trailing_stop??'-';document.getElementById('liveUpdate').textContent=live.last_update||'temps réel'
+ if(!live || !live.in_position){
+   document.getElementById('liveSymbol').textContent='Aucune';
+   document.getElementById('liveMode').textContent='-';
+   document.getElementById('livePnlPct').textContent='-';
+   document.getElementById('livePnlPct').className='v';
+   document.getElementById('livePnlUsdc').textContent='-';
+   document.getElementById('livePnlUsdc').className='v';
+   table('liveTradeTable',[
+    {label:'Entry',get:r=>'-'},{label:'Prix actuel',get:r=>'-'},{label:'Qty',get:r=>'-'},{label:'TP1',get:r=>'-'},{label:'Stop',get:r=>'-'},{label:'Trail',get:r=>'-'},{label:'Update',get:r=>'-'}
+   ],[{}]);
+   return;
+ }
+ document.getElementById('liveSymbol').textContent=live.symbol||'-';
+ document.getElementById('liveMode').textContent=(live.mode||'-').replace('MODE_','');
+ document.getElementById('livePnlPct').textContent=fmt(live.pnl_pct,3)+'%';
+ document.getElementById('livePnlPct').className='v '+cls(live.pnl_pct);
+ document.getElementById('livePnlUsdc').textContent=fmt(live.pnl_usdc_est,4)+' USDC';
+ document.getElementById('livePnlUsdc').className='v '+cls(live.pnl_usdc_est);
+ table('liveTradeTable',[
+  {label:'Entry',get:r=>fmt(r.entry,6)},
+  {label:'Prix actuel',get:r=>fmt(r.current_price,6)},
+  {label:'Qty',get:r=>fmt(r.size,6)},
+  {label:'Score',get:r=>r.score??'-'},
+  {label:'TP1',get:r=>r.tp1_price??'-'},
+  {label:'Stop',get:r=>r.hard_stop??'-'},
+  {label:'Trail',get:r=>r.trailing_stop??'-'},
+  {label:'Plus haut',get:r=>r.highest_price??'-'},
+  {label:'Update',get:r=>r.last_update??'-'}
+ ],[live]);
 }
-function renderMarkets(d){const live=d.live_trade||{};let rows=['SOL','XRP','kSHIB'].map(s=>{let active=live.symbol===s;return `<div class="market"><div class="coinIcon">${s==='SOL'?'◎':s==='XRP'?'✕':'◆'}</div><div><div class="pair">${s}/USDC</div><div class="price">${active?('Live '+fmt(live.current_price,6)):'Surveillé 15m'}</div></div><div class="statusTag">${active?'LIVE':'SCAN'}</div></div>`}).join('');document.getElementById('markets').innerHTML=rows}
-function renderModeLegend(rows,total){document.getElementById('donutTotal').textContent=fmt(total,2);document.getElementById('modeLegend').innerHTML=(rows||[]).slice(0,5).map(r=>`<div><span class="${cls(r.pnl)}">●</span> ${r.name.replace('MODE_','')} <b class="${cls(r.pnl)}">${fmt(r.pnl,3)}</b></div>`).join('')||'<div class="muted">Aucune donnée</div>'}
-function renderPostScore(done){let n=(done||[]).length;if(!n){document.getElementById('postScore').textContent='-';document.getElementById('postLegend').innerHTML='<div class="muted">Aucune analyse terminée</div>';return}let good=done.filter(x=>String(x.verdict).includes('BONNE')).length;let early=done.filter(x=>String(x.verdict).includes('TROP')).length;let score=Math.max(0,Math.min(100,Math.round((good/n)*100+(n-early)/n*25)));document.getElementById('postScore').textContent=score;document.getElementById('postLegend').innerHTML=`<div>Analyses <span class="green">${n}</span></div><div>Bonnes sorties <span class="green">${good}</span></div><div>Sorties trop tôt <span class="yellow">${early}</span></div>`}
+function renderModes(cfg){const modes=cfg.modes||{};document.getElementById('modes').innerHTML=Object.entries(modes).map(([m,on])=>`<button class="${on?'':'off'}" onclick="toggleMode('${m}')">${on?'✅':'❌'} ${m.replace('MODE_','')}</button>`).join('')}
 async function load(){
- const d=await (await fetch('/api/stats')).json();let s=d.summary||{};
- document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('trades').textContent=s.trades??0;document.getElementById('wins').textContent=(s.wins??0)+'W';document.getElementById('losses').textContent=(s.losses??0)+'L';document.getElementById('winrate').textContent=fmt(s.winrate,1)+'%';document.getElementById('pnl').textContent=fmt(s.pnl_total,3);document.getElementById('pnl').className='value '+cls(s.pnl_total);
- renderModes(d.config||{});renderLiveTrade(d.live_trade);renderMarkets(d);renderModeLegend(d.by_mode,s.pnl_total);renderPostScore(d.post_trade_analysis||[]);
+ const d=await (await fetch('/api/stats')).json();
+ document.getElementById('dashName').textContent='· '+(d.dashboard_name||'');
+ document.getElementById('balance').textContent=fmt(d.balance,2)+' USDC';
+ document.getElementById('trades').textContent=d.summary.trades;
+ document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';
+ document.getElementById('pnl').textContent=fmt(d.summary.pnl_total,3)+' USDC'; document.getElementById('pnl').className='v '+cls(d.summary.pnl_total);
+ renderModes(d.config||{});
+ renderLiveTrade(d.live_trade);
  document.getElementById('pos').textContent=JSON.stringify(d.open_position,null,2);
  table('byMode',[{label:'Mode',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)}],d.by_mode);
- lastTrades=(d.completed_trades||d.recent_trades||[]).slice().reverse();
- table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',get:r=>`<span class="tradeCoin">${r.symbol}</span>`},{label:'Mode',get:r=>`<span class="badge">${String(r.mode||'-').replace('MODE_','')}</span>`},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],lastTrades,true);
+ table('bySymbol',[{label:'Coin',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)}],d.by_symbol);
+ lastTrades=(d.recent_trades||[]).slice().reverse();
+ table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],lastTrades,true);
  table('postPending',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Exit',key:'exit'},{label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(((Number(r.max_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Min',get:r=>fmt(((Number(r.min_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Status',key:'status'}],(d.post_trade_pending||[]).slice().reverse());
  table('postDone',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'+15m',get:r=>fmt(r.after_15m_pct,2),cls:v=>cls(v)},{label:'+1h',get:r=>fmt(r.after_1h_pct,2),cls:v=>cls(v)},{label:'+4h',get:r=>fmt(r.after_4h_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(r.max_after_pct,2),cls:v=>cls(v)},{label:'Verdict',key:'verdict'}],(d.post_trade_analysis||[]).slice().reverse());
- table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',get:r=>r.mode||'-'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`},{label:'Trend',key:'trend'},{label:'RSI',key:'rsi'},{label:'VWAP',key:'vwap'},{label:'OBV',key:'obv'}],(d.analysis_history||[]).slice().reverse());
- document.getElementById('aiCoach').textContent=(d.ai_recommendations&&d.ai_recommendations.length?d.ai_recommendations.map(x=>'• '+x).join('\n'):'IA Coach disponible après quelques trades.');document.getElementById('logs').textContent=(d.log_history&&d.log_history.length?d.log_history.join('\n'):'Aucun log dashboard pour le moment. Attendre la prochaine bougie 15m ou un trade.')
+ table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',key:'mode'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`}],(d.analysis_history||[]).slice().reverse());
+ document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
+ document.getElementById('logs').textContent=(d.log_history||[]).join('\n');
 }
 load();setInterval(load,5000);
 </script>
@@ -1778,7 +1715,6 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
 
     msg += "Copier ce message dans ChatGPT pour analyse."
 
-    add_dashboard_log(f"TRADE CLOSED {symbol} reason={exit_reason} exit={exit_price:.5f}")
     notify_telegram(msg)
 
     add_post_trade_tracking(
@@ -1933,31 +1869,6 @@ def prepare_df_for_symbol(symbol):
     return df, confirmed_time, current_price
 
 
-
-def add_signal_history(symbol, signal, details, now):
-    try:
-        ANALYSIS_HISTORY.append({
-            "time": now,
-            "symbol": symbol,
-            "signal": signal,
-            "mode": details.get("signal_mode"),
-            "score": round(float(details.get("score", 0) or 0), 4),
-            "mode_a": bool(details.get("mode_a_ok")),
-            "mode_b": bool(details.get("mode_b_ok")),
-            "mode_c": bool(details.get("mode_c_ok")),
-            "trend": bool(details.get("trend_ok")),
-            "rsi": bool(details.get("rsi_ok")),
-            "vwap": bool(details.get("vwap_ok")),
-            "obv": bool(details.get("obv_rising")),
-            "breakout": bool(details.get("breakout_ok")),
-            "green": bool(details.get("green_candle")),
-        })
-        if len(ANALYSIS_HISTORY) > 300:
-            del ANALYSIS_HISTORY[:-300]
-    except Exception as e:
-        add_dashboard_log(f"Signal history error: {e}")
-
-
 def scan_symbols_for_best_buy():
     global last_candle_times
     candidates = []
@@ -2028,12 +1939,6 @@ def scan_symbols_for_best_buy():
         if len(ANALYSIS_HISTORY) > 300:
             del ANALYSIS_HISTORY[:-300]
 
-        add_dashboard_log(
-            f"SIGNAL {symbol} {'BUY' if ok else 'HOLD'} mode={details.get('signal_mode')} score={round(details.get('score', 0), 4)}"
-        )
-
-        add_signal_history(symbol, 'BUY' if ok else 'HOLD', details, now)
-
         if ok:
             candidates.append({
                 "symbol": symbol,
@@ -2055,7 +1960,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.10 PREMIUM IPHONE DASHBOARD DATA FIX")
+    print("BOT MULTI V3.10 REBASE DASHBOARD PRO LIVE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2084,7 +1989,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.10 Premium iPhone Dashboard Data Fix Pro démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard Pro Live Pro démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -2161,7 +2066,6 @@ def run():
                 continue
 
             print(f"[BUY SIGNAL] Achat confirmé sur {symbol}. Score={best['score']:.4f}")
-            add_dashboard_log(f"BUY SIGNAL {symbol} mode={details.get('signal_mode')} score={best['score']:.4f} prix={current_price:.5f}")
             notify_telegram(
                 f"🚀 <b>BUY SIGNAL confirmé</b>\n"
                 f"Symbole: {symbol}\n"
