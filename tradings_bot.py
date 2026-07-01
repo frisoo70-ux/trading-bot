@@ -129,6 +129,17 @@ LOG_HISTORY = []
 ANALYSIS_HISTORY = []
 
 
+
+def add_dashboard_log(message):
+    try:
+        ts = datetime.now().strftime("%H:%M:%S")
+        LOG_HISTORY.append(f"[{ts}] {message}")
+        if len(LOG_HISTORY) > 500:
+            del LOG_HISTORY[:-500]
+    except Exception:
+        pass
+
+
 def notify_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -503,30 +514,84 @@ def dashboard_ai_recommendations():
     recs = []
     try:
         df = load_trades_dataframe()
+
         if df.empty:
-            return ["Aucun trade enregistré pour le moment."]
+            recs.append("Aucun trade clôturé pour le moment.")
+            recs.append("IA Coach sera plus précis après 10 à 20 trades.")
+            recs.append("Le bot surveille uniquement les modes A classique, B Pattern Early et C Capitulation Soft.")
+            recs.append("Priorité actuelle : attendre une confluence claire plutôt que forcer un achat.")
+            return recs
+
         df = df.copy()
         df["real_pnl_usdc"] = pd.to_numeric(df.get("real_pnl_usdc"), errors="coerce").fillna(0)
-        recs.append(f"Analyse basée sur {len(df)} trade(s).")
+        df["pnl_price_pct"] = pd.to_numeric(df.get("pnl_price_pct"), errors="coerce").fillna(0)
+
+        total = len(df)
+        pnl = df["real_pnl_usdc"]
+        wins = int((pnl > 0).sum())
+        losses = int((pnl < 0).sum())
+        winrate = round((wins / total) * 100, 1) if total else 0
+        total_pnl = round(float(pnl.sum()), 4)
+
+        recs.append(f"Analyse basée sur {total} trade(s).")
+        recs.append(f"Résultat global : {total_pnl} USDC | Winrate {winrate}%.")
+
+        if total < 10:
+            recs.append("Échantillon encore faible : éviter de tirer des conclusions définitives.")
+
         if "mode" in df.columns:
             by_mode = df.groupby("mode")["real_pnl_usdc"].agg(["count", "sum", "mean"])
-            best = by_mode.sort_values("sum", ascending=False).head(1)
-            worst = by_mode.sort_values("sum", ascending=True).head(1)
-            for mode, r in best.iterrows():
-                recs.append(f"Mode le plus rentable: {mode} avec {r['sum']:.3f} USDC sur {int(r['count'])} trade(s).")
-            for mode, r in worst.iterrows():
-                if r["sum"] < 0:
-                    recs.append(f"Mode à surveiller: {mode} perd {abs(r['sum']):.3f} USDC.")
+            if not by_mode.empty:
+                best = by_mode.sort_values("sum", ascending=False).head(1)
+                worst = by_mode.sort_values("sum", ascending=True).head(1)
+
+                for mode, r in best.iterrows():
+                    recs.append(f"Mode le plus rentable actuellement : {mode} avec {r['sum']:.3f} USDC sur {int(r['count'])} trade(s).")
+
+                for mode, r in worst.iterrows():
+                    if r["sum"] < 0:
+                        recs.append(f"Mode à surveiller : {mode} perd {abs(r['sum']):.3f} USDC sur {int(r['count'])} trade(s).")
+
         if "symbol" in df.columns:
             by_sym = df.groupby("symbol")["real_pnl_usdc"].agg(["count", "sum", "mean"])
-            worst = by_sym.sort_values("sum", ascending=True).head(1)
-            for sym, r in worst.iterrows():
-                if r["sum"] < 0:
-                    recs.append(f"Token à surveiller: {sym} est négatif de {r['sum']:.3f} USDC.")
-        return recs[:8]
-    except Exception as e:
-        return [f"Erreur IA Coach: {e}"]
+            if not by_sym.empty:
+                best_sym = by_sym.sort_values("sum", ascending=False).head(1)
+                worst_sym = by_sym.sort_values("sum", ascending=True).head(1)
 
+                for sym, r in best_sym.iterrows():
+                    recs.append(f"Token le plus favorable : {sym} avec {r['sum']:.3f} USDC.")
+
+                for sym, r in worst_sym.iterrows():
+                    if r["sum"] < 0:
+                        recs.append(f"Token à surveiller : {sym} est négatif de {r['sum']:.3f} USDC.")
+
+        if "exit_reason" in df.columns:
+            by_exit = df.groupby("exit_reason")["real_pnl_usdc"].agg(["count", "sum"])
+            if not by_exit.empty:
+                worst_exit = by_exit.sort_values("sum", ascending=True).head(1)
+                for reason, r in worst_exit.iterrows():
+                    if r["sum"] < 0:
+                        recs.append(f"Sortie à analyser : {reason} représente {r['sum']:.3f} USDC.")
+
+        try:
+            post_df = load_post_trade_dataframe()
+            if not post_df.empty:
+                too_early = int(post_df.get("verdict", pd.Series(dtype=str)).astype(str).str.contains("TROP_TOT", na=False).sum())
+                good = int(post_df.get("verdict", pd.Series(dtype=str)).astype(str).str.contains("BONNE", na=False).sum())
+                if too_early > good:
+                    recs.append("Post Trade : certaines sorties semblent trop précoces.")
+                elif good > too_early:
+                    recs.append("Post Trade : les sorties semblent globalement protectrices.")
+        except Exception:
+            pass
+
+        if len(recs) < 4:
+            recs.append("Continue à accumuler des trades pour améliorer la qualité des recommandations.")
+
+        return recs[:10]
+
+    except Exception as e:
+        return [f"Erreur IA Coach : {e}"]
 
 
 def get_live_trade_snapshot():
@@ -621,12 +686,14 @@ def get_dashboard_stats():
         "by_symbol": [],
         "by_exit_reason": [],
         "recent_trades": [],
+        "completed_trades": [],
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
+        "last_scan_status": {k: v for k, v in last_candle_times.items()},
         "ai_recommendations": dashboard_ai_recommendations(),
         "post_trade_pending": load_pending_post_trades(),
         "post_trade_analysis": [] if load_post_trade_dataframe().empty else load_post_trade_dataframe().tail(80).fillna("").to_dict(orient="records"),
-        "dashboard_name": "V3.10 Premium iPhone Dashboard Pro",
+        "dashboard_name": "V3.10 Premium iPhone Dashboard Data Fix Pro",
     }
 
     if df.empty:
@@ -677,6 +744,7 @@ def get_dashboard_stats():
     result["by_exit_reason"] = grouped_stats("exit_reason")
     recent = df.tail(60).fillna("").to_dict(orient="records")
     result["recent_trades"] = [{k: json_safe(v) for k, v in row.items()} for row in recent]
+    result["completed_trades"] = result["recent_trades"]
     return result
 
 
@@ -726,7 +794,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:10px 8px;
 </head>
 <body>
 <div class="topbar">
-  <div class="brand"><div class="botIcon">🤖</div><div><div class="title">BOT MULTI</div><div class="subtitle">V3.10 PREMIUM IPHONE DASHBOARD</div></div></div>
+  <div class="brand"><div class="botIcon">🤖</div><div><div class="title">BOT MULTI</div><div class="subtitle">V3.10 PREMIUM IPHONE DASHBOARD DATA FIX</div></div></div>
   <div class="status"><span class="dot"></span>EN LIGNE</div>
   <div class="headerBtns"><div class="iconBtn">🔔</div><div class="iconBtn">🌙</div></div>
 </div>
@@ -771,7 +839,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:10px 8px;
   <section class="card"><div class="sectionHead"><div class="sectionTitle">POST TRADE SCORE</div><div class="link">qualité</div></div><div class="donutWrap"><div class="scoreCircle"><div class="scoreInner"><b id="postScore">-</b><small>/100</small></div></div><div class="legend" id="postLegend"></div></div></section>
 </div>
 
-<section class="section card"><div class="sectionHead"><div class="sectionTitle">📋 DERNIERS TRADES</div><div class="link">Cliquer pour détail</div></div><div class="scroll"><table id="recentTrades"></table></div></section>
+<section class="section card"><div class="sectionHead"><div class="sectionTitle">📋 TRADES TERMINÉS</div><div class="link">Cliquer pour détail</div></div><div class="scroll"><table id="recentTrades"></table></div></section>
 <section class="section card"><div class="sectionHead"><div class="sectionTitle">🧪 POST TRADE EN ATTENTE</div></div><div class="scroll"><table id="postPending"></table></div></section>
 <section class="section card"><div class="sectionHead"><div class="sectionTitle">✅ ANALYSES TERMINÉES</div></div><div class="scroll"><table id="postDone"></table></div></section>
 <section class="section card"><div class="sectionHead"><div class="sectionTitle">🧠 IA COACH</div></div><div id="aiCoach" class="aiBox">-</div></section>
@@ -788,7 +856,7 @@ let lastTrades=[];
 function cls(v){let n=Number(v); if(isNaN(n))return ''; return n>0?'green':(n<0?'red':'')}
 function fmt(v,d=2){let n=Number(v); return isNaN(n)?(v??'-'):n.toFixed(d)}
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
+function table(el,cols,rows,clickable=false){rows=rows||[];const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';if(!rows.length){document.getElementById(el).innerHTML=head+`<tr><td colspan="${cols.length}" class="muted">Aucune donnée disponible</td></tr>`;return}const body=rows.map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
 function closeTradeModal(){document.getElementById('tradeModal').style.display='none'}
 function openTradeModal(i){const r=lastTrades[i];if(!r)return;document.getElementById('tradeDetailContent').innerHTML=`<div class="detailGrid"><div class="detailItem"><b>Date</b><br>${esc(r.date)}</div><div class="detailItem"><b>Coin</b><br>${esc(r.symbol)}</div><div class="detailItem"><b>Mode</b><br>${esc(r.mode)}</div><div class="detailItem"><b>Sortie</b><br>${esc(r.exit_reason)}</div><div class="detailItem"><b>Entry</b><br>${esc(r.entry)}</div><div class="detailItem"><b>Exit</b><br>${esc(r.exit)}</div><div class="detailItem"><b>PnL %</b><br>${esc(r.pnl_price_pct)}</div><div class="detailItem"><b>PnL USDC</b><br>${esc(r.real_pnl_usdc)}</div></div><h3 style="margin-top:16px">🧠 Lecture rapide</h3><div class="aiBox">Mode ${esc(r.mode)} sur ${esc(r.symbol)}. Sortie ${esc(r.exit_reason)}. PnL réel ${esc(r.real_pnl_usdc)} USDC.</div>`;document.getElementById('tradeModal').style.display='block'}
 async function toggleMode(m){await fetch('/api/toggle_mode?mode='+encodeURIComponent(m),{method:'POST'});load()}
@@ -806,12 +874,12 @@ async function load(){
  renderModes(d.config||{});renderLiveTrade(d.live_trade);renderMarkets(d);renderModeLegend(d.by_mode,s.pnl_total);renderPostScore(d.post_trade_analysis||[]);
  document.getElementById('pos').textContent=JSON.stringify(d.open_position,null,2);
  table('byMode',[{label:'Mode',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)}],d.by_mode);
- lastTrades=(d.recent_trades||[]).slice().reverse();
+ lastTrades=(d.completed_trades||d.recent_trades||[]).slice().reverse();
  table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',get:r=>`<span class="tradeCoin">${r.symbol}</span>`},{label:'Mode',get:r=>`<span class="badge">${String(r.mode||'-').replace('MODE_','')}</span>`},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],lastTrades,true);
  table('postPending',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Exit',key:'exit'},{label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(((Number(r.max_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Min',get:r=>fmt(((Number(r.min_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Status',key:'status'}],(d.post_trade_pending||[]).slice().reverse());
  table('postDone',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'+15m',get:r=>fmt(r.after_15m_pct,2),cls:v=>cls(v)},{label:'+1h',get:r=>fmt(r.after_1h_pct,2),cls:v=>cls(v)},{label:'+4h',get:r=>fmt(r.after_4h_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(r.max_after_pct,2),cls:v=>cls(v)},{label:'Verdict',key:'verdict'}],(d.post_trade_analysis||[]).slice().reverse());
- table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',key:'mode'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`}],(d.analysis_history||[]).slice().reverse());
- document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';document.getElementById('logs').textContent=(d.log_history||[]).join('\n')
+ table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',get:r=>r.mode||'-'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`},{label:'Trend',key:'trend'},{label:'RSI',key:'rsi'},{label:'VWAP',key:'vwap'},{label:'OBV',key:'obv'}],(d.analysis_history||[]).slice().reverse());
+ document.getElementById('aiCoach').textContent=(d.ai_recommendations&&d.ai_recommendations.length?d.ai_recommendations.map(x=>'• '+x).join('\n'):'IA Coach disponible après quelques trades.');document.getElementById('logs').textContent=(d.log_history&&d.log_history.length?d.log_history.join('\n'):'Aucun log dashboard pour le moment. Attendre la prochaine bougie 15m ou un trade.')
 }
 load();setInterval(load,5000);
 </script>
@@ -1710,6 +1778,7 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
 
     msg += "Copier ce message dans ChatGPT pour analyse."
 
+    add_dashboard_log(f"TRADE CLOSED {symbol} reason={exit_reason} exit={exit_price:.5f}")
     notify_telegram(msg)
 
     add_post_trade_tracking(
@@ -1864,6 +1933,31 @@ def prepare_df_for_symbol(symbol):
     return df, confirmed_time, current_price
 
 
+
+def add_signal_history(symbol, signal, details, now):
+    try:
+        ANALYSIS_HISTORY.append({
+            "time": now,
+            "symbol": symbol,
+            "signal": signal,
+            "mode": details.get("signal_mode"),
+            "score": round(float(details.get("score", 0) or 0), 4),
+            "mode_a": bool(details.get("mode_a_ok")),
+            "mode_b": bool(details.get("mode_b_ok")),
+            "mode_c": bool(details.get("mode_c_ok")),
+            "trend": bool(details.get("trend_ok")),
+            "rsi": bool(details.get("rsi_ok")),
+            "vwap": bool(details.get("vwap_ok")),
+            "obv": bool(details.get("obv_rising")),
+            "breakout": bool(details.get("breakout_ok")),
+            "green": bool(details.get("green_candle")),
+        })
+        if len(ANALYSIS_HISTORY) > 300:
+            del ANALYSIS_HISTORY[:-300]
+    except Exception as e:
+        add_dashboard_log(f"Signal history error: {e}")
+
+
 def scan_symbols_for_best_buy():
     global last_candle_times
     candidates = []
@@ -1934,6 +2028,12 @@ def scan_symbols_for_best_buy():
         if len(ANALYSIS_HISTORY) > 300:
             del ANALYSIS_HISTORY[:-300]
 
+        add_dashboard_log(
+            f"SIGNAL {symbol} {'BUY' if ok else 'HOLD'} mode={details.get('signal_mode')} score={round(details.get('score', 0), 4)}"
+        )
+
+        add_signal_history(symbol, 'BUY' if ok else 'HOLD', details, now)
+
         if ok:
             candidates.append({
                 "symbol": symbol,
@@ -1955,7 +2055,7 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.10 PREMIUM IPHONE DASHBOARD")
+    print("BOT MULTI V3.10 PREMIUM IPHONE DASHBOARD DATA FIX")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -1984,7 +2084,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.10 Premium iPhone Dashboard Pro démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.10 Premium iPhone Dashboard Data Fix Pro démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -2061,6 +2161,7 @@ def run():
                 continue
 
             print(f"[BUY SIGNAL] Achat confirmé sur {symbol}. Score={best['score']:.4f}")
+            add_dashboard_log(f"BUY SIGNAL {symbol} mode={details.get('signal_mode')} score={best['score']:.4f} prix={current_price:.5f}")
             notify_telegram(
                 f"🚀 <b>BUY SIGNAL confirmé</b>\n"
                 f"Symbole: {symbol}\n"
