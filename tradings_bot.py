@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs
 
 # ============================================================
 # BOT MULTI-COINS V3
-# XRP / kSHIB
+# XPL / XRP / kSHIB
 # Timeframe : 15 min
 # Long only
 # Une seule position ouverte à la fois
@@ -22,7 +22,7 @@ from urllib.parse import urlparse, parse_qs
 # EMA20 / EMA50 / RSI14 / ATR14 / OBV_MA5 / VWAP / Breakout
 #
 # Entrée :
-# Le bot scanne XRP, kSHIB.
+# Le bot scanne XPL, XRP, kSHIB.
 # Si plusieurs signaux BUY sont valides, il choisit le meilleur score.
 #
 # Sorties :
@@ -42,7 +42,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["XRP", "kSHIB"]
+SYMBOLS = ["XPL", "XRP", "kSHIB"]
 TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
 
@@ -464,7 +464,6 @@ def default_bot_config():
             "MODE_B_PATTERN": True,
             "MODE_C_CAPITULATION": True,
         },
-        "tokens": {symbol: True for symbol in SYMBOLS},
         "trade_size_usd": TRADE_SIZE_USD,
     }
 
@@ -478,8 +477,6 @@ def load_bot_config():
             if isinstance(data, dict):
                 cfg.update(data)
                 cfg["modes"] = {**default_bot_config()["modes"], **data.get("modes", {})}
-                cfg["tokens"] = {**default_bot_config()["tokens"], **data.get("tokens", {})}
-                cfg["tokens"] = {k: v for k, v in cfg.get("tokens", {}).items() if k in SYMBOLS}
             return cfg
     except Exception as e:
         print("[CONFIG] load error", e)
@@ -497,13 +494,6 @@ def save_bot_config(cfg):
 def is_mode_enabled(mode):
     try:
         return bool(load_bot_config().get("modes", {}).get(mode, True))
-    except Exception:
-        return True
-
-
-def is_token_enabled(symbol):
-    try:
-        return bool(load_bot_config().get("tokens", {}).get(symbol, True))
     except Exception:
         return True
 
@@ -635,7 +625,7 @@ def get_dashboard_stats():
         "ai_recommendations": dashboard_ai_recommendations(),
         "post_trade_pending": load_pending_post_trades(),
         "post_trade_analysis": [] if load_post_trade_dataframe().empty else load_post_trade_dataframe().tail(80).fillna("").to_dict(orient="records"),
-        "dashboard_name": "V3.10 Rebase Dashboard XRP kSHIB Only",
+        "dashboard_name": "V3.10 Rebase Dashboard Pro Live Pro",
     }
 
     if df.empty:
@@ -700,8 +690,8 @@ DASHBOARD_HTML = r"""
 :root{--bg:#0f172a;--card:#111827;--card2:#172033;--text:#e5e7eb;--muted:#94a3b8;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--border:#263244}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial;padding:12px}
 h1{font-size:22px;margin:8px 0 12px} h3{margin:0 0 10px;font-size:16px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:12px;box-shadow:0 6px 18px rgba(0,0,0,.18)}
-.k{color:var(--muted);font-size:12px}.v{font-size:20px;font-weight:700;margin-top:4px}.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.muted{color:var(--muted)}.rowCountInfo{font-size:11px;color:var(--muted);margin-top:8px}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}th{color:var(--muted);font-weight:600}.scroll{overflow:auto}.limitedScroll{max-height:360px;overflow:auto}.limitedScroll.small{max-height:260px}.limitedScroll.logs{max-height:300px}.limitedScroll table{margin-bottom:0}
+.k{color:var(--muted);font-size:12px}.v{font-size:20px;font-weight:700;margin-top:4px}.green{color:var(--green)}.red{color:var(--red)}.yellow{color:var(--yellow)}.muted{color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}th{color:var(--muted);font-weight:600}.scroll{overflow:auto}
 button{border:0;border-radius:12px;padding:10px 12px;background:#2563eb;color:white;font-weight:700;min-height:42px}button.off{background:#475569}.modeRow{display:flex;gap:8px;flex-wrap:wrap}
 pre{white-space:pre-wrap;background:#07111f;border-radius:12px;padding:10px;max-height:340px;overflow:auto;font-size:12px;color:#cbd5e1}
 .aiBox{background:#071827;border:1px solid #164e63;border-radius:12px;padding:12px;white-space:pre-wrap;line-height:1.35}
@@ -726,12 +716,6 @@ tr.clickable{cursor:pointer}tr.clickable:hover{background:#1f2a3c}.modal{display
 </div>
 
 <div class="card" style="margin-top:12px">
- <h3>🪙 Tokens actifs</h3>
- <div class="modeRow" id="tokens"></div>
- <div class="muted" style="margin-top:8px">Un token désactivé n’est plus scanné pour un nouvel achat.</div>
-</div>
-
-<div class="card" style="margin-top:12px">
  <h3>🔥 Live Trading en cours</h3>
  <div class="grid">
   <div class="card"><div class="k">Coin</div><div class="v" id="liveSymbol">-</div></div>
@@ -751,13 +735,13 @@ tr.clickable{cursor:pointer}tr.clickable:hover{background:#1f2a3c}.modal{display
 
 <div class="card" style="margin-top:12px"><h3>📈 Performance par mode</h3><div class="scroll"><table id="byMode"></table></div></div>
 <div class="card" style="margin-top:12px"><h3>🪙 Performance par token</h3><div class="scroll"><table id="bySymbol"></table></div></div>
-<div class="card" style="margin-top:12px"><h3>📋 Trades récents</h3><div class="scroll limitedScroll"><table id="recentTrades"></table></div><div class="rowCountInfo" id="recentCount"></div></div>
+<div class="card" style="margin-top:12px"><h3>📋 Trades récents</h3><div class="scroll"><table id="recentTrades"></table></div></div>
 
-<div class="card" style="margin-top:12px"><h3>🧪 Post Trade Analyzer - en attente</h3><div class="scroll limitedScroll small"><table id="postPending"></table></div><div class="rowCountInfo" id="pendingCount"></div></div>
-<div class="card" style="margin-top:12px"><h3>✅ Post Trade Analyzer - terminées</h3><div class="scroll limitedScroll"><table id="postDone"></table></div><div class="rowCountInfo" id="postDoneCount"></div></div>
+<div class="card" style="margin-top:12px"><h3>🧪 Post Trade Analyzer - en attente</h3><div class="scroll"><table id="postPending"></table></div></div>
+<div class="card" style="margin-top:12px"><h3>✅ Post Trade Analyzer - terminées</h3><div class="scroll"><table id="postDone"></table></div></div>
 
 <div class="card" style="margin-top:12px"><h3>🧠 IA Coach</h3><div id="aiCoach" class="aiBox">-</div></div>
-<div class="card" style="margin-top:12px"><h3>🕯️ Derniers signaux</h3><div class="scroll limitedScroll small"><table id="signals"></table></div><div class="rowCountInfo" id="signalCount"></div></div>
+<div class="card" style="margin-top:12px"><h3>🕯️ Derniers signaux</h3><div class="scroll"><table id="signals"></table></div></div>
 <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
 
 <div id="tradeModal" class="modal">
@@ -770,9 +754,6 @@ tr.clickable{cursor:pointer}tr.clickable:hover{background:#1f2a3c}.modal{display
 
 <script>
 let lastTrades=[];
-const MAX_RECENT_TRADES=30;
-const MAX_POST_ROWS=30;
-const MAX_SIGNAL_ROWS=40;
 function cls(v){let n=Number(v); if(isNaN(n))return ''; return n>0?'green':(n<0?'red':'')}
 function fmt(v,d=2){let n=Number(v); return isNaN(n)?(v??'-'):n.toFixed(d)}
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
@@ -825,18 +806,17 @@ async function load(){
  document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';
  document.getElementById('pnl').textContent=fmt(d.summary.pnl_total,3)+' USDC'; document.getElementById('pnl').className='v '+cls(d.summary.pnl_total);
  renderModes(d.config||{});
- renderTokens(d.config||{});
  renderLiveTrade(d.live_trade);
  document.getElementById('pos').textContent=JSON.stringify(d.open_position,null,2);
  table('byMode',[{label:'Mode',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)}],d.by_mode);
  table('bySymbol',[{label:'Coin',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)}],d.by_symbol);
- lastTrades=(d.completed_trades||d.recent_trades||[]).slice().reverse().slice(0,MAX_RECENT_TRADES);
- table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],lastTrades,true);document.getElementById('recentCount').textContent=`Affichage des ${lastTrades.length} derniers trades`;
- let pendingRows=(d.post_trade_pending||[]).slice().reverse().slice(0,MAX_POST_ROWS);table('postPending',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Exit',key:'exit'},{label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(((Number(r.max_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Min',get:r=>fmt(((Number(r.min_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Status',key:'status'}],pendingRows);document.getElementById('pendingCount').textContent=`Affichage ${pendingRows.length}/${(d.post_trade_pending||[]).length}`;
- let doneRows=(d.post_trade_analysis||[]).slice().reverse().slice(0,MAX_POST_ROWS);table('postDone',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'+15m',get:r=>fmt(r.after_15m_pct,2),cls:v=>cls(v)},{label:'+1h',get:r=>fmt(r.after_1h_pct,2),cls:v=>cls(v)},{label:'+4h',get:r=>fmt(r.after_4h_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(r.max_after_pct,2),cls:v=>cls(v)},{label:'Verdict',key:'verdict'}],doneRows);document.getElementById('postDoneCount').textContent=`Affichage ${doneRows.length}/${(d.post_trade_analysis||[]).length}`;
- let sigRows=(d.analysis_history||[]).slice().reverse().slice(0,MAX_SIGNAL_ROWS);table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',key:'mode'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`}],sigRows);document.getElementById('signalCount').textContent=`Affichage ${sigRows.length}/${(d.analysis_history||[]).length}`;
+ lastTrades=(d.recent_trades||[]).slice().reverse();
+ table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],lastTrades,true);
+ table('postPending',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Exit',key:'exit'},{label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(((Number(r.max_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Min',get:r=>fmt(((Number(r.min_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Status',key:'status'}],(d.post_trade_pending||[]).slice().reverse());
+ table('postDone',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'+15m',get:r=>fmt(r.after_15m_pct,2),cls:v=>cls(v)},{label:'+1h',get:r=>fmt(r.after_1h_pct,2),cls:v=>cls(v)},{label:'+4h',get:r=>fmt(r.after_4h_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(r.max_after_pct,2),cls:v=>cls(v)},{label:'Verdict',key:'verdict'}],(d.post_trade_analysis||[]).slice().reverse());
+ table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',key:'mode'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`}],(d.analysis_history||[]).slice().reverse());
  document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
- document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n');
+ document.getElementById('logs').textContent=(d.log_history||[]).join('\n');
 }
 load();setInterval(load,5000);
 </script>
@@ -900,18 +880,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "mode": mode, "enabled": cfg["modes"][mode]})
                 return
             self._send_json({"ok": False, "error": "unknown mode"}, 400)
-            return
-
-        if path == "/api/toggle_token":
-            q = parse_qs(urlparse(self.path).query)
-            token = q.get("token", [""])[0]
-            cfg = load_bot_config()
-            if token in cfg.get("tokens", {}):
-                cfg["tokens"][token] = not bool(cfg["tokens"][token])
-                save_bot_config(cfg)
-                self._send_json({"ok": True, "token": token, "enabled": cfg["tokens"][token]})
-                return
-            self._send_json({"ok": False, "error": "unknown token"}, 400)
             return
         self._send_json({"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -1907,11 +1875,6 @@ def scan_symbols_for_best_buy():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for symbol in SYMBOLS:
-        if symbol == "SOL":
-            continue
-        if not is_token_enabled(symbol):
-            continue
-
         df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
         if df is None:
             continue
@@ -1994,21 +1957,10 @@ def scan_symbols_for_best_buy():
     return candidates[0]
 
 
-
-def sanitize_bot_config_no_sol():
-    try:
-        cfg = load_bot_config()
-        if "tokens" in cfg and "SOL" in cfg["tokens"]:
-            cfg["tokens"].pop("SOL", None)
-            save_bot_config(cfg)
-    except Exception as e:
-        print("[CONFIG] sanitize no SOL error", e)
-
-
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.10 REBASE DASHBOARD XRP KSHIB ONLY")
+    print("BOT MULTI V3.10 REBASE DASHBOARD PRO LIVE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2033,12 +1985,11 @@ def run():
     ensure_trades_csv()
     ensure_post_trade_files()
     save_bot_config(load_bot_config())
-    sanitize_bot_config_no_sol()
     start_dashboard()
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard XRP kSHIB Only démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard Pro Live Pro démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
