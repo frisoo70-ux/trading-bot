@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs
 
 # ============================================================
 # BOT MULTI-COINS V3
-# SOL / XRP / kSHIB
+# XRP / kSHIB
 # Timeframe : 15 min
 # Long only
 # Une seule position ouverte à la fois
@@ -22,7 +22,7 @@ from urllib.parse import urlparse, parse_qs
 # EMA20 / EMA50 / RSI14 / ATR14 / OBV_MA5 / VWAP / Breakout
 #
 # Entrée :
-# Le bot scanne SOL, XRP, kSHIB.
+# Le bot scanne XRP, kSHIB.
 # Si plusieurs signaux BUY sont valides, il choisit le meilleur score.
 #
 # Sorties :
@@ -479,6 +479,7 @@ def load_bot_config():
                 cfg.update(data)
                 cfg["modes"] = {**default_bot_config()["modes"], **data.get("modes", {})}
                 cfg["tokens"] = {**default_bot_config()["tokens"], **data.get("tokens", {})}
+                cfg["tokens"] = {k: v for k, v in cfg.get("tokens", {}).items() if k in SYMBOLS}
             return cfg
     except Exception as e:
         print("[CONFIG] load error", e)
@@ -634,7 +635,7 @@ def get_dashboard_stats():
         "ai_recommendations": dashboard_ai_recommendations(),
         "post_trade_pending": load_pending_post_trades(),
         "post_trade_analysis": [] if load_post_trade_dataframe().empty else load_post_trade_dataframe().tail(80).fillna("").to_dict(orient="records"),
-        "dashboard_name": "V3.10 Rebase Dashboard Pro Live Compact Pro",
+        "dashboard_name": "V3.10 Rebase Dashboard XRP kSHIB Only",
     }
 
     if df.empty:
@@ -1906,6 +1907,8 @@ def scan_symbols_for_best_buy():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for symbol in SYMBOLS:
+        if symbol == "SOL":
+            continue
         if not is_token_enabled(symbol):
             continue
 
@@ -1991,10 +1994,21 @@ def scan_symbols_for_best_buy():
     return candidates[0]
 
 
+
+def sanitize_bot_config_no_sol():
+    try:
+        cfg = load_bot_config()
+        if "tokens" in cfg and "SOL" in cfg["tokens"]:
+            cfg["tokens"].pop("SOL", None)
+            save_bot_config(cfg)
+    except Exception as e:
+        print("[CONFIG] sanitize no SOL error", e)
+
+
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.10 REBASE DASHBOARD PRO LIVE COMPACT")
+    print("BOT MULTI V3.10 REBASE DASHBOARD XRP KSHIB ONLY")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -2019,11 +2033,12 @@ def run():
     ensure_trades_csv()
     ensure_post_trade_files()
     save_bot_config(load_bot_config())
+    sanitize_bot_config_no_sol()
     start_dashboard()
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard Pro Live Compact Pro démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard XRP kSHIB Only démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
