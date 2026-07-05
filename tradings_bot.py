@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs
 
 # ============================================================
 # BOT MULTI-COINS V3
-# XPL / XRP / kSHIB
+# XRP / kSHIB
 # Timeframe : 15 min
 # Long only
 # Une seule position ouverte à la fois
@@ -22,7 +22,7 @@ from urllib.parse import urlparse, parse_qs
 # EMA20 / EMA50 / RSI14 / ATR14 / OBV_MA5 / VWAP / Breakout
 #
 # Entrée :
-# Le bot scanne XPL, XRP, kSHIB.
+# Le bot scanne XRP, kSHIB.
 # Si plusieurs signaux BUY sont valides, il choisit le meilleur score.
 #
 # Sorties :
@@ -42,7 +42,7 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["XPL", "XRP", "kSHIB"]
+SYMBOLS = ["XRP", "kSHIB"]
 TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
 
