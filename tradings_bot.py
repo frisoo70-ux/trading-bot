@@ -14,7 +14,7 @@ from urllib.parse import urlparse, parse_qs
 # ============================================================
 # BOT MULTI-COINS V3
 # XRP / kSHIB
-# Timeframe : 15 min
+# Timeframe : 1 min
 # Long only
 # Une seule position ouverte à la fois
 #
@@ -22,7 +22,7 @@ from urllib.parse import urlparse, parse_qs
 # EMA20 / EMA50 / RSI14 / ATR14 / OBV_MA5 / VWAP / Breakout
 #
 # Entrée :
-# Le bot scanne XRP, kSHIB.
+# Le bot scanne XRP et kSHIB.
 # Si plusieurs signaux BUY sont valides, il choisit le meilleur score.
 #
 # Sorties :
@@ -54,7 +54,7 @@ BOT_CONFIG_PATH = Path("bot_config.json")
 DASHBOARD_PORT = int(os.environ.get("PORT", "8080"))
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
 POST_TRADE_HORIZONS = [
-    ("15m", 15 * 60 * 1000),
+    ("1m", 1 * 60 * 1000),
     ("30m", 30 * 60 * 1000),
     ("1h", 60 * 60 * 1000),
     ("2h", 2 * 60 * 60 * 1000),
@@ -310,7 +310,7 @@ def ensure_post_trade_files():
     if not POST_TRADE_PENDING_PATH.exists():
         POST_TRADE_PENDING_PATH.write_text("[]", encoding="utf-8")
     if not POST_TRADE_ANALYSIS_PATH.exists():
-        headers = ["date","symbol","mode","entry","exit","exit_reason","pnl_at_exit_pct","after_15m_pct","after_30m_pct","after_1h_pct","after_2h_pct","after_4h_pct","max_after_pct","min_after_pct","verdict"]
+        headers = ["date","symbol","mode","entry","exit","exit_reason","pnl_at_exit_pct","after_1m_pct","after_30m_pct","after_1h_pct","after_2h_pct","after_4h_pct","max_after_pct","min_after_pct","verdict"]
         with open(POST_TRADE_ANALYSIS_PATH, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(headers)
 
@@ -371,7 +371,7 @@ def finalize_post_trade_item(item):
         row = [
             item.get("date"), item.get("symbol"), item.get("mode"), item.get("entry"), item.get("exit"),
             item.get("exit_reason"), item.get("pnl_at_exit_pct"),
-            item.get("horizons", {}).get("15m"), item.get("horizons", {}).get("30m"),
+            item.get("horizons", {}).get("1m"), item.get("horizons", {}).get("30m"),
             item.get("horizons", {}).get("1h"), item.get("horizons", {}).get("2h"),
             item.get("horizons", {}).get("4h"), max_after_pct, min_after_pct, verdict
         ]
@@ -625,7 +625,7 @@ def get_dashboard_stats():
         "ai_recommendations": dashboard_ai_recommendations(),
         "post_trade_pending": load_pending_post_trades(),
         "post_trade_analysis": [] if load_post_trade_dataframe().empty else load_post_trade_dataframe().tail(80).fillna("").to_dict(orient="records"),
-        "dashboard_name": "V3.10 Rebase Dashboard Pro Live Pro",
+        "dashboard_name": "V3.10 Rebase Dashboard XRP/kSHIB 1m",
     }
 
     if df.empty:
@@ -813,7 +813,7 @@ async function load(){
  lastTrades=(d.recent_trades||[]).slice().reverse();
  table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)}],lastTrades,true);
  table('postPending',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'Exit',key:'exit'},{label:'PnL sortie',get:r=>fmt(r.pnl_at_exit_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(((Number(r.max_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Min',get:r=>fmt(((Number(r.min_price)-Number(r.exit))/Number(r.exit))*100,2),cls:v=>cls(v)},{label:'Status',key:'status'}],(d.post_trade_pending||[]).slice().reverse());
- table('postDone',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'+15m',get:r=>fmt(r.after_15m_pct,2),cls:v=>cls(v)},{label:'+1h',get:r=>fmt(r.after_1h_pct,2),cls:v=>cls(v)},{label:'+4h',get:r=>fmt(r.after_4h_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(r.max_after_pct,2),cls:v=>cls(v)},{label:'Verdict',key:'verdict'}],(d.post_trade_analysis||[]).slice().reverse());
+ table('postDone',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',key:'mode'},{label:'+1m',get:r=>fmt(r.after_1m_pct,2),cls:v=>cls(v)},{label:'+1h',get:r=>fmt(r.after_1h_pct,2),cls:v=>cls(v)},{label:'+4h',get:r=>fmt(r.after_4h_pct,2),cls:v=>cls(v)},{label:'Max',get:r=>fmt(r.max_after_pct,2),cls:v=>cls(v)},{label:'Verdict',key:'verdict'}],(d.post_trade_analysis||[]).slice().reverse());
  table('signals',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Signal',key:'signal'},{label:'Mode',key:'mode'},{label:'Score',get:r=>fmt(r.score,4)},{label:'A/B/C',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}`}],(d.analysis_history||[]).slice().reverse());
  document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
  document.getElementById('logs').textContent=(d.log_history||[]).join('\n');
@@ -1164,8 +1164,8 @@ def get_candles(symbol):
             "type": "candleSnapshot",
             "req": {
                 "coin": symbol,
-                "interval": "15m",
-                "startTime": int((time.time() - 220 * 60 * 15) * 1000),
+                "interval": "1m",
+                "startTime": int((time.time() - 220 * 60 * 1) * 1000),
                 "endTime": int(time.time() * 1000),
             },
         }
@@ -1350,7 +1350,7 @@ def reset_trade_state_after_sell(candle_time):
         "tp1_done": False,
         "highest_price": None,
         "trailing_stop": None,
-        "cooldown_until_candle": candle_time + COOLDOWN_CANDLES_AFTER_SELL * 15 * 60 * 1000,
+        "cooldown_until_candle": candle_time + COOLDOWN_CANDLES_AFTER_SELL * 1 * 60 * 1000,
 
         "entry_balance": None,
         "signal_mode": None,
@@ -1767,7 +1767,7 @@ def manage_open_position(pos, df, current_price, candle_time):
         trailing_display = "INACTIF avant TP1"
 
     # Sortie EMA20 moins agressive :
-    # on vend uniquement après 2 clôtures 15 min consécutives sous EMA20.
+    # on vend uniquement après 2 clôtures 1 min consécutives sous EMA20.
     prev = df.iloc[-2]
     ema_break = (
         last["close"] < last["ema20"]
@@ -1875,6 +1875,8 @@ def scan_symbols_for_best_buy():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     for symbol in SYMBOLS:
+        if symbol == "SOL":
+            continue
         df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
         if df is None:
             continue
@@ -1960,8 +1962,8 @@ def scan_symbols_for_best_buy():
 def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V3.10 REBASE DASHBOARD PRO LIVE")
-    print("Long only | 15m | Une seule position à la fois")
+    print("BOT MULTI V3.10 REBASE DASHBOARD XRP KSHIB")
+    print("Long only | 1m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
@@ -1989,7 +1991,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard Pro Live Pro démarré</b>\n"
+        "🤖 <b>BOT MULTI V3.10 Rebase Dashboard XRP kSHIB démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
