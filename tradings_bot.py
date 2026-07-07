@@ -2185,4 +2185,11 @@ def run():
             print("Bot arrêté. Trades:", trades)
             break
 
-        except Except
+        except Exception as e:
+            print("[ERREUR]", e)
+            notify_telegram(f"⚠️ <b>Erreur bot</b>\n{e}")
+            time.sleep(CHECK_INTERVAL)
+
+
+if __name__ == "__main__":
+    run()
