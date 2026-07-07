@@ -936,7 +936,11 @@ def build_adaptive_message():
 
 
 def get_live_trade_snapshot_v48():
-    """Snapshot live pour le dashboard : PnL, TP1, stop ATR, trailing et distances."""
+    """
+    Snapshot live robuste pour le dashboard.
+    Recalcule PnL / ATR / TP1 / SL depuis la position Hyperliquid + bougies,
+    même après redémarrage Railway.
+    """
     try:
         pos = get_open_position()
         if not pos:
@@ -944,55 +948,91 @@ def get_live_trade_snapshot_v48():
 
         symbol = pos.get("symbol")
         size = abs(float(pos.get("size", 0) or 0))
-        entry = trade_state.get("entry_price") or pos.get("entry")
-        entry = float(entry or 0)
+        entry = float(pos.get("entry") or trade_state.get("entry_price") or 0)
 
+        df = None
         current_price = None
-        atr_value = trade_state.get("entry_atr")
+        atr_value = None
+        ema20 = None
+        ema50 = None
+        rsi = None
+
         try:
             df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
-            if df is not None and (atr_value is None or atr_value == 0):
-                last_atr = df.iloc[-1].get("atr")
-                if last_atr and not pd.isna(last_atr):
-                    atr_value = float(last_atr)
+            if df is not None and not df.empty:
+                last = df.iloc[-1]
+                atr_value = float(last.get("atr")) if not pd.isna(last.get("atr")) else None
+                ema20 = float(last.get("ema20")) if not pd.isna(last.get("ema20")) else None
+                ema50 = float(last.get("ema50")) if not pd.isna(last.get("ema50")) else None
+                rsi = float(last.get("rsi")) if not pd.isna(last.get("rsi")) else None
         except Exception:
             current_price = None
 
         if current_price is None:
             current_price = pos.get("mark_price") or pos.get("price") or entry
+
         current_price = float(current_price or 0)
+
+        stored_atr = trade_state.get("entry_atr")
+        if stored_atr and not pd.isna(stored_atr):
+            atr_value = float(stored_atr)
+        elif atr_value is not None:
+            atr_value = float(atr_value)
 
         pnl_pct = ((current_price - entry) / entry) * 100 if entry else 0
         pnl_usdc = (current_price - entry) * size if entry and size else 0
 
-        highest = trade_state.get("highest_price") or max(entry, current_price)
-        try:
-            highest = float(highest)
-        except Exception:
-            highest = max(entry, current_price)
-
+        tp1_done = bool(trade_state.get("tp1_done"))
         tp1_price = trade_state.get("tp1_price")
         hard_stop = None
-        trailing_stop = trade_state.get("trailing_stop")
 
         if atr_value and entry:
-            atr_value = float(atr_value)
             if not tp1_price:
                 tp1_price = entry + ATR_TP_MULT * atr_value
             hard_stop = entry - ATR_STOP_MULT * atr_value
-            if trade_state.get("tp1_done") and not trailing_stop:
-                trailing_stop = highest - ATR_TRAIL_MULT * atr_value
+
+        highest = trade_state.get("highest_price")
+        try:
+            highest = float(highest) if highest else None
+        except Exception:
+            highest = None
+
+        if highest is None:
+            highest = max(entry, current_price)
+            try:
+                if df is not None and not df.empty:
+                    highs = pd.to_numeric(df["high"], errors="coerce").dropna()
+                    if not highs.empty:
+                        highest = max(highest, float(highs.tail(80).max()))
+            except Exception:
+                pass
+
+        trailing_stop = trade_state.get("trailing_stop")
+        if trailing_stop is None and atr_value and highest and tp1_done:
+            trailing_stop = highest - ATR_TRAIL_MULT * atr_value
+
+        def safe_round(x, n=8):
+            try:
+                if x is None or pd.isna(x):
+                    return None
+                return round(float(x), n)
+            except Exception:
+                return None
 
         def dist_pct(target):
             try:
-                target = float(target)
-                return ((target - current_price) / current_price) * 100 if current_price else None
+                if target is None or current_price == 0:
+                    return None
+                return ((float(target) - current_price) / current_price) * 100
             except Exception:
                 return None
 
         def progress_between(stop, target):
             try:
-                stop = float(stop); target = float(target)
+                if stop is None or target is None:
+                    return None
+                stop = float(stop)
+                target = float(target)
                 if target == stop:
                     return None
                 return max(0, min(100, ((current_price - stop) / (target - stop)) * 100))
@@ -1002,26 +1042,34 @@ def get_live_trade_snapshot_v48():
         return {
             "in_position": True,
             "symbol": symbol,
-            "mode": trade_state.get("signal_mode"),
+            "mode": trade_state.get("signal_mode") or "RECOVERED_POSITION",
             "score": trade_state.get("score"),
-            "entry": round(entry, 8),
-            "current_price": round(current_price, 8),
-            "size": round(size, 8),
+            "entry": safe_round(entry),
+            "current_price": safe_round(current_price),
+            "size": safe_round(size),
             "pnl_pct": round(pnl_pct, 4),
             "pnl_usdc_est": round(pnl_usdc, 6),
-            "tp1_done": bool(trade_state.get("tp1_done")),
-            "tp1_price": round(float(tp1_price), 8) if tp1_price else None,
-            "hard_stop": round(float(hard_stop), 8) if hard_stop else None,
-            "trailing_stop": round(float(trailing_stop), 8) if trailing_stop else None,
-            "highest_price": round(float(highest), 8) if highest else None,
+            "tp1_done": tp1_done,
+            "tp1_price": safe_round(tp1_price),
+            "hard_stop": safe_round(hard_stop),
+            "trailing_stop": safe_round(trailing_stop),
+            "highest_price": safe_round(highest),
+            "entry_atr": safe_round(atr_value),
+            "ema20": safe_round(ema20),
+            "ema50": safe_round(ema50),
+            "rsi": safe_round(rsi, 2),
             "distance_to_tp1_pct": round(dist_pct(tp1_price), 4) if dist_pct(tp1_price) is not None else None,
             "distance_to_sl_pct": round(dist_pct(hard_stop), 4) if dist_pct(hard_stop) is not None else None,
             "distance_to_trailing_pct": round(dist_pct(trailing_stop), 4) if dist_pct(trailing_stop) is not None else None,
             "progress_to_tp1_pct": round(progress_between(hard_stop, tp1_price), 2) if hard_stop and tp1_price else None,
+            "timeframe": get_active_timeframe(),
             "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "recovered_from_position": trade_state.get("signal_mode") is None,
         }
+
     except Exception as e:
         return {"in_position": False, "error": str(e)}
+
 
 
 def compute_dashboard_stats():
@@ -1192,7 +1240,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF Live PnL · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF Live Robust Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1309,27 +1357,32 @@ function renderLiveTradeV48(live){
  if(empty){
    table('liveTradeTable',[{label:'Entry',get:r=>'-'},{label:'Prix actuel',get:r=>'-'},{label:'TP1',get:r=>'-'},{label:'Stop Loss',get:r=>'-'},{label:'Trailing',get:r=>'-'}],[{}]);
    document.getElementById('liveProgressBar').style.width='0%';
-   document.getElementById('liveProgressText').textContent='Aucune position ouverte.';
+   document.getElementById('liveProgressText').textContent=live&&live.error?('Erreur live: '+live.error):'Aucune position ouverte.';
    return;
  }
  table('liveTradeTable',[
    {label:'Entry',get:r=>fmt(r.entry,6)},
    {label:'Prix actuel',get:r=>fmt(r.current_price,6)},
    {label:'Qty',get:r=>fmt(r.size,6)},
-   {label:'TP1',get:r=>r.tp1_price??'-'},
+   {label:'ATR',get:r=>r.entry_atr==null?'-':fmt(r.entry_atr,6)},
+   {label:'TP1',get:r=>r.tp1_price==null?'-':fmt(r.tp1_price,6)},
    {label:'Dist. TP1',get:r=>r.distance_to_tp1_pct==null?'-':fmt(r.distance_to_tp1_pct,3)+'%'},
-   {label:'Stop Loss ATR',get:r=>r.hard_stop??'-'},
+   {label:'Stop Loss ATR',get:r=>r.hard_stop==null?'-':fmt(r.hard_stop,6)},
    {label:'Dist. SL',get:r=>r.distance_to_sl_pct==null?'-':fmt(r.distance_to_sl_pct,3)+'%'},
-   {label:'Trailing',get:r=>r.trailing_stop??'-'},
+   {label:'Trailing',get:r=>r.trailing_stop==null?'-':fmt(r.trailing_stop,6)},
+   {label:'Plus haut',get:r=>r.highest_price==null?'-':fmt(r.highest_price,6)},
    {label:'TP1 fait',get:r=>r.tp1_done?'Oui':'Non'},
+   {label:'TF',get:r=>r.timeframe||'-'},
    {label:'Update',get:r=>r.last_update??'-'}
  ],[live]);
  const prog=live.progress_to_tp1_pct==null?0:Math.max(0,Math.min(100,Number(live.progress_to_tp1_pct)));
  document.getElementById('liveProgressBar').style.width=prog+'%';
- document.getElementById('liveProgressText').textContent=`Progression entre Stop Loss et TP1 : ${fmt(prog,1)}%`;
+ let txt=`Progression entre Stop Loss et TP1 : ${fmt(prog,1)}%`;
+ if(live.recovered_from_position){txt+=' · position récupérée après redémarrage';}
+ document.getElementById('liveProgressText').textContent=txt;
 }
 
-async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);
+async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
 lastTrades=(d.recent_trades||[]).slice().reverse();
@@ -4083,7 +4136,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.8 Adaptive Intelligence démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.8 Adaptive Intelligence Multi-TF Live Robust démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
