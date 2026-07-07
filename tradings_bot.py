@@ -934,6 +934,96 @@ def build_adaptive_message():
         return f"⚠️ Erreur adaptive: {e}"
 
 
+
+def get_live_trade_snapshot_v48():
+    """Snapshot live pour le dashboard : PnL, TP1, stop ATR, trailing et distances."""
+    try:
+        pos = get_open_position()
+        if not pos:
+            return {"in_position": False}
+
+        symbol = pos.get("symbol")
+        size = abs(float(pos.get("size", 0) or 0))
+        entry = trade_state.get("entry_price") or pos.get("entry")
+        entry = float(entry or 0)
+
+        current_price = None
+        atr_value = trade_state.get("entry_atr")
+        try:
+            df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
+            if df is not None and (atr_value is None or atr_value == 0):
+                last_atr = df.iloc[-1].get("atr")
+                if last_atr and not pd.isna(last_atr):
+                    atr_value = float(last_atr)
+        except Exception:
+            current_price = None
+
+        if current_price is None:
+            current_price = pos.get("mark_price") or pos.get("price") or entry
+        current_price = float(current_price or 0)
+
+        pnl_pct = ((current_price - entry) / entry) * 100 if entry else 0
+        pnl_usdc = (current_price - entry) * size if entry and size else 0
+
+        highest = trade_state.get("highest_price") or max(entry, current_price)
+        try:
+            highest = float(highest)
+        except Exception:
+            highest = max(entry, current_price)
+
+        tp1_price = trade_state.get("tp1_price")
+        hard_stop = None
+        trailing_stop = trade_state.get("trailing_stop")
+
+        if atr_value and entry:
+            atr_value = float(atr_value)
+            if not tp1_price:
+                tp1_price = entry + ATR_TP_MULT * atr_value
+            hard_stop = entry - ATR_STOP_MULT * atr_value
+            if trade_state.get("tp1_done") and not trailing_stop:
+                trailing_stop = highest - ATR_TRAIL_MULT * atr_value
+
+        def dist_pct(target):
+            try:
+                target = float(target)
+                return ((target - current_price) / current_price) * 100 if current_price else None
+            except Exception:
+                return None
+
+        def progress_between(stop, target):
+            try:
+                stop = float(stop); target = float(target)
+                if target == stop:
+                    return None
+                return max(0, min(100, ((current_price - stop) / (target - stop)) * 100))
+            except Exception:
+                return None
+
+        return {
+            "in_position": True,
+            "symbol": symbol,
+            "mode": trade_state.get("signal_mode"),
+            "score": trade_state.get("score"),
+            "entry": round(entry, 8),
+            "current_price": round(current_price, 8),
+            "size": round(size, 8),
+            "pnl_pct": round(pnl_pct, 4),
+            "pnl_usdc_est": round(pnl_usdc, 6),
+            "tp1_done": bool(trade_state.get("tp1_done")),
+            "tp1_price": round(float(tp1_price), 8) if tp1_price else None,
+            "hard_stop": round(float(hard_stop), 8) if hard_stop else None,
+            "trailing_stop": round(float(trailing_stop), 8) if trailing_stop else None,
+            "highest_price": round(float(highest), 8) if highest else None,
+            "distance_to_tp1_pct": round(dist_pct(tp1_price), 4) if dist_pct(tp1_price) is not None else None,
+            "distance_to_sl_pct": round(dist_pct(hard_stop), 4) if dist_pct(hard_stop) is not None else None,
+            "distance_to_trailing_pct": round(dist_pct(trailing_stop), 4) if dist_pct(trailing_stop) is not None else None,
+            "progress_to_tp1_pct": round(progress_between(hard_stop, tp1_price), 2) if hard_stop and tp1_price else None,
+            "last_update": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        return {"in_position": False, "error": str(e)}
+
+
 def compute_dashboard_stats():
     force_finalize_expired_post_trades()
     df = load_trades_dataframe()
@@ -942,6 +1032,7 @@ def compute_dashboard_stats():
     result = {
         "balance": balance,
         "open_position": get_open_position(),
+        "live_trade": get_live_trade_snapshot_v48(),
         "config": load_bot_config(),
         "active_timeframe": get_active_timeframe(),
         "timeframe_options": TIMEFRAME_OPTIONS,
@@ -1093,13 +1184,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     .detailGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
     .detailItem{background:var(--card2);padding:10px;border-radius:12px;border:1px solid #2b3950}
     .aiBox{background:#071827;border:1px solid #164e63;border-radius:12px;padding:12px;white-space:pre-wrap;line-height:1.35}
+    .liveGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.liveBox{background:var(--card2);border:1px solid #2b3950;border-radius:14px;padding:12px}.liveLabel{color:var(--muted);font-size:12px}.liveVal{font-size:18px;font-weight:800;margin-top:5px}.bar{height:10px;background:#334155;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--green));width:0%}.liveSub{font-size:12px;color:var(--muted);margin-top:8px}
+    @media(max-width:700px){.liveGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:900px){.cards,.two{grid-template-columns:1fr}.wrap{padding:10px}.card{padding:13px;border-radius:15px}table{font-size:12px;min-width:720px}th,td{padding:9px 7px}.mobileHint{display:block}}
     @media(max-width:520px){h1{font-size:18px}h3{font-size:16px}.sub{font-size:11px}.cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{font-size:22px}.card{padding:12px}.toggles{grid-template-columns:1fr}.toggle{font-size:15px;padding:14px 13px}.scroll{max-height:360px}pre{max-height:300px;font-size:11px}}
     @media(max-width:380px){.cards{grid-template-columns:1fr}.metric{font-size:24px}}
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF Live PnL · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1117,6 +1210,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div style="margin-top:14px"><button onclick="saveConfig()">Sauvegarder</button><div id="saveStatus" class="muted" style="margin-top:8px"></div></div>
     </div>
     <div class="card"><h3>📌 Position ouverte</h3><pre id="position">-</pre></div>
+  </div>
+  <div class="card" id="liveTradePanel" style="margin-top:12px">
+    <h3>🔥 Trade en live · PnL / TP1 / SL</h3>
+    <div class="liveGrid">
+      <div class="liveBox"><div class="liveLabel">Coin</div><div class="liveVal" id="liveSymbol">-</div></div>
+      <div class="liveBox"><div class="liveLabel">Mode</div><div class="liveVal" id="liveMode">-</div></div>
+      <div class="liveBox"><div class="liveLabel">PnL live</div><div class="liveVal" id="livePnlPct">-</div></div>
+      <div class="liveBox"><div class="liveLabel">PnL USDC estimé</div><div class="liveVal" id="livePnlUsdc">-</div></div>
+    </div>
+    <div class="scroll" style="margin-top:12px"><table id="liveTradeTable"></table></div>
+    <div style="margin-top:12px">
+      <div class="bar"><span id="liveProgressBar"></span></div>
+      <div class="liveSub" id="liveProgressText">Progression entre Stop Loss et TP1 : -</div>
+    </div>
   </div>
   <div class="grid two" style="margin-top:12px">
     <div class="card"><h3>📊 Par mode</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="byMode"></table></div></div>
@@ -1192,6 +1299,36 @@ function openTradeModal(i){const r=lastTrades[i];if(!r)return;const html=`<div c
 <div class="aiBox">${esc(r._ai_comment||'-')}</div>`;document.getElementById('tradeDetailContent').innerHTML=html;document.getElementById('tradeModal').style.display='block'}
 function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E',MODE_F_CANDLE_REVERSAL:'Mode F'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA, sortie sous EMA20.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('');const opts=['1m','3m','5m','15m'];document.getElementById('timeframeToggles').innerHTML=opts.map(tf=>`<label class="toggle"><span>${tf}</span><input type="radio" name="timeframe" data-timeframe="${tf}" ${cfg.timeframe===tf?'checked':''}></label>`).join('');document.getElementById('activeTimeframeLabel').textContent='Timeframe actif : '+(cfg.timeframe||'15m')}
 async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
+
+function renderLiveTradeV48(live){
+ const empty=!live||!live.in_position;
+ document.getElementById('liveSymbol').textContent=empty?'Aucune':(live.symbol||'-');
+ document.getElementById('liveMode').textContent=empty?'-':((live.mode||'-').replace('MODE_',''));
+ document.getElementById('livePnlPct').innerHTML=empty?'-':`<span class="${cls(live.pnl_pct)}">${fmt(live.pnl_pct,3)}%</span>`;
+ document.getElementById('livePnlUsdc').innerHTML=empty?'-':`<span class="${cls(live.pnl_usdc_est)}">${fmt(live.pnl_usdc_est,4)} USDC</span>`;
+ if(empty){
+   table('liveTradeTable',[{label:'Entry',get:r=>'-'},{label:'Prix actuel',get:r=>'-'},{label:'TP1',get:r=>'-'},{label:'Stop Loss',get:r=>'-'},{label:'Trailing',get:r=>'-'}],[{}]);
+   document.getElementById('liveProgressBar').style.width='0%';
+   document.getElementById('liveProgressText').textContent='Aucune position ouverte.';
+   return;
+ }
+ table('liveTradeTable',[
+   {label:'Entry',get:r=>fmt(r.entry,6)},
+   {label:'Prix actuel',get:r=>fmt(r.current_price,6)},
+   {label:'Qty',get:r=>fmt(r.size,6)},
+   {label:'TP1',get:r=>r.tp1_price??'-'},
+   {label:'Dist. TP1',get:r=>r.distance_to_tp1_pct==null?'-':fmt(r.distance_to_tp1_pct,3)+'%'},
+   {label:'Stop Loss ATR',get:r=>r.hard_stop??'-'},
+   {label:'Dist. SL',get:r=>r.distance_to_sl_pct==null?'-':fmt(r.distance_to_sl_pct,3)+'%'},
+   {label:'Trailing',get:r=>r.trailing_stop??'-'},
+   {label:'TP1 fait',get:r=>r.tp1_done?'Oui':'Non'},
+   {label:'Update',get:r=>r.last_update??'-'}
+ ],[live]);
+ const prog=live.progress_to_tp1_pct==null?0:Math.max(0,Math.min(100,Number(live.progress_to_tp1_pct)));
+ document.getElementById('liveProgressBar').style.width=prog+'%';
+ document.getElementById('liveProgressText').textContent=`Progression entre Stop Loss et TP1 : ${fmt(prog,1)}%`;
+}
+
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
