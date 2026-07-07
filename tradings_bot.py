@@ -53,6 +53,10 @@ LAST_MONTHLY_REPORT_FILE = Path("last_monthly_report.txt")
 BOT_CONFIG_PATH = Path("bot_config.json")
 DASHBOARD_PORT = int(os.environ.get("PORT", "8080"))
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+TIMEFRAME_OPTIONS = ["1m", "3m", "5m", "15m"]
+DEFAULT_TIMEFRAME = "5m"
+TIMEFRAME_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15}
+
 POST_TRADE_HORIZONS = [
     ("5m", 5 * 60 * 1000),
     ("30m", 30 * 60 * 1000),
@@ -464,6 +468,7 @@ def default_bot_config():
             "MODE_B_PATTERN": True,
             "MODE_C_CAPITULATION": True,
         },
+        "timeframe": DEFAULT_TIMEFRAME,
         "trade_size_usd": TRADE_SIZE_USD,
     }
 
@@ -477,6 +482,9 @@ def load_bot_config():
             if isinstance(data, dict):
                 cfg.update(data)
                 cfg["modes"] = {**default_bot_config()["modes"], **data.get("modes", {})}
+                cfg["timeframe"] = cfg.get("timeframe", DEFAULT_TIMEFRAME)
+                if cfg["timeframe"] not in TIMEFRAME_OPTIONS:
+                    cfg["timeframe"] = DEFAULT_TIMEFRAME
             return cfg
     except Exception as e:
         print("[CONFIG] load error", e)
@@ -496,6 +504,26 @@ def is_mode_enabled(mode):
         return bool(load_bot_config().get("modes", {}).get(mode, True))
     except Exception:
         return True
+
+
+def get_active_timeframe():
+    try:
+        tf = load_bot_config().get("timeframe", DEFAULT_TIMEFRAME)
+        return tf if tf in TIMEFRAME_OPTIONS else DEFAULT_TIMEFRAME
+    except Exception:
+        return DEFAULT_TIMEFRAME
+
+
+def get_active_timeframe_minutes():
+    return TIMEFRAME_MINUTES.get(get_active_timeframe(), TIMEFRAME_MINUTES[DEFAULT_TIMEFRAME])
+
+
+def get_cooldown_ms():
+    return COOLDOWN_CANDLES_AFTER_SELL * get_active_timeframe_minutes() * 60 * 1000
+
+
+def get_candle_lookback_seconds(candles=220):
+    return candles * get_active_timeframe_minutes() * 60
 
 
 def dashboard_ai_recommendations():
@@ -612,6 +640,8 @@ def get_dashboard_stats():
         "open_position": get_open_position(),
         "live_trade": get_live_trade_snapshot(),
         "config": load_bot_config(),
+        "timeframe_options": TIMEFRAME_OPTIONS,
+        "active_timeframe": get_active_timeframe(),
         "summary": {
             "trades": 0, "wins": 0, "losses": 0, "winrate": 0,
             "pnl_total": 0, "avg_win": 0, "avg_loss": 0, "profit_factor": None,
@@ -625,7 +655,7 @@ def get_dashboard_stats():
         "ai_recommendations": dashboard_ai_recommendations(),
         "post_trade_pending": load_pending_post_trades(),
         "post_trade_analysis": [] if load_post_trade_dataframe().empty else load_post_trade_dataframe().tail(80).fillna("").to_dict(orient="records"),
-        "dashboard_name": "V3.10 Rebase Dashboard XRP/kSHIB 5m",
+        "dashboard_name": "V3.10 Rebase Dashboard XRP/kSHIB Multi-TF",
     }
 
     if df.empty:
@@ -716,6 +746,12 @@ tr.clickable{cursor:pointer}tr.clickable:hover{background:#1f2a3c}.modal{display
 </div>
 
 <div class="card" style="margin-top:12px">
+ <h3>⏱️ Timeframe actif</h3>
+ <div class="modeRow" id="timeframeButtons"></div>
+ <div class="muted" style="margin-top:8px">Le timeframe sélectionné est utilisé directement par le bot pour scanner les bougies.</div>
+</div>
+
+<div class="card" style="margin-top:12px">
  <h3>🔥 Live Trading en cours</h3>
  <div class="grid">
   <div class="card"><div class="k">Coin</div><div class="v" id="liveSymbol">-</div></div>
@@ -766,6 +802,7 @@ function openTradeModal(i){const r=lastTrades[i];if(!r)return;document.getElemen
 <div class="detailItem"><b>PnL %</b><br>${esc(r.pnl_price_pct)}</div><div class="detailItem"><b>PnL USDC</b><br>${esc(r.real_pnl_usdc)}</div>
 </div><h3 style="margin-top:16px">🧠 Lecture rapide</h3><div class="aiBox">Mode ${esc(r.mode)} sur ${esc(r.symbol)}. Sortie ${esc(r.exit_reason)}. PnL réel ${esc(r.real_pnl_usdc)} USDC.</div>`;document.getElementById('tradeModal').style.display='block'}
 async function toggleMode(m){await fetch('/api/toggle_mode?mode='+encodeURIComponent(m),{method:'POST'});load()}
+async function setTimeframe(tf){await fetch('/api/set_timeframe?tf='+encodeURIComponent(tf),{method:'POST'});load()}
 function renderLiveTrade(live){
  if(!live || !live.in_position){
    document.getElementById('liveSymbol').textContent='Aucune';
@@ -798,6 +835,7 @@ function renderLiveTrade(live){
  ],[live]);
 }
 function renderModes(cfg){const modes=cfg.modes||{};document.getElementById('modes').innerHTML=Object.entries(modes).map(([m,on])=>`<button class="${on?'':'off'}" onclick="toggleMode('${m}')">${on?'✅':'❌'} ${m.replace('MODE_','')}</button>`).join('')}
+function renderTimeframes(d){const opts=d.timeframe_options||['1m','3m','5m','15m'];const active=d.active_timeframe||(d.config&&d.config.timeframe)||'5m';document.getElementById('timeframeButtons').innerHTML=opts.map(tf=>`<button class="${tf===active?'':'off'}" onclick="setTimeframe('${tf}')">${tf===active?'✅':'⏱️'} ${tf}</button>`).join('')}
 async function load(){
  const d=await (await fetch('/api/stats')).json();
  document.getElementById('dashName').textContent='· '+(d.dashboard_name||'');
@@ -880,6 +918,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "mode": mode, "enabled": cfg["modes"][mode]})
                 return
             self._send_json({"ok": False, "error": "unknown mode"}, 400)
+            return
+
+        if path == "/api/set_timeframe":
+            q = parse_qs(urlparse(self.path).query)
+            tf = q.get("tf", [""])[0]
+            if tf not in TIMEFRAME_OPTIONS:
+                self._send_json({"ok": False, "error": "invalid timeframe", "allowed": TIMEFRAME_OPTIONS}, 400)
+                return
+            cfg = load_bot_config()
+            old_tf = cfg.get("timeframe", DEFAULT_TIMEFRAME)
+            cfg["timeframe"] = tf
+            save_bot_config(cfg)
+            for s in SYMBOLS:
+                last_candle_times[s] = None
+            self._send_json({"ok": True, "old_timeframe": old_tf, "timeframe": tf})
             return
         self._send_json({"ok": False, "error": "unknown endpoint"}, 404)
 
@@ -1164,8 +1217,8 @@ def get_candles(symbol):
             "type": "candleSnapshot",
             "req": {
                 "coin": symbol,
-                "interval": "5m",
-                "startTime": int((time.time() - 220 * 60 * 5) * 1000),
+                "interval": get_active_timeframe(),
+                "startTime": int((time.time() - get_candle_lookback_seconds()) * 1000),
                 "endTime": int(time.time() * 1000),
             },
         }
@@ -1350,7 +1403,7 @@ def reset_trade_state_after_sell(candle_time):
         "tp1_done": False,
         "highest_price": None,
         "trailing_stop": None,
-        "cooldown_until_candle": candle_time + COOLDOWN_CANDLES_AFTER_SELL * 5 * 60 * 1000,
+        "cooldown_until_candle": candle_time + get_cooldown_ms(),
 
         "entry_balance": None,
         "signal_mode": None,
@@ -1963,9 +2016,10 @@ def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
     print("BOT MULTI V3.10 REBASE DASHBOARD XRP KSHIB")
-    print("Long only | 5m | Une seule position à la fois")
+    print(f"Long only | {get_active_timeframe()} | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
+    print("Timeframe actif:", get_active_timeframe())
 
     if not PRIVATE_KEY or not WALLET_ADDRESS:
         print("[ERREUR] Variables manquantes: HL_API_SECRET ou HL_WALLET")
@@ -1994,6 +2048,7 @@ def run():
         "🤖 <b>BOT MULTI V3.10 Rebase Dashboard XRP kSHIB démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
+        f"Timeframe: {get_active_timeframe()}\n"
         f"Solde: {start_balance} USDC\n"
         f"Taille trade: {TRADE_SIZE_USD} USDC\n"
         f"Commandes: /report /csv /posttrade /dashboard /help"
@@ -2130,11 +2185,4 @@ def run():
             print("Bot arrêté. Trades:", trades)
             break
 
-        except Exception as e:
-            print("[ERREUR]", e)
-            notify_telegram(f"⚠️ <b>Erreur bot</b>\n{e}")
-            time.sleep(CHECK_INTERVAL)
-
-
-if __name__ == "__main__":
-    run()
+        except Except
