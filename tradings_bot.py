@@ -162,6 +162,27 @@ last_candle_times = {symbol: None for symbol in SYMBOLS}
 # Historique en mémoire pour commandes Telegram /analysis et /log
 ANALYSIS_HISTORY = []
 LOG_HISTORY = []
+API_CACHE = {}
+API_STATS = {
+    "requests": 0,
+    "success": 0,
+    "errors": 0,
+    "rate_limits": 0,
+    "retries": 0,
+    "cache_hits": 0,
+    "cache_misses": 0,
+    "last_status": "INIT",
+    "last_error": "",
+    "last_latency_ms": 0,
+    "last_request": None,
+}
+API_LOCK = threading.Lock()
+ORDER_LOCK = threading.Lock()
+API_BACKOFF_UNTIL = 0
+LAST_KNOWN_BALANCE = None
+LAST_KNOWN_POSITIONS = None
+
+LAST_KNOWN_BALANCE = None
 MAX_ANALYSIS_HISTORY = 500
 MAX_LOG_HISTORY = 300
 
@@ -1148,6 +1169,7 @@ def compute_dashboard_stats():
         "adaptive_smart_exit": rebuild_adaptive_smart_exit_from_posttrade(),
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
+        "api_status": dict(API_STATS),
     }
 
     try:
@@ -1280,7 +1302,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF Live Robust SmartExit AI Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.9 Adaptive Intelligence Ultra Stable Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1342,6 +1364,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="aiCoach" class="aiBox">-</div>
   </div>
 
+  <div class="card" style="margin-top:12px">
+    <h3>🌐 API Hyperliquid</h3>
+    <div id="apiStatusBox" class="aiBox">-</div>
+  </div>
+
   <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
 
   <div id="tradeModal" class="modal">
@@ -1359,6 +1386,25 @@ function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').repla
 function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
 let lastTrades=[];
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function renderApiStatus(s){
+ if(!s)return '-';
+ const total=Number(s.requests||0);
+ const ok=Number(s.success||0);
+ const hit=Number(s.cache_hits||0);
+ const miss=Number(s.cache_misses||0);
+ const cacheTotal=hit+miss;
+ const successRate=total?((ok/total)*100).toFixed(1):'-';
+ const cacheRate=cacheTotal?((hit/cacheTotal)*100).toFixed(1):'-';
+ return `Statut: ${s.last_status||'-'}
+Dernière requête: ${s.last_request||'-'}
+Latence: ${s.last_latency_ms||0} ms
+Requêtes: ${total} | Succès: ${ok} | Erreurs: ${s.errors||0}
+429: ${s.rate_limits||0} | Retries: ${s.retries||0}
+Taux succès: ${successRate}%
+Cache hits: ${hit} | misses: ${miss} | hit rate: ${cacheRate}%
+Dernière erreur: ${s.last_error||'-'}`;
+}
+
 function renderAdaptive(a){
  if(!a){return '-'}
  let out=`Enabled: ${a.enabled}\nMAJ: ${a.last_updated||'-'}\n`;
@@ -1434,6 +1480,7 @@ table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:
 lastTrades=(d.recent_trades||[]).slice().reverse();
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)},{label:'Pattern F',get:r=>r._mode_f_pattern_label||r.mode_f_pattern||'-'}],lastTrades,true);
 document.getElementById('adaptiveBox').textContent=renderAdaptive(d.adaptive);
+document.getElementById('apiStatusBox').textContent=renderApiStatus(d.api_status);
 document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
@@ -2336,19 +2383,128 @@ def maybe_send_monthly_report():
 
 
 
-def info_post(payload):
-    try:
-        headers = {"Content-Type": "application/json"}
-        r = requests.post(BASE_URL + "/info", headers=headers, data=json.dumps(payload), timeout=10)
-        return r.json()
-    except Exception as e:
-        print("[ERREUR] API:", e)
-        return {}
 
+def api_cache_get(key, ttl_seconds):
+    try:
+        item = API_CACHE.get(key)
+        if not item:
+            API_STATS["cache_misses"] += 1
+            return None
+        ts, value = item
+        if time.time() - ts <= ttl_seconds:
+            API_STATS["cache_hits"] += 1
+            return value
+        API_STATS["cache_misses"] += 1
+        return None
+    except Exception:
+        return None
+
+
+def api_cache_set(key, value):
+    try:
+        API_CACHE[key] = (time.time(), value)
+        # Evite que le cache grossisse trop
+        if len(API_CACHE) > 200:
+            oldest = sorted(API_CACHE.items(), key=lambda kv: kv[1][0])[:50]
+            for k, _ in oldest:
+                API_CACHE.pop(k, None)
+    except Exception:
+        pass
+
+
+def get_candle_cache_ttl():
+    tf = get_active_timeframe()
+    if tf == "1m":
+        return 20
+    if tf == "3m":
+        return 35
+    if tf == "5m":
+        return 45
+    return 60
+
+
+def api_backoff_sleep():
+    global API_BACKOFF_UNTIL
+    wait = API_BACKOFF_UNTIL - time.time()
+    if wait > 0:
+        print(f"[API BACKOFF] Pause {wait:.1f}s")
+        time.sleep(min(wait, 120))
+
+
+def info_post(payload, cache_key=None, cache_ttl=0, max_retries=3):
+    """
+    Appel Hyperliquid robuste :
+    - cache optionnel
+    - backoff après 429
+    - retry progressif
+    - stats dashboard
+    """
+    global API_BACKOFF_UNTIL
+
+    if cache_key and cache_ttl:
+        cached = api_cache_get(cache_key, cache_ttl)
+        if cached is not None:
+            return cached
+
+    delays = [2, 5, 10, 20, 60]
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            api_backoff_sleep()
+
+            started = time.time()
+            headers = {"Content-Type": "application/json"}
+
+            with API_LOCK:
+                API_STATS["requests"] += 1
+                API_STATS["last_request"] = payload.get("type")
+                r = requests.post(BASE_URL + "/info", headers=headers, data=json.dumps(payload), timeout=15)
+
+            API_STATS["last_latency_ms"] = round((time.time() - started) * 1000, 1)
+
+            if r.status_code == 429:
+                API_STATS["rate_limits"] += 1
+                API_STATS["errors"] += 1
+                API_STATS["last_status"] = "RATE_LIMIT_429"
+                API_STATS["last_error"] = "HTTP 429"
+                delay = delays[min(attempt, len(delays) - 1)]
+                API_BACKOFF_UNTIL = max(API_BACKOFF_UNTIL, time.time() + delay)
+                API_STATS["retries"] += 1
+                print(f"[API 429] {payload.get('type')} retry dans {delay}s")
+                time.sleep(delay)
+                continue
+
+            r.raise_for_status()
+            data = r.json()
+
+            API_STATS["success"] += 1
+            API_STATS["last_status"] = "OK"
+            API_STATS["last_error"] = ""
+
+            if cache_key and cache_ttl:
+                api_cache_set(cache_key, data)
+
+            return data
+
+        except Exception as e:
+            last_error = str(e)
+            API_STATS["errors"] += 1
+            API_STATS["last_status"] = "ERROR"
+            API_STATS["last_error"] = last_error[:180]
+            delay = delays[min(attempt, len(delays) - 1)]
+            if attempt < max_retries:
+                API_STATS["retries"] += 1
+                print(f"[API ERROR] {payload.get('type')} {e} retry dans {delay}s")
+                time.sleep(delay)
+                continue
+
+    print("[ERREUR] API:", last_error)
+    return {}
 
 def get_meta_all():
     try:
-        data = info_post({"type": "meta"})
+        data = info_post({"type": "meta"}, cache_key="meta", cache_ttl=3600)
         meta_by_symbol = {}
         for asset in data.get("universe", []):
             name = asset.get("name")
@@ -2376,25 +2532,49 @@ def round_order_price(price):
 
 
 def get_balance():
+    global LAST_KNOWN_BALANCE
     try:
-        data = info_post({"type": "spotClearinghouseState", "user": WALLET_ADDRESS})
+        cached = api_cache_get("balance", 10)
+        if cached is not None:
+            return cached
+
+        data = info_post({"type": "spotClearinghouseState", "user": WALLET_ADDRESS}, cache_key="spot_balance", cache_ttl=8)
         for b in data.get("balances", []):
             if b.get("coin") == "USDC":
-                return float(b.get("total", 0))
-        data2 = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS})
+                bal = float(b.get("total", 0))
+                if bal > 0:
+                    LAST_KNOWN_BALANCE = bal
+                    api_cache_set("balance", bal)
+                return bal if bal > 0 else (LAST_KNOWN_BALANCE if LAST_KNOWN_BALANCE is not None else -1)
+
+        data2 = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS}, cache_key="ch_state_balance", cache_ttl=8)
         if not data2:
-            return 0
-        return float(data2.get("marginSummary", {}).get("accountValue", 0))
+            return LAST_KNOWN_BALANCE if LAST_KNOWN_BALANCE is not None else -1
+
+        bal = float(data2.get("marginSummary", {}).get("accountValue", 0))
+        if bal > 0:
+            LAST_KNOWN_BALANCE = bal
+            api_cache_set("balance", bal)
+        return bal if bal > 0 else (LAST_KNOWN_BALANCE if LAST_KNOWN_BALANCE is not None else -1)
+
     except Exception as e:
         print("[ERREUR] Solde:", e)
-        return 0
-
+        if LAST_KNOWN_BALANCE is not None:
+            print("[BALANCE] Dernier solde connu:", LAST_KNOWN_BALANCE)
+            return LAST_KNOWN_BALANCE
+        return -1
 
 def get_positions():
+    global LAST_KNOWN_POSITIONS
     try:
-        data = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS})
+        cached = api_cache_get("positions", 5)
+        if cached is not None:
+            return cached
+
+        data = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS}, cache_key="positions_state", cache_ttl=4)
         if not data:
-            return []
+            return LAST_KNOWN_POSITIONS if LAST_KNOWN_POSITIONS is not None else []
+
         positions = []
         for pos in data.get("assetPositions", []):
             p = pos.get("position", {})
@@ -2402,11 +2582,14 @@ def get_positions():
             szi = float(p.get("szi", 0))
             if symbol in SYMBOLS and szi != 0:
                 positions.append({"symbol": symbol, "size": szi, "entry": float(p.get("entryPx", 0))})
+
+        LAST_KNOWN_POSITIONS = positions
+        api_cache_set("positions", positions)
         return positions
+
     except Exception as e:
         print("[ERREUR] Positions:", e)
-        return []
-
+        return LAST_KNOWN_POSITIONS if LAST_KNOWN_POSITIONS is not None else []
 
 def get_open_position():
     positions = get_positions()
@@ -2427,7 +2610,7 @@ def get_candles(symbol):
                 "endTime": int(time.time() * 1000),
             },
         }
-        data = info_post(payload)
+        data = info_post(payload, cache_key=f"candles:{symbol}:{get_active_timeframe()}", cache_ttl=get_candle_cache_ttl())
         if isinstance(data, list) and len(data) > 60:
             rows = []
             for c in data:
@@ -2513,7 +2696,8 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
         print("REDUCE_ONLY =", reduce_only)
         print("===========================")
 
-        result = exchange.order(symbol, is_buy, qty, lp, {"limit": {"tif": "Ioc"}}, reduce_only=reduce_only)
+        with ORDER_LOCK:
+            result = exchange.order(symbol, is_buy, qty, lp, {"limit": {"tif": "Ioc"}}, reduce_only=reduce_only)
         print("[ORDER]", result)
 
         statuses = result.get("response", {}).get("data", {}).get("statuses", [])
@@ -2578,7 +2762,15 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
 
     except Exception as e:
         print("[ERREUR] Ordre:", e)
-        notify_telegram(f"⚠️ <b>Erreur ordre exception</b>\nSymbole: {symbol}\nSide: {side}\nErreur: {e}")
+        err = str(e)
+        if "429" in err:
+            API_STATS["rate_limits"] += 1
+            API_STATS["last_status"] = "ORDER_RATE_LIMIT_429"
+            API_STATS["last_error"] = err[:180]
+            notify_telegram("⚠️ Hyperliquid HTTP 429 détecté sur ordre. Pause automatique 120 secondes.")
+            time.sleep(120)
+        else:
+            notify_telegram(f"⚠️ <b>Erreur ordre exception</b>\nSymbole: {symbol}\nSide: {side}\nErreur: {e}")
         return False
 
 
@@ -4324,7 +4516,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.8 Adaptive Intelligence Multi-TF Live Robust SmartExit AI démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.9 Adaptive Intelligence Ultra Stable démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -4396,6 +4588,13 @@ def run():
                 continue
 
             balance = get_balance()
+
+            if balance <= 0:
+                print("[RATE LIMIT] Solde indisponible, pause 120s.")
+                notify_telegram("⚠️ API Hyperliquid indisponible (429 probable). Retry dans 120 secondes.")
+                time.sleep(120)
+                continue
+
             if balance < TRADE_SIZE_USD:
                 print("[ECHEC] Solde insuffisant:", balance)
                 notify_telegram(
