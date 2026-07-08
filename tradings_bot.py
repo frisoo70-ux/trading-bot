@@ -97,11 +97,19 @@ MODE_E_INTRABAR_MIN_MOVE_PCT = 0.003
 MODE_E_INTRABAR_VOLUME_MULT = 1.5
 MODE_E_INTRABAR_MAX_DISTANCE_EMA20_PCT = 0.018
 
-# MODE F - Candle Reversal
-MODE_F_MIN_PATTERN_SCORE = 2.0
+# MODE F - Candle Reversal renforcé
+# Ancien Mode F : trop permissif, achetait des patterns dans une tendance baissière.
+# Nouveau Mode F : pattern + confirmation + contexte.
+MODE_F_MIN_PATTERN_SCORE = 3.5
 MODE_F_VOLUME_MULT = 1.3
-MODE_F_RSI_MAX = 65
+MODE_F_RSI_MAX = 62
 MODE_F_ATR_STOP_MULT = 2.5
+MODE_F_MAX_EMA20_SLOPE_DOWN_PCT = -0.0015  # -0.15% max sur 3 bougies
+MODE_F_MAX_DISTANCE_BELOW_EMA20_PCT = 0.006  # max 0.6% sous EMA20 si pas encore au-dessus
+MODE_F_REQUIRE_BREAK_PATTERN_HIGH = True
+MODE_F_REQUIRE_OBV_RISING_2 = True
+MODE_F_REQUIRE_NOT_UNDER_EMA50 = True
+MODE_F_MIN_CONFIRMATIONS = 4
 
 # SMART EXIT - modes de retournement C / E / F
 SMART_EXIT_REVERSAL_MODES = ["MODE_C_CAPITULATION", "MODE_D_EMA_PULLBACK", "MODE_E_EARLY_MOMENTUM", "MODE_F_CANDLE_REVERSAL"]
@@ -178,6 +186,17 @@ API_STATS = {
 }
 API_LOCK = threading.Lock()
 ORDER_LOCK = threading.Lock()
+ORDER_STATE = {
+    "pending": False,
+    "side": None,
+    "symbol": None,
+    "reason": None,
+    "started_at": None,
+    "retry_after": 0,
+    "last_error": "",
+    "attempts": 0,
+}
+
 API_BACKOFF_UNTIL = 0
 LAST_KNOWN_BALANCE = None
 LAST_KNOWN_POSITIONS = None
@@ -1170,6 +1189,7 @@ def compute_dashboard_stats():
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
         "api_status": dict(API_STATS),
+        "order_state": get_order_state_for_dashboard(),
     }
 
     try:
@@ -1302,7 +1322,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.9 Adaptive Intelligence Ultra Stable Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V5.1 Adaptive Intelligence Mode F Pro Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1369,6 +1389,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="apiStatusBox" class="aiBox">-</div>
   </div>
 
+  <div class="card" style="margin-top:12px">
+    <h3>📦 État des ordres</h3>
+    <div id="orderStateBox" class="aiBox">-</div>
+  </div>
+
   <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
 
   <div id="tradeModal" class="modal">
@@ -1386,6 +1411,18 @@ function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').repla
 function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
 let lastTrades=[];
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function renderOrderState(s){
+ if(!s)return '-';
+ return `Ordre en attente: ${s.pending?'OUI':'NON'}
+Side: ${s.side||'-'}
+Symbole: ${s.symbol||'-'}
+Raison: ${s.reason||'-'}
+Démarré: ${s.started_at||'-'}
+Retry dans: ${s.retry_in_seconds||0}s
+Tentatives: ${s.attempts||0}
+Dernière erreur: ${s.last_error||'-'}`;
+}
+
 function renderApiStatus(s){
  if(!s)return '-';
  const total=Number(s.requests||0);
@@ -1481,6 +1518,7 @@ lastTrades=(d.recent_trades||[]).slice().reverse();
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)},{label:'Pattern F',get:r=>r._mode_f_pattern_label||r.mode_f_pattern||'-'}],lastTrades,true);
 document.getElementById('adaptiveBox').textContent=renderAdaptive(d.adaptive);
 document.getElementById('apiStatusBox').textContent=renderApiStatus(d.api_status);
+document.getElementById('orderStateBox').textContent=renderOrderState(d.order_state);
 document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
@@ -2669,9 +2707,80 @@ def add_indicators(df):
     return df
 
 
+
+def is_order_blocked(symbol=None, side=None):
+    try:
+        if not ORDER_STATE.get("pending"):
+            return False
+        retry_after = float(ORDER_STATE.get("retry_after", 0) or 0)
+        if retry_after and time.time() >= retry_after:
+            ORDER_STATE["pending"] = False
+            ORDER_STATE["side"] = None
+            ORDER_STATE["symbol"] = None
+            ORDER_STATE["reason"] = None
+            ORDER_STATE["retry_after"] = 0
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def set_order_pending(symbol, side, reason="ORDER"):
+    try:
+        ORDER_STATE["pending"] = True
+        ORDER_STATE["symbol"] = symbol
+        ORDER_STATE["side"] = side
+        ORDER_STATE["reason"] = reason
+        ORDER_STATE["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ORDER_STATE["last_error"] = ""
+        ORDER_STATE["attempts"] = int(ORDER_STATE.get("attempts", 0) or 0) + 1
+    except Exception:
+        pass
+
+
+def clear_order_pending():
+    try:
+        ORDER_STATE["pending"] = False
+        ORDER_STATE["symbol"] = None
+        ORDER_STATE["side"] = None
+        ORDER_STATE["reason"] = None
+        ORDER_STATE["retry_after"] = 0
+        ORDER_STATE["last_error"] = ""
+        ORDER_STATE["attempts"] = 0
+    except Exception:
+        pass
+
+
+def set_order_rate_limited(symbol, side, error, delay_seconds=120):
+    try:
+        ORDER_STATE["pending"] = True
+        ORDER_STATE["symbol"] = symbol
+        ORDER_STATE["side"] = side
+        ORDER_STATE["reason"] = "RATE_LIMIT_429"
+        ORDER_STATE["retry_after"] = time.time() + delay_seconds
+        ORDER_STATE["last_error"] = str(error)[:220]
+        ORDER_STATE["attempts"] = int(ORDER_STATE.get("attempts", 0) or 0) + 1
+    except Exception:
+        pass
+
+
+def get_order_state_for_dashboard():
+    try:
+        s = dict(ORDER_STATE)
+        retry_after = float(s.get("retry_after", 0) or 0)
+        s["retry_in_seconds"] = max(0, int(retry_after - time.time())) if retry_after else 0
+        return s
+    except Exception:
+        return {"pending": False}
+
+
 def place_order_qty(symbol, side, qty, price, reduce_only=False):
     global LAST_ENTRY_PRICE_BY_SYMBOL, LAST_SELL_REASON
     try:
+        if is_order_blocked(symbol, side):
+            print(f"[ORDER BLOCKED] ordre déjà en attente {ORDER_STATE.get('side')} {ORDER_STATE.get('symbol')} retry={get_order_state_for_dashboard().get('retry_in_seconds')}s")
+            return False
+        set_order_pending(symbol, side, LAST_SELL_REASON or ("BUY_SIGNAL" if side == "BUY" else "SELL_SIGNAL"))
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
@@ -2749,14 +2858,17 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
                         f"Solde: {balance_after} USDC\n"
                         f"Reduce only: {reduce_only}"
                     )
+            clear_order_pending()
             return True
 
         if statuses and "error" in statuses[0]:
             error_msg = statuses[0]["error"]
             print("[ECHEC]", error_msg)
+            clear_order_pending()
             notify_telegram(f"⚠️ <b>Erreur ordre</b>\nSymbole: {symbol}\nSide: {side}\nErreur: {error_msg}")
             return False
 
+        clear_order_pending()
         print("[ECHEC]", result)
         return False
 
@@ -2767,9 +2879,10 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
             API_STATS["rate_limits"] += 1
             API_STATS["last_status"] = "ORDER_RATE_LIMIT_429"
             API_STATS["last_error"] = err[:180]
-            notify_telegram("⚠️ Hyperliquid HTTP 429 détecté sur ordre. Pause automatique 120 secondes.")
-            time.sleep(120)
+            set_order_rate_limited(symbol, side, err, delay_seconds=120)
+            notify_telegram("⚠️ Hyperliquid HTTP 429 sur ordre. Ordre bloqué en attente, retry autorisé dans 120 secondes. Aucun double ordre ne sera envoyé.")
         else:
+            clear_order_pending()
             notify_telegram(f"⚠️ <b>Erreur ordre exception</b>\nSymbole: {symbol}\nSide: {side}\nErreur: {e}")
         return False
 
@@ -3156,6 +3269,102 @@ def mode_e_intrabar_signal(df, current_price):
 
 
 
+
+def mode_f_context_filter(df, mode_f_score, mode_f_details, volume_ratio):
+    """
+    Filtre qualité Mode F.
+    Le pattern chandelier seul ne suffit plus.
+    Il faut une confirmation de retournement et éviter les rebonds faibles dans tendance baissière.
+    """
+    try:
+        if len(df) < 60:
+            return False, {}
+
+        last = df.iloc[-1]
+        prev1 = df.iloc[-2]
+        prev2 = df.iloc[-3]
+        prev3 = df.iloc[-4]
+
+        green_candle = float(last["close"]) > float(last["open"])
+        close_above_ema20 = float(last["close"]) > float(last["ema20"])
+        close_above_ema50 = float(last["close"]) > float(last["ema50"])
+
+        ema20_slope_pct = (float(last["ema20"]) - float(prev3["ema20"])) / float(prev3["ema20"]) if float(prev3["ema20"]) else -1
+        ema20_not_falling_hard = ema20_slope_pct >= MODE_F_MAX_EMA20_SLOPE_DOWN_PCT
+
+        distance_below_ema20_pct = max(0, (float(last["ema20"]) - float(last["close"])) / float(last["close"])) if float(last["close"]) else 1
+        close_near_or_above_ema20 = close_above_ema20 or distance_below_ema20_pct <= MODE_F_MAX_DISTANCE_BELOW_EMA20_PCT
+
+        obv_rising_1 = float(last["obv"]) > float(last["obv_ma5"])
+        obv_rising_2 = float(last["obv"]) > float(prev1["obv"]) > float(prev2["obv"])
+
+        pattern_high = max(float(prev1["high"]), float(prev2["high"]))
+        break_pattern_high = float(last["close"]) > pattern_high
+
+        higher_low = float(last["low"]) >= min(float(prev1["low"]), float(prev2["low"])) * 0.999
+        not_under_ema50 = close_above_ema50 or float(last["close"]) >= float(last["ema50"]) * 0.995
+
+        volume_ok = volume_ratio >= MODE_F_VOLUME_MULT
+        rsi_ok = 35 <= float(last["rsi"]) <= MODE_F_RSI_MAX
+        strong_pattern = mode_f_score >= MODE_F_MIN_PATTERN_SCORE
+
+        confirmations = {
+            "strong_pattern": bool(strong_pattern),
+            "green_candle": bool(green_candle),
+            "break_pattern_high": bool(break_pattern_high),
+            "close_near_or_above_ema20": bool(close_near_or_above_ema20),
+            "ema20_not_falling_hard": bool(ema20_not_falling_hard),
+            "obv_rising_1": bool(obv_rising_1),
+            "obv_rising_2": bool(obv_rising_2),
+            "volume_ok": bool(volume_ok),
+            "higher_low": bool(higher_low),
+            "not_under_ema50": bool(not_under_ema50),
+            "rsi_ok": bool(rsi_ok),
+        }
+
+        confirmation_count = sum(1 for v in confirmations.values() if v)
+
+        blocking_reasons = []
+        if not strong_pattern:
+            blocking_reasons.append("pattern_score_insuffisant")
+        if MODE_F_REQUIRE_BREAK_PATTERN_HIGH and not break_pattern_high:
+            blocking_reasons.append("pas_de_cassure_du_plus_haut_pattern")
+        if not close_near_or_above_ema20:
+            blocking_reasons.append("trop_loin_sous_ema20")
+        if not ema20_not_falling_hard:
+            blocking_reasons.append("ema20_descend_trop_fort")
+        if MODE_F_REQUIRE_OBV_RISING_2 and not obv_rising_2:
+            blocking_reasons.append("obv_pas_en_hausse_2_bougies")
+        if MODE_F_REQUIRE_NOT_UNDER_EMA50 and not not_under_ema50:
+            blocking_reasons.append("prix_trop_sous_ema50")
+        if not rsi_ok:
+            blocking_reasons.append("rsi_hors_zone")
+        if confirmation_count < MODE_F_MIN_CONFIRMATIONS:
+            blocking_reasons.append("confirmations_insuffisantes")
+
+        ok = len(blocking_reasons) == 0
+
+        details = {
+            "ok": ok,
+            "confirmation_count": confirmation_count,
+            "confirmations": confirmations,
+            "blocking_reasons": blocking_reasons,
+            "ema20_slope_pct": round(ema20_slope_pct * 100, 4),
+            "distance_below_ema20_pct": round(distance_below_ema20_pct * 100, 4),
+            "pattern_high": round(pattern_high, 8),
+            "break_pattern_high": break_pattern_high,
+            "volume_ratio": round(volume_ratio, 2),
+            "obv_rising_2": obv_rising_2,
+            "not_under_ema50": not_under_ema50,
+        }
+
+        return ok, details
+
+    except Exception as e:
+        print("[ERREUR MODE F FILTER]", e)
+        return False, {"ok": False, "blocking_reasons": [str(e)]}
+
+
 def buy_signal(df):
     last = df.iloc[-1]
     prev1 = df.iloc[-2]
@@ -3257,8 +3466,8 @@ def buy_signal(df):
     )
 
     mode_f_score, mode_f_details = candle_reversal_patterns(df)
-    mode_f_confirmed = (obv_rising or volume_ratio >= MODE_F_VOLUME_MULT or last["close"] > last["ema20"])
-    mode_f_ok = (mode_f_score >= MODE_F_MIN_PATTERN_SCORE and mode_f_confirmed and last["rsi"] <= MODE_F_RSI_MAX)
+    mode_f_filter_ok, mode_f_filter_details = mode_f_context_filter(df, mode_f_score, mode_f_details, volume_ratio)
+    mode_f_ok = mode_f_filter_ok
 
     signal_mode = None
     # Activation / désactivation via dashboard
@@ -3300,7 +3509,7 @@ def buy_signal(df):
     if mode_e_ok:
         score += 2.5 + min(volume_ratio, 5.0) + min(body_ratio * 2, 2.0)
     if mode_f_ok:
-        score += 2.0 + mode_f_score
+        score += 1.0 + mode_f_score + min(mode_f_filter_details.get("confirmation_count", 0) * 0.35, 2.5)
 
     ok = mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok or mode_f_ok
 
@@ -3333,6 +3542,11 @@ def buy_signal(df):
         "mode_f_details_text": format_mode_f_pattern_details(mode_f_details.get("patterns", [])),
         "mode_f_score": round(mode_f_score, 4),
         "mode_f_details": mode_f_details,
+        "mode_f_filter": mode_f_filter_details,
+        "mode_f_confirmation_count": mode_f_filter_details.get("confirmation_count"),
+        "mode_f_blocking_reasons": ",".join(mode_f_filter_details.get("blocking_reasons", [])),
+        "mode_f_ema20_slope_pct": mode_f_filter_details.get("ema20_slope_pct"),
+        "mode_f_distance_below_ema20_pct": mode_f_filter_details.get("distance_below_ema20_pct"),
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -4002,6 +4216,10 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
             return True
 
         if smart_close and not min_hold_active:
+            if is_order_blocked(symbol, "SELL"):
+                print(f"[SMART EXIT] Smart Exit déjà en attente. retry={get_order_state_for_dashboard().get('retry_in_seconds')}s")
+                return True
+
             LAST_SELL_REASON = "SMART_EXIT_UNIFIED"
             print(f"[SMART EXIT] Sortie unifiée score={smart_score} details={smart_details}")
             notify_telegram(
@@ -4516,7 +4734,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.9 Adaptive Intelligence Ultra Stable démarré</b>\n"
+        "🤖 <b>BOT MULTI V5.1 Adaptive Intelligence Mode F Pro démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
