@@ -129,6 +129,18 @@ SMART_EXIT_VOLUME_MULT = 1.3
 SMART_EXIT_ATR_STOP_MULT = 2.5
 POST_TRADE_FORCE_FINALIZE_AFTER_MS = 4 * 60 * 60 * 1000
 
+# ADAPTIVE SMART EXIT - apprend avec le Post Trade Analyzer
+SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT = True
+SMART_EXIT_ADAPTIVE_MIN_ANALYSES = 8
+SMART_EXIT_ADAPTIVE_WINDOW = 30
+SMART_EXIT_ADAPTIVE_TOO_EARLY_RATIO = 0.50
+SMART_EXIT_ADAPTIVE_GOOD_RATIO = 0.45
+SMART_EXIT_ADAPTIVE_MAX_LEVEL = 3
+SMART_EXIT_ADAPTIVE_THRESHOLD_STEP = 0.75
+SMART_EXIT_ADAPTIVE_HEALTH_STEP = 4
+SMART_EXIT_ADAPTIVE_TIGHTEN_STEP = 0.50
+
+
 # ADAPTIVE INTELLIGENCE V4.8
 ADAPTIVE_ENABLED_DEFAULT = True
 ADAPTIVE_MIN_TRADES_MODE = 3
@@ -756,6 +768,14 @@ def compute_ai_recommendations():
         if len(recs) == 1:
             recs.append("Accumule encore des trades pour obtenir des recommandations plus fiables.")
 
+        try:
+            se = rebuild_adaptive_smart_exit_from_posttrade()
+            if se.get("sample_size", 0) >= SMART_EXIT_ADAPTIVE_MIN_ANALYSES:
+                recs.append(
+                    f"Adaptive Smart Exit: {se.get('recommendation')} | sorties trop tôt {se.get('too_early_ratio')}% | niveau {se.get('level')}/3."
+                )
+        except Exception:
+            pass
         return recs[:12]
 
     except Exception as e:
@@ -795,6 +815,22 @@ def default_adaptive_config():
         "mode_stats": {},
         "pattern_stats": {},
         "token_stats": {},
+        "smart_exit": {
+            "enabled": SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT,
+            "auto_apply": True,
+            "level": 0,
+            "recommendation": "NEUTRE",
+            "sample_size": 0,
+            "sortie_trop_tot": 0,
+            "bonne_sortie": 0,
+            "neutre": 0,
+            "too_early_ratio": 0,
+            "good_ratio": 0,
+            "threshold_bonus": 0,
+            "health_bonus": 0,
+            "tighten_bonus": 0,
+            "last_updated": None,
+        },
         "last_updated": None,
     }
 
@@ -1109,11 +1145,15 @@ def compute_dashboard_stats():
         },
         "ai_recommendations": compute_ai_recommendations(),
         "adaptive": rebuild_adaptive_config_from_trades(),
+        "adaptive_smart_exit": rebuild_adaptive_smart_exit_from_posttrade(),
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
     }
 
     try:
+        if isinstance(result.get("adaptive"), dict):
+            result["adaptive"]["smart_exit"] = result.get("adaptive_smart_exit")
+
         pending_items = load_pending_post_trades()
         result["post_trade_pending"] = pending_items[-50:]
 
@@ -1240,7 +1280,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF Live Robust Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V4.8 Adaptive Intelligence Multi-TF Live Robust SmartExit AI Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1328,6 +1368,12 @@ function renderAdaptive(a){
  Object.entries(a.token_stats||{}).forEach(([k,v])=>{out+=`• ${k}: x${v.multiplier} | ${v.trades} trades | PnL ${v.pnl} | WR ${v.winrate}%\n`});
  out+='\nPatterns:\n';
  Object.entries(a.pattern_stats||{}).forEach(([k,v])=>{out+=`• ${v.label||k}: x${v.multiplier} | ${v.trades} trades | PnL ${v.pnl} | WR ${v.winrate}%\n`});
+ const se=a.smart_exit||{};
+ out+='\nSmart Exit adaptatif:\n';
+ out+=`• Recommandation: ${se.recommendation||'-'}\n`;
+ out+=`• Niveau: ${se.level??0}/3 | Auto: ${se.auto_apply?'ON':'OFF'} | Analyses: ${se.sample_size??0}\n`;
+ out+=`• Sorties trop tôt: ${se.too_early_ratio??0}% | Bonnes sorties: ${se.good_ratio??0}%\n`;
+ out+=`• Bonus seuil: +${se.threshold_bonus??0} | Health assoupli: -${se.health_bonus??0} | Tighten: +${se.tighten_bonus??0}\n`;
  return out;
 }
 function closeTradeModal(){document.getElementById('tradeModal').style.display='none'}
@@ -3260,6 +3306,142 @@ def bearish_reversal_patterns(df):
         return 0, {"patterns": []}
 
 
+
+
+def rebuild_adaptive_smart_exit_from_posttrade():
+    """
+    Lit post_trade_analysis.csv et ajuste la sensibilité du Smart Exit.
+    Si beaucoup de sorties sont classées SORTIE_TROP_TOT, on assouplit la sortie :
+    - seuil de clôture plus haut
+    - seuil de resserrage plus haut
+    - health exit plus bas
+    """
+    try:
+        cfg = load_adaptive_config()
+        se = cfg.get("smart_exit", {})
+        if not isinstance(se, dict):
+            se = default_adaptive_config()["smart_exit"]
+
+        se.setdefault("enabled", SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT)
+        se.setdefault("auto_apply", True)
+
+        df = load_post_trade_dataframe()
+        if df.empty or "verdict" not in df.columns:
+            se.update({
+                "level": 0,
+                "recommendation": "NEUTRE",
+                "sample_size": 0,
+                "sortie_trop_tot": 0,
+                "bonne_sortie": 0,
+                "neutre": 0,
+                "too_early_ratio": 0,
+                "good_ratio": 0,
+                "threshold_bonus": 0,
+                "health_bonus": 0,
+                "tighten_bonus": 0,
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            cfg["smart_exit"] = se
+            save_adaptive_config(cfg)
+            return se
+
+        work = df.copy()
+        if "exit_reason" in work.columns:
+            # on cible surtout SMART_EXIT, mais on garde EMA20 pour le diagnostic de sorties prématurées
+            mask = work["exit_reason"].astype(str).str.contains("SMART_EXIT|EMA20_2_CLOSES", case=False, na=False)
+            work = work[mask].copy()
+
+        work = work.tail(SMART_EXIT_ADAPTIVE_WINDOW).copy()
+        verdicts = work["verdict"].astype(str).fillna("")
+
+        total = int(len(work))
+        too_early = int((verdicts == "SORTIE_TROP_TOT").sum())
+        good = int((verdicts == "BONNE_SORTIE").sum())
+        neutral = int((verdicts == "NEUTRE").sum())
+
+        too_early_ratio = (too_early / total) if total else 0
+        good_ratio = (good / total) if total else 0
+
+        level = 0
+        recommendation = "NEUTRE"
+
+        if total >= SMART_EXIT_ADAPTIVE_MIN_ANALYSES:
+            if too_early_ratio >= 0.70:
+                level = 3
+                recommendation = "SMART_EXIT_TRES_TROP_AGRESSIF"
+            elif too_early_ratio >= 0.60:
+                level = 2
+                recommendation = "SMART_EXIT_TROP_AGRESSIF"
+            elif too_early_ratio >= SMART_EXIT_ADAPTIVE_TOO_EARLY_RATIO:
+                level = 1
+                recommendation = "SMART_EXIT_LEGEREMENT_TROP_AGRESSIF"
+            elif good_ratio >= SMART_EXIT_ADAPTIVE_GOOD_RATIO and too_early_ratio < 0.35:
+                level = 0
+                recommendation = "SMART_EXIT_CORRECT"
+            else:
+                level = 0
+                recommendation = "NEUTRE"
+
+        level = max(0, min(SMART_EXIT_ADAPTIVE_MAX_LEVEL, int(level)))
+
+        se.update({
+            "level": level,
+            "recommendation": recommendation,
+            "sample_size": total,
+            "sortie_trop_tot": too_early,
+            "bonne_sortie": good,
+            "neutre": neutral,
+            "too_early_ratio": round(too_early_ratio * 100, 1),
+            "good_ratio": round(good_ratio * 100, 1),
+            "threshold_bonus": round(level * SMART_EXIT_ADAPTIVE_THRESHOLD_STEP, 2),
+            "health_bonus": round(level * SMART_EXIT_ADAPTIVE_HEALTH_STEP, 2),
+            "tighten_bonus": round(level * SMART_EXIT_ADAPTIVE_TIGHTEN_STEP, 2),
+            "auto_apply": bool(se.get("auto_apply", True)),
+            "enabled": bool(se.get("enabled", SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT)),
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+        cfg["smart_exit"] = se
+        save_adaptive_config(cfg)
+        return se
+
+    except Exception as e:
+        print("[ADAPTIVE SMART EXIT] rebuild error", e)
+        return default_adaptive_config()["smart_exit"]
+
+
+def get_adaptive_smart_exit_adjustment():
+    try:
+        cfg = load_adaptive_config()
+        se = cfg.get("smart_exit", {})
+        if not se or not se.get("enabled", True) or not se.get("auto_apply", True):
+            return {
+                "level": 0,
+                "threshold_bonus": 0,
+                "health_bonus": 0,
+                "tighten_bonus": 0,
+                "recommendation": "DISABLED",
+            }
+        return {
+            "level": int(se.get("level", 0) or 0),
+            "threshold_bonus": float(se.get("threshold_bonus", 0) or 0),
+            "health_bonus": float(se.get("health_bonus", 0) or 0),
+            "tighten_bonus": float(se.get("tighten_bonus", 0) or 0),
+            "recommendation": se.get("recommendation", "NEUTRE"),
+            "sample_size": se.get("sample_size", 0),
+            "too_early_ratio": se.get("too_early_ratio", 0),
+            "good_ratio": se.get("good_ratio", 0),
+        }
+    except Exception:
+        return {
+            "level": 0,
+            "threshold_bonus": 0,
+            "health_bonus": 0,
+            "tighten_bonus": 0,
+            "recommendation": "ERROR",
+        }
+
+
 def smart_exit_reversal_decision(df, current_price, entry_price, mode=None):
     """
     Smart Exit unifié pour D / C / E / F.
@@ -3337,9 +3519,11 @@ def smart_exit_reversal_decision(df, current_price, entry_price, mode=None):
             score += 2.0
 
         mode_key = str(mode or "")
-        close_threshold = SMART_EXIT_MODE_THRESHOLDS.get(mode_key, SMART_EXIT_CLOSE_SCORE)
-        tighten_threshold = SMART_EXIT_MODE_TIGHTEN_THRESHOLDS.get(mode_key, SMART_EXIT_TIGHTEN_SCORE)
-        health_exit_level = SMART_EXIT_HEALTH_EXIT_LEVEL.get(mode_key, 40)
+        adaptive_se = get_adaptive_smart_exit_adjustment()
+        close_threshold = SMART_EXIT_MODE_THRESHOLDS.get(mode_key, SMART_EXIT_CLOSE_SCORE) + adaptive_se.get("threshold_bonus", 0)
+        tighten_threshold = SMART_EXIT_MODE_TIGHTEN_THRESHOLDS.get(mode_key, SMART_EXIT_TIGHTEN_SCORE) + adaptive_se.get("tighten_bonus", 0)
+        health_exit_level = SMART_EXIT_HEALTH_EXIT_LEVEL.get(mode_key, 40) - adaptive_se.get("health_bonus", 0)
+        health_exit_level = max(10, health_exit_level)
 
         health = 100.0
         health -= min(score * 7.0, 70)
@@ -3367,6 +3551,10 @@ def smart_exit_reversal_decision(df, current_price, entry_price, mode=None):
             "close_threshold": close_threshold,
             "tighten_threshold": tighten_threshold,
             "health_exit_level": health_exit_level,
+            "adaptive_smart_exit_level": adaptive_se.get("level", 0),
+            "adaptive_smart_exit_recommendation": adaptive_se.get("recommendation", "NEUTRE"),
+            "adaptive_threshold_bonus": adaptive_se.get("threshold_bonus", 0),
+            "adaptive_health_bonus": adaptive_se.get("health_bonus", 0),
             "bearish_patterns": ",".join(bearish_details.get("patterns", [])),
             "bearish_pattern_score": bearish_score,
             "close_under_ema20": close_under_ema20,
@@ -4136,7 +4324,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V4.8 Adaptive Intelligence Multi-TF Live Robust démarré</b>\n"
+        "🤖 <b>BOT MULTI V4.8 Adaptive Intelligence Multi-TF Live Robust SmartExit AI démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
