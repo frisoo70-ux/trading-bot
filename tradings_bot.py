@@ -158,6 +158,19 @@ ADAPTIVE_MIN_MULT = 0.70
 ADAPTIVE_MAX_MULT = 1.30
 ADAPTIVE_HARD_BLOCK_MULT = 0.65
 ADAPTIVE_RECENT_TRADES_WINDOW = 50
+
+# AUTO LEARNING V6
+AUTO_LEARNING_ENABLED_DEFAULT = True
+AUTO_LEARNING_AUTO_APPLY_DEFAULT = True
+AUTO_LEARNING_WINDOW = 80
+AUTO_LEARNING_MIN_TRADES_MODE = 8
+AUTO_LEARNING_MIN_TRADES_PATTERN = 5
+AUTO_LEARNING_MIN_TRADES_TOKEN = 6
+AUTO_LEARNING_BAD_WINRATE = 38.0
+AUTO_LEARNING_BAD_AVG_PNL = -0.06
+AUTO_LEARNING_GOOD_WINRATE = 58.0
+AUTO_LEARNING_GOOD_AVG_PNL = 0.04
+AUTO_LEARNING_DISABLE_MULT = 0.45
 POST_TRADE_RECALC_HISTORICAL_ENABLED = True
 POST_TRADE_DATA_MISSING_STATUS = "DATA_MISSING"
 
@@ -871,6 +884,20 @@ def default_adaptive_config():
             "tighten_bonus": 0,
             "last_updated": None,
         },
+        "auto_learning": {
+            "enabled": AUTO_LEARNING_ENABLED_DEFAULT,
+            "auto_apply": AUTO_LEARNING_AUTO_APPLY_DEFAULT,
+            "sample_size": 0,
+            "recommendation": "NEUTRE",
+            "mode_multipliers": {},
+            "pattern_multipliers": {},
+            "token_multipliers": {},
+            "blocked_modes": [],
+            "blocked_patterns": [],
+            "blocked_tokens": [],
+            "notes": [],
+            "last_updated": None,
+        },
         "last_updated": None,
     }
 
@@ -1186,6 +1213,7 @@ def compute_dashboard_stats():
         "ai_recommendations": compute_ai_recommendations(),
         "adaptive": rebuild_adaptive_config_from_trades(),
         "adaptive_smart_exit": rebuild_adaptive_smart_exit_from_posttrade(),
+        "auto_learning": rebuild_auto_learning_from_history(),
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
         "api_status": dict(API_STATS),
@@ -1195,6 +1223,7 @@ def compute_dashboard_stats():
     try:
         if isinstance(result.get("adaptive"), dict):
             result["adaptive"]["smart_exit"] = result.get("adaptive_smart_exit")
+            result["adaptive"]["auto_learning"] = result.get("auto_learning")
 
         pending_items = load_pending_post_trades()
         result["post_trade_pending"] = pending_items[-50:]
@@ -1322,7 +1351,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V5.1 Adaptive Intelligence Mode F Pro Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.0 Adaptive Intelligence Auto Learning Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1457,6 +1486,14 @@ function renderAdaptive(a){
  out+=`• Niveau: ${se.level??0}/3 | Auto: ${se.auto_apply?'ON':'OFF'} | Analyses: ${se.sample_size??0}\n`;
  out+=`• Sorties trop tôt: ${se.too_early_ratio??0}% | Bonnes sorties: ${se.good_ratio??0}%\n`;
  out+=`• Bonus seuil: +${se.threshold_bonus??0} | Health assoupli: -${se.health_bonus??0} | Tighten: +${se.tighten_bonus??0}\n`;
+ const al=a.auto_learning||{};
+ out+='\nAuto Learning V6:\n';
+ out+=`• Recommandation: ${al.recommendation||'-'} | Auto: ${al.auto_apply?'ON':'OFF'} | Trades: ${al.sample_size??0}\n`;
+ out+=`• WR: ${al.winrate??0}% | PnL fenêtre: ${al.pnl_total??0} USDC\n`;
+ if((al.blocked_modes||[]).length){out+=`• Modes bloqués: ${(al.blocked_modes||[]).join(', ')}\n`;}
+ if((al.blocked_patterns||[]).length){out+=`• Patterns bloqués: ${(al.blocked_patterns||[]).join(', ')}\n`;}
+ if((al.blocked_tokens||[]).length){out+=`• Tokens bloqués: ${(al.blocked_tokens||[]).join(', ')}\n`;}
+ (al.notes||[]).forEach(n=>{out+=`• ${n}\n`;});
  return out;
 }
 function closeTradeModal(){document.getElementById('tradeModal').style.display='none'}
@@ -1862,6 +1899,7 @@ def ensure_trades_csv():
         "balance_before",
         "balance_after",
         "real_pnl_usdc",
+        "timeframe",
     ]
 
     with open(TRADES_CSV_PATH, "w", newline="", encoding="utf-8") as f:
@@ -1920,6 +1958,7 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         entry_balance,
         final_balance,
         round(real_pnl, 6) if real_pnl != "" else "",
+        get_active_timeframe(),
     ]
 
     with open(TRADES_CSV_PATH, "a", newline="", encoding="utf-8") as f:
@@ -3491,6 +3530,14 @@ def buy_signal(df):
     elif mode_f_ok:
         signal_mode = "MODE_F_CANDLE_REVERSAL"
 
+    auto_learning = get_auto_learning_adjustment(
+        mode=signal_mode,
+        pattern=",".join(mode_f_details.get("patterns", [])) if signal_mode == "MODE_F_CANDLE_REVERSAL" else None,
+    )
+    if signal_mode and auto_learning.get("blocked"):
+        mode_a_ok = mode_b_ok = mode_c_ok = mode_d_ok = mode_e_ok = mode_f_ok = False
+        signal_mode = None
+
     score = (
         breakout_strength * 100
         + vwap_strength * 10
@@ -3510,6 +3557,9 @@ def buy_signal(df):
         score += 2.5 + min(volume_ratio, 5.0) + min(body_ratio * 2, 2.0)
     if mode_f_ok:
         score += 1.0 + mode_f_score + min(mode_f_filter_details.get("confirmation_count", 0) * 0.35, 2.5)
+
+    if signal_mode and auto_learning.get("multiplier", 1.0) != 1.0:
+        score = score * float(auto_learning.get("multiplier", 1.0))
 
     ok = mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok or mode_f_ok
 
@@ -3547,6 +3597,9 @@ def buy_signal(df):
         "mode_f_blocking_reasons": ",".join(mode_f_filter_details.get("blocking_reasons", [])),
         "mode_f_ema20_slope_pct": mode_f_filter_details.get("ema20_slope_pct"),
         "mode_f_distance_below_ema20_pct": mode_f_filter_details.get("distance_below_ema20_pct"),
+        "auto_learning_multiplier": auto_learning.get("multiplier"),
+        "auto_learning_blocked": auto_learning.get("blocked"),
+        "auto_learning_reasons": ",".join(auto_learning.get("reasons", [])),
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -3712,6 +3765,183 @@ def bearish_reversal_patterns(df):
         return 0, {"patterns": []}
 
 
+
+
+
+def _al_stats(df, col, min_trades):
+    out = {}
+    if col not in df.columns:
+        return out
+    try:
+        for key, g in df.groupby(col, dropna=False):
+            key = str(key)
+            if key in ["", "nan", "None"]:
+                continue
+            if len(g) < min_trades:
+                continue
+            pnl = pd.to_numeric(g.get("real_pnl_usdc"), errors="coerce").fillna(0)
+            wins = int((pnl > 0).sum())
+            wr = round((wins / len(g)) * 100, 1) if len(g) else 0
+            avg = round(float(pnl.mean()), 4) if len(g) else 0
+            total = round(float(pnl.sum()), 4)
+            mult = 1.0
+            if wr <= 25 and avg <= AUTO_LEARNING_BAD_AVG_PNL:
+                mult = AUTO_LEARNING_DISABLE_MULT
+            elif wr < AUTO_LEARNING_BAD_WINRATE and avg < 0:
+                mult = 0.70
+            elif avg <= AUTO_LEARNING_BAD_AVG_PNL:
+                mult = 0.80
+            elif wr >= AUTO_LEARNING_GOOD_WINRATE and avg >= AUTO_LEARNING_GOOD_AVG_PNL:
+                mult = 1.25
+            elif wr >= 50 and avg > 0:
+                mult = 1.10
+            out[key] = {
+                "trades": int(len(g)),
+                "winrate": wr,
+                "avg_pnl": avg,
+                "total_pnl": total,
+                "multiplier": round(mult, 2),
+            }
+    except Exception as e:
+        print("[AUTO LEARNING STATS ERROR]", e)
+    return out
+
+
+def rebuild_auto_learning_from_history():
+    try:
+        cfg = load_adaptive_config()
+        al = cfg.get("auto_learning", {})
+        if not isinstance(al, dict):
+            al = default_adaptive_config()["auto_learning"]
+        al.setdefault("enabled", AUTO_LEARNING_ENABLED_DEFAULT)
+        al.setdefault("auto_apply", AUTO_LEARNING_AUTO_APPLY_DEFAULT)
+
+        df = load_trades_dataframe()
+        if df.empty:
+            al.update({
+                "sample_size": 0,
+                "recommendation": "PAS_ASSEZ_DE_DONNEES",
+                "mode_multipliers": {},
+                "pattern_multipliers": {},
+                "token_multipliers": {},
+                "blocked_modes": [],
+                "blocked_patterns": [],
+                "blocked_tokens": [],
+                "notes": ["Aucun trade disponible."],
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            cfg["auto_learning"] = al
+            save_adaptive_config(cfg)
+            return al
+
+        work = df.tail(AUTO_LEARNING_WINDOW).copy()
+        work["real_pnl_usdc"] = pd.to_numeric(work.get("real_pnl_usdc"), errors="coerce").fillna(0)
+        if "mode_f_pattern" in work.columns:
+            work["auto_pattern"] = work["mode_f_pattern"].astype(str).str.split(",").str[0].replace("nan", "")
+        else:
+            work["auto_pattern"] = ""
+
+        mode_mult = _al_stats(work, "mode", AUTO_LEARNING_MIN_TRADES_MODE)
+        pattern_mult = _al_stats(work, "auto_pattern", AUTO_LEARNING_MIN_TRADES_PATTERN)
+        token_mult = _al_stats(work, "symbol", AUTO_LEARNING_MIN_TRADES_TOKEN)
+
+        blocked_modes = [k for k, v in mode_mult.items() if v.get("multiplier") <= AUTO_LEARNING_DISABLE_MULT]
+        blocked_patterns = [k for k, v in pattern_mult.items() if v.get("multiplier") <= AUTO_LEARNING_DISABLE_MULT]
+        blocked_tokens = [k for k, v in token_mult.items() if v.get("multiplier") <= AUTO_LEARNING_DISABLE_MULT]
+
+        total = len(work)
+        pnl_total = round(float(work["real_pnl_usdc"].sum()), 4)
+        wins = int((work["real_pnl_usdc"] > 0).sum())
+        winrate = round((wins / total) * 100, 1) if total else 0
+
+        notes = []
+        if blocked_modes:
+            notes.append("Modes à bloquer: " + ", ".join(blocked_modes))
+        if blocked_patterns:
+            notes.append("Patterns à bloquer: " + ", ".join(blocked_patterns))
+        if blocked_tokens:
+            notes.append("Tokens à bloquer: " + ", ".join(blocked_tokens))
+
+        try:
+            post = load_post_trade_dataframe()
+            if not post.empty and "verdict" in post.columns:
+                rp = post.tail(AUTO_LEARNING_WINDOW)
+                too_early = int((rp["verdict"].astype(str) == "SORTIE_TROP_TOT").sum())
+                ratio = round((too_early / len(rp)) * 100, 1) if len(rp) else 0
+                if ratio >= 50:
+                    notes.append(f"Smart Exit trop rapide: {ratio}% sorties trop tôt.")
+        except Exception:
+            pass
+
+        rec = "NEUTRE"
+        if pnl_total < 0 and winrate < 45:
+            rec = "MODE_DEFENSIF"
+        if blocked_modes or blocked_patterns or blocked_tokens:
+            rec = "FILTRAGE_RECOMMANDE"
+        if pnl_total > 0 and winrate >= 55:
+            rec = "PARAMETRES_OK"
+
+        al.update({
+            "enabled": bool(al.get("enabled", True)),
+            "auto_apply": bool(al.get("auto_apply", True)),
+            "sample_size": int(total),
+            "window": AUTO_LEARNING_WINDOW,
+            "pnl_total": pnl_total,
+            "winrate": winrate,
+            "recommendation": rec,
+            "mode_multipliers": mode_mult,
+            "pattern_multipliers": pattern_mult,
+            "token_multipliers": token_mult,
+            "blocked_modes": blocked_modes,
+            "blocked_patterns": blocked_patterns,
+            "blocked_tokens": blocked_tokens,
+            "notes": notes,
+            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        cfg["auto_learning"] = al
+        save_adaptive_config(cfg)
+        return al
+    except Exception as e:
+        print("[AUTO LEARNING ERROR]", e)
+        return {"enabled": False, "recommendation": "ERREUR", "notes": [str(e)]}
+
+
+def get_auto_learning_adjustment(mode=None, symbol=None, pattern=None):
+    try:
+        al = load_adaptive_config().get("auto_learning", {})
+        if not al or not al.get("enabled", True) or not al.get("auto_apply", True):
+            return {"multiplier": 1.0, "blocked": False, "reasons": []}
+        mult = 1.0
+        blocked = False
+        reasons = []
+        if mode:
+            d = al.get("mode_multipliers", {}).get(mode)
+            if d:
+                mult *= float(d.get("multiplier", 1.0))
+                reasons.append(f"mode:{mode}x{d.get('multiplier')}")
+            if mode in al.get("blocked_modes", []):
+                blocked = True
+                reasons.append(f"mode_blocked:{mode}")
+        if symbol:
+            d = al.get("token_multipliers", {}).get(symbol)
+            if d:
+                mult *= float(d.get("multiplier", 1.0))
+                reasons.append(f"token:{symbol}x{d.get('multiplier')}")
+            if symbol in al.get("blocked_tokens", []):
+                blocked = True
+                reasons.append(f"token_blocked:{symbol}")
+        if pattern:
+            p = str(pattern).split(",")[0]
+            d = al.get("pattern_multipliers", {}).get(p)
+            if d:
+                mult *= float(d.get("multiplier", 1.0))
+                reasons.append(f"pattern:{p}x{d.get('multiplier')}")
+            if p in al.get("blocked_patterns", []):
+                blocked = True
+                reasons.append(f"pattern_blocked:{p}")
+        return {"multiplier": round(max(0.25, min(1.8, mult)), 3), "blocked": blocked, "reasons": reasons}
+    except Exception as e:
+        return {"multiplier": 1.0, "blocked": False, "reasons": [str(e)]}
 
 
 def rebuild_adaptive_smart_exit_from_posttrade():
@@ -4685,6 +4915,20 @@ def scan_symbols_for_best_buy():
 
 
         if ok:
+            symbol_auto_learning = get_auto_learning_adjustment(
+                mode=details.get("signal_mode"),
+                symbol=symbol,
+                pattern=details.get("mode_f_pattern") if details.get("signal_mode") == "MODE_F_CANDLE_REVERSAL" else None,
+            )
+            if symbol_auto_learning.get("blocked"):
+                print(f"[AUTO LEARNING BLOCK] {symbol} {details.get('signal_mode')} reasons={symbol_auto_learning.get('reasons')}")
+                continue
+            if symbol_auto_learning.get("multiplier", 1.0) != 1.0:
+                score = score * float(symbol_auto_learning.get("multiplier", 1.0))
+                details["score"] = score
+                details["auto_learning_multiplier"] = symbol_auto_learning.get("multiplier")
+                details["auto_learning_reasons"] = ",".join(symbol_auto_learning.get("reasons", []))
+
             candidates.append({
                 "symbol": symbol,
                 "df": df,
@@ -4734,7 +4978,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V5.1 Adaptive Intelligence Mode F Pro démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.0 Adaptive Intelligence Auto Learning démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
