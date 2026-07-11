@@ -5,6 +5,8 @@ import pandas as pd
 from datetime import datetime
 import os
 import csv
+import shutil
+import base64
 from pathlib import Path
 import eth_account
 import threading
@@ -46,12 +48,55 @@ SYMBOLS = ["SOL", "XRP", "kSHIB"]
 TRADE_SIZE_USD = 30
 CHECK_INTERVAL = 60
 
-TRADES_CSV_PATH = Path("trades.csv")
-POST_TRADE_CSV_PATH = Path("post_trade_analysis.csv")
-POST_TRADE_PENDING_PATH = Path("post_trade_pending.json")
-LAST_MONTHLY_REPORT_FILE = Path("last_monthly_report.txt")
-BOT_CONFIG_PATH = Path("bot_config.json")
-ADAPTIVE_CONFIG_PATH = Path("adaptive_config.json")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    DATA_DIR = Path("data")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+TRADES_CSV_PATH = DATA_DIR / "trades.csv"
+POST_TRADE_CSV_PATH = DATA_DIR / "post_trade_analysis.csv"
+POST_TRADE_PENDING_PATH = DATA_DIR / "post_trade_pending.json"
+LAST_MONTHLY_REPORT_FILE = DATA_DIR / "last_monthly_report.txt"
+BOT_CONFIG_PATH = DATA_DIR / "bot_config.json"
+ADAPTIVE_CONFIG_PATH = DATA_DIR / "adaptive_config.json"
+
+# Sauvegarde GitHub privée (facultative mais recommandée)
+# Variables Railway :
+# GITHUB_BACKUP_TOKEN = token GitHub finement limité au dépôt
+# GITHUB_BACKUP_REPO = propriétaire/nom-du-depot
+# GITHUB_BACKUP_BRANCH = main
+# GITHUB_BACKUP_PREFIX = bot-data
+GITHUB_BACKUP_TOKEN = os.environ.get("GITHUB_BACKUP_TOKEN", "")
+GITHUB_BACKUP_REPO = os.environ.get("GITHUB_BACKUP_REPO", "")
+GITHUB_BACKUP_BRANCH = os.environ.get("GITHUB_BACKUP_BRANCH", "main")
+GITHUB_BACKUP_PREFIX = os.environ.get("GITHUB_BACKUP_PREFIX", "bot-data").strip("/")
+GITHUB_BACKUP_ENABLED = bool(GITHUB_BACKUP_TOKEN and GITHUB_BACKUP_REPO)
+
+GITHUB_BACKUP_FILES = [
+    "trades.csv",
+    "post_trade_pending.json",
+    "post_trade_analysis.csv",
+    "last_monthly_report.txt",
+    "bot_config.json",
+    "adaptive_config.json",
+]
+
+GITHUB_SYNC_LOCK = threading.Lock()
+GITHUB_SYNC_STATE = {
+    "enabled": GITHUB_BACKUP_ENABLED,
+    "restored": False,
+    "last_restore": None,
+    "last_backup": None,
+    "last_status": "DISABLED" if not GITHUB_BACKUP_ENABLED else "READY",
+    "last_error": "",
+    "uploaded_files": 0,
+    "downloaded_files": 0,
+    "dirty": False,
+    "worker_running": False,
+}
+
 
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
 DASHBOARD_PORT = int(os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000")))
@@ -321,6 +366,7 @@ def save_bot_config(cfg):
     try:
         with open(BOT_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
+        schedule_github_backup()
         return True
     except Exception as e:
         print("[ERREUR CONFIG SAVE]", e)
@@ -443,6 +489,7 @@ def save_pending_post_trades(items):
     try:
         with open(POST_TRADE_PENDING_PATH, "w", encoding="utf-8") as f:
             json.dump(items, f, indent=2, ensure_ascii=False)
+        schedule_github_backup()
     except Exception as e:
         print("[ERREUR POST TRADE SAVE]", e)
 
@@ -918,6 +965,7 @@ def save_adaptive_config(cfg):
     try:
         with open(ADAPTIVE_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
+        schedule_github_backup()
     except Exception as e:
         print("[ADAPTIVE] save error", e)
 
@@ -1218,6 +1266,8 @@ def compute_dashboard_stats():
         "log_history": LOG_HISTORY[-120:],
         "api_status": dict(API_STATS),
         "order_state": get_order_state_for_dashboard(),
+        "storage_status": persistent_storage_status(),
+        "github_sync": github_sync_status(),
     }
 
     try:
@@ -1351,7 +1401,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.0 Adaptive Intelligence Auto Learning Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.2 Adaptive Intelligence GitHub Backup Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1423,6 +1473,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="orderStateBox" class="aiBox">-</div>
   </div>
 
+  <div class="card" style="margin-top:12px">
+    <h3>💾 Stockage local</h3>
+    <div id="storageStatusBox" class="aiBox">-</div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>☁️ Sauvegarde GitHub</h3>
+    <div id="githubSyncBox" class="aiBox">-</div>
+  </div>
+
   <div class="card" style="margin-top:12px"><h3>📋 Logs récents</h3><pre id="logs"></pre></div>
 
   <div id="tradeModal" class="modal">
@@ -1440,6 +1500,48 @@ function shortMode(m){if(!m)return'-';return String(m).replace('MODE_','').repla
 function table(el,cols,rows,clickable=false){const head='<tr>'+cols.map(c=>`<th>${c.label}</th>`).join('')+'</tr>';const body=(rows||[]).map((r,i)=>{const click=clickable?` class="clickable" onclick="openTradeModal(${i})"`:'';return'<tr'+click+'>'+cols.map(c=>{let val=c.get?c.get(r):r[c.key];let klass=c.cls?c.cls(val,r):'';return`<td class="${klass}">${val??'-'}</td>`}).join('')+'</tr>'}).join('');document.getElementById(el).innerHTML=head+body}
 let lastTrades=[];
 function esc(x){return String(x??'-').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function renderGithubSync(s){
+ if(!s)return '-';
+ return `Activée: ${s.enabled?'OUI':'NON'}
+Dépôt: ${s.repo||'-'}
+Branche: ${s.branch||'-'}
+Dossier distant: ${s.prefix||'-'}
+Statut: ${s.last_status||'-'}
+Dernière restauration: ${s.last_restore||'-'}
+Dernière sauvegarde: ${s.last_backup||'-'}
+Fichiers restaurés: ${s.downloaded_files||0}
+Fichiers sauvegardés: ${s.uploaded_files||0}
+En attente: ${s.dirty?'OUI':'NON'}
+Dernière erreur: ${s.last_error||'-'}`;
+}
+
+function renderStorageStatus(s){
+ if(!s)return '-';
+ const f=s.files||{};
+ return `Dossier: ${s.data_dir||'-'}
+Existe: ${s.exists?'OUI':'NON'}
+Écriture: ${s.writable?'OK':'ERREUR'}
+trades.csv: ${f.trades?'OK':'absent'}
+post_trade_pending.json: ${f.post_trade_pending?'OK':'absent'}
+post_trade_analysis.csv: ${f.post_trade_analysis?'OK':'absent'}
+bot_config.json: ${f.bot_config?'OK':'absent'}`;
+}
+
+function renderGithubSync(s){
+ if(!s)return '-';
+ return `Activée: ${s.enabled?'OUI':'NON'}
+Dépôt: ${s.repo||'-'}
+Branche: ${s.branch||'-'}
+Dossier distant: ${s.prefix||'-'}
+Statut: ${s.last_status||'-'}
+Dernière restauration: ${s.last_restore||'-'}
+Dernière sauvegarde: ${s.last_backup||'-'}
+Fichiers restaurés: ${s.downloaded_files||0}
+Fichiers sauvegardés: ${s.uploaded_files||0}
+En attente: ${s.dirty?'OUI':'NON'}
+Dernière erreur: ${s.last_error||'-'}`;
+}
+
 function renderOrderState(s){
  if(!s)return '-';
  return `Ordre en attente: ${s.pending?'OUI':'NON'}
@@ -1556,6 +1658,8 @@ table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{lab
 document.getElementById('adaptiveBox').textContent=renderAdaptive(d.adaptive);
 document.getElementById('apiStatusBox').textContent=renderApiStatus(d.api_status);
 document.getElementById('orderStateBox').textContent=renderOrderState(d.order_state);
+document.getElementById('storageStatusBox').textContent=renderStorageStatus(d.storage_status);
+document.getElementById('githubSyncBox').textContent=renderGithubSync(d.github_sync);
 document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
@@ -1678,6 +1782,225 @@ def start_dashboard_server():
     t = threading.Thread(target=_run, daemon=True)
     t.start()
 
+
+
+
+
+def _github_headers():
+    return {
+        "Authorization": f"Bearer {GITHUB_BACKUP_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "adaptive-trading-bot",
+    }
+
+
+def _github_api_url(filename):
+    remote_path = f"{GITHUB_BACKUP_PREFIX}/{filename}" if GITHUB_BACKUP_PREFIX else filename
+    return f"https://api.github.com/repos/{GITHUB_BACKUP_REPO}/contents/{remote_path}"
+
+
+def _github_get_remote_file(filename):
+    if not GITHUB_BACKUP_ENABLED:
+        return None
+    try:
+        response = requests.get(
+            _github_api_url(filename),
+            headers=_github_headers(),
+            params={"ref": GITHUB_BACKUP_BRANCH},
+            timeout=20,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        payload = response.json()
+        encoded = payload.get("content", "").replace("\n", "")
+        return {
+            "content": base64.b64decode(encoded) if encoded else b"",
+            "sha": payload.get("sha"),
+        }
+    except Exception as e:
+        print("[GITHUB RESTORE ERROR]", filename, e)
+        GITHUB_SYNC_STATE["last_error"] = str(e)[:250]
+        return None
+
+
+def github_restore_data():
+    """
+    Télécharge les fichiers de données depuis GitHub au démarrage.
+    Un fichier distant remplace le fichier local temporaire.
+    """
+    if not GITHUB_BACKUP_ENABLED:
+        print("[GITHUB BACKUP] Désactivé : variables manquantes.")
+        return False
+
+    downloaded = 0
+    try:
+        with GITHUB_SYNC_LOCK:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            for filename in GITHUB_BACKUP_FILES:
+                remote = _github_get_remote_file(filename)
+                if remote is None:
+                    continue
+                local_path = DATA_DIR / filename
+                local_path.write_bytes(remote["content"])
+                downloaded += 1
+
+            GITHUB_SYNC_STATE.update({
+                "restored": downloaded > 0,
+                "last_restore": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_status": "RESTORE_OK" if downloaded > 0 else "NO_REMOTE_DATA",
+                "last_error": "",
+                "downloaded_files": downloaded,
+            })
+
+        print(f"[GITHUB RESTORE] {downloaded} fichier(s) restauré(s).")
+        return downloaded > 0
+
+    except Exception as e:
+        GITHUB_SYNC_STATE["last_status"] = "RESTORE_ERROR"
+        GITHUB_SYNC_STATE["last_error"] = str(e)[:250]
+        print("[GITHUB RESTORE ERROR]", e)
+        return False
+
+
+def _github_upload_file(filename):
+    local_path = DATA_DIR / filename
+    if not local_path.exists():
+        return False
+
+    remote = _github_get_remote_file(filename)
+    payload = {
+        "message": f"Bot data backup: {filename}",
+        "content": base64.b64encode(local_path.read_bytes()).decode("ascii"),
+        "branch": GITHUB_BACKUP_BRANCH,
+    }
+    if remote and remote.get("sha"):
+        payload["sha"] = remote["sha"]
+
+    response = requests.put(
+        _github_api_url(filename),
+        headers=_github_headers(),
+        json=payload,
+        timeout=25,
+    )
+    response.raise_for_status()
+    return True
+
+
+def github_backup_now():
+    """Sauvegarde tous les fichiers persistants dans le dépôt GitHub privé."""
+    if not GITHUB_BACKUP_ENABLED:
+        return False
+
+    uploaded = 0
+    try:
+        with GITHUB_SYNC_LOCK:
+            for filename in GITHUB_BACKUP_FILES:
+                try:
+                    if _github_upload_file(filename):
+                        uploaded += 1
+                except Exception as file_error:
+                    print("[GITHUB BACKUP FILE ERROR]", filename, file_error)
+                    GITHUB_SYNC_STATE["last_error"] = f"{filename}: {str(file_error)[:180]}"
+
+            GITHUB_SYNC_STATE.update({
+                "last_backup": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "last_status": "BACKUP_OK" if uploaded > 0 else "NOTHING_TO_BACKUP",
+                "uploaded_files": uploaded,
+                "dirty": False,
+            })
+
+        print(f"[GITHUB BACKUP] {uploaded} fichier(s) sauvegardé(s).")
+        return uploaded > 0
+
+    except Exception as e:
+        GITHUB_SYNC_STATE["last_status"] = "BACKUP_ERROR"
+        GITHUB_SYNC_STATE["last_error"] = str(e)[:250]
+        print("[GITHUB BACKUP ERROR]", e)
+        return False
+
+
+def _github_backup_worker(delay_seconds=20):
+    try:
+        time.sleep(delay_seconds)
+        github_backup_now()
+    finally:
+        GITHUB_SYNC_STATE["worker_running"] = False
+        # Si des changements sont arrivés pendant la sauvegarde, relancer une fois.
+        if GITHUB_SYNC_STATE.get("dirty") and GITHUB_BACKUP_ENABLED:
+            schedule_github_backup(delay_seconds=20)
+
+
+def schedule_github_backup(delay_seconds=20):
+    """
+    Regroupe les écritures rapprochées pour éviter trop de commits GitHub.
+    """
+    if not GITHUB_BACKUP_ENABLED:
+        return
+
+    GITHUB_SYNC_STATE["dirty"] = True
+    if GITHUB_SYNC_STATE.get("worker_running"):
+        return
+
+    GITHUB_SYNC_STATE["worker_running"] = True
+    thread = threading.Thread(
+        target=_github_backup_worker,
+        args=(delay_seconds,),
+        daemon=True,
+        name="github-backup-worker",
+    )
+    thread.start()
+
+
+def github_sync_status():
+    status = dict(GITHUB_SYNC_STATE)
+    status["repo"] = GITHUB_BACKUP_REPO if GITHUB_BACKUP_ENABLED else ""
+    status["branch"] = GITHUB_BACKUP_BRANCH
+    status["prefix"] = GITHUB_BACKUP_PREFIX
+    return status
+
+
+def migrate_legacy_data_files():
+    """Copie les anciennes données vers DATA_DIR sans écraser les données persistantes."""
+    names = [
+        "trades.csv", "post_trade_pending.json", "post_trade_analysis.csv",
+        "last_monthly_report.txt", "bot_config.json", "adaptive_config.json",
+        "adaptive_learning.json", "auto_learning.json", "pattern_learning.json",
+        "token_learning.json", "timeframe_learning.json", "smart_exit_learning.json",
+    ]
+    migrated = []
+    try:
+        for name in names:
+            old_path = Path(name)
+            new_path = DATA_DIR / name
+            if new_path.exists():
+                continue
+            if old_path.exists() and old_path.resolve() != new_path.resolve():
+                shutil.copy2(old_path, new_path)
+                migrated.append(name)
+        print("[DATA] Dossier persistant:", DATA_DIR)
+        if migrated:
+            print("[DATA MIGRATION]", ", ".join(migrated))
+    except Exception as e:
+        print("[DATA MIGRATION ERROR]", e)
+
+
+def persistent_storage_status():
+    try:
+        return {
+            "data_dir": str(DATA_DIR),
+            "exists": DATA_DIR.exists(),
+            "writable": os.access(DATA_DIR, os.W_OK),
+            "files": {
+                "trades": TRADES_CSV_PATH.exists(),
+                "post_trade_pending": POST_TRADE_PENDING_PATH.exists(),
+                "post_trade_analysis": POST_TRADE_ANALYSIS_PATH.exists(),
+                "bot_config": BOT_CONFIG_PATH.exists(),
+            },
+        }
+    except Exception as e:
+        return {"data_dir": str(DATA_DIR), "error": str(e)}
 
 
 def notify_telegram(message):
@@ -1965,6 +2288,7 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         writer = csv.writer(f)
         writer.writerow(row)
 
+    schedule_github_backup(delay_seconds=5)
     return row
 
 
@@ -4947,6 +5271,8 @@ def scan_symbols_for_best_buy():
 
 
 def run():
+    github_restore_data()
+    migrate_legacy_data_files()
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
     print("BOT MULTI V4.8 ADAPTIVE INTELLIGENCE")
@@ -4978,7 +5304,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.0 Adaptive Intelligence Auto Learning démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.2 Adaptive Intelligence GitHub Backup démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
