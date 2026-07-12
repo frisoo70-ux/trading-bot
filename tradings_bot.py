@@ -455,7 +455,9 @@ def ensure_post_trade_files():
                 "entry", "exit", "real_pnl_usdc", "pnl_at_exit_pct",
                 "pnl_15m_pct", "pnl_30m_pct", "pnl_1h_pct", "pnl_2h_pct", "pnl_4h_pct",
                 "max_gain_after_exit_pct", "max_loss_after_exit_pct",
-                "exit_efficiency_pct", "verdict", "status",
+                "opportunity_left_pct", "downside_avoided_pct",
+                "exit_efficiency_pct", "exit_quality_score",
+                "verdict", "status",
             ]
             pd.DataFrame(columns=cols).to_csv(POST_TRADE_CSV_PATH, index=False)
             print("[POST TRADE] post_trade_analysis.csv créé")
@@ -624,22 +626,54 @@ def finalize_post_trade_item(item):
 
         max_gain_after = ((max_price - exit_price) / exit_price) * 100
         max_loss_after = ((min_price - exit_price) / exit_price) * 100
+        pnl_at_exit = float(item.get("pnl_at_exit_pct", 0) or 0)
 
-        pnl_at_exit = float(item.get("pnl_at_exit_pct", 0))
+        # Ce qui a été laissé sur la table après la sortie.
+        opportunity_left = max(0.0, max_gain_after)
+
+        # Baisse évitée après la sortie.
+        downside_avoided = max(0.0, -max_loss_after)
+
         max_possible_from_entry = ((max_price - entry) / entry) * 100
-
         if max_possible_from_entry > 0:
             efficiency = (pnl_at_exit / max_possible_from_entry) * 100
             efficiency = max(min(efficiency, 100), -100)
         else:
             efficiency = None
 
-        if max_gain_after >= 0.8:
-            verdict = "SORTIE_TROP_TOT"
-        elif max_loss_after <= -0.8 and max_gain_after < 0.4:
+        # Score de qualité sur 100.
+        # Base élevée, puis pénalité si le prix progresse fortement après la sortie.
+        quality_score = 92.0
+
+        # Pénalité principale : opportunité abandonnée.
+        quality_score -= min(opportunity_left * 42.0, 70.0)
+
+        # Bonus si la sortie a évité une baisse importante.
+        quality_score += min(downside_avoided * 16.0, 18.0)
+
+        # Bonus si le trade est sorti en gain.
+        if pnl_at_exit > 0:
+            quality_score += min(pnl_at_exit * 8.0, 8.0)
+        elif pnl_at_exit < 0:
+            # Une petite perte reste acceptable si elle évite une forte baisse.
+            quality_score -= min(abs(pnl_at_exit) * 7.0, 10.0)
+
+        # Bonus de cohérence : le prix a peu progressé puis a nettement baissé.
+        if opportunity_left <= 0.20 and downside_avoided >= 0.50:
+            quality_score += 8.0
+
+        quality_score = round(max(0.0, min(100.0, quality_score)), 1)
+
+        if quality_score >= 90:
+            verdict = "EXCELLENTE_SORTIE"
+        elif quality_score >= 78:
+            verdict = "TRES_BONNE_SORTIE"
+        elif quality_score >= 65:
             verdict = "BONNE_SORTIE"
+        elif quality_score >= 45:
+            verdict = "SORTIE_ACCEPTABLE"
         else:
-            verdict = "NEUTRE"
+            verdict = "SORTIE_TROP_TOT"
 
         row = {
             "date": item.get("date"),
@@ -657,7 +691,10 @@ def finalize_post_trade_item(item):
             "pnl_4h_pct": item.get("horizons", {}).get("4h"),
             "max_gain_after_exit_pct": round(max_gain_after, 4),
             "max_loss_after_exit_pct": round(max_loss_after, 4),
+            "opportunity_left_pct": round(opportunity_left, 4),
+            "downside_avoided_pct": round(downside_avoided, 4),
             "exit_efficiency_pct": round(efficiency, 2) if efficiency is not None else None,
+            "exit_quality_score": quality_score,
             "verdict": verdict,
             "status": "DONE",
         }
@@ -665,11 +702,16 @@ def finalize_post_trade_item(item):
         df = pd.read_csv(POST_TRADE_CSV_PATH) if POST_TRADE_CSV_PATH.exists() else pd.DataFrame()
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         df.to_csv(POST_TRADE_CSV_PATH, index=False)
+        schedule_github_backup(delay_seconds=5)
 
-        print(f"[POST TRADE] Analyse finalisée {item.get('symbol')} verdict={verdict}")
+        print(
+            f"[POST TRADE] Analyse finalisée {item.get('symbol')} "
+            f"score={quality_score}/100 verdict={verdict}"
+        )
 
     except Exception as e:
         print("[ERREUR POST TRADE FINALIZE]", e)
+
 
 
 def update_post_trade_tracking(symbol, current_price):
@@ -922,8 +964,11 @@ def default_adaptive_config():
             "recommendation": "NEUTRE",
             "sample_size": 0,
             "sortie_trop_tot": 0,
+            "sortie_acceptable": 0,
             "bonne_sortie": 0,
-            "neutre": 0,
+            "tres_bonne_sortie": 0,
+            "excellente_sortie": 0,
+            "score_moyen": 0,
             "too_early_ratio": 0,
             "good_ratio": 0,
             "threshold_bonus": 0,
@@ -1282,12 +1327,19 @@ def compute_dashboard_stats():
         if not post_df.empty:
             result["post_trade_analysis"] = post_df.tail(50).fillna("").to_dict(orient="records")
             verdicts = post_df.get("verdict", pd.Series(dtype=str)).fillna("")
+            quality_scores = pd.to_numeric(
+                post_df.get("exit_quality_score", pd.Series(dtype=float)),
+                errors="coerce"
+            )
             result["post_trade_summary"] = {
                 "total": int(len(post_df)),
                 "pending": int(len(pending_items)),
                 "sortie_trop_tot": int((verdicts == "SORTIE_TROP_TOT").sum()),
+                "sortie_acceptable": int((verdicts == "SORTIE_ACCEPTABLE").sum()),
                 "bonne_sortie": int((verdicts == "BONNE_SORTIE").sum()),
-                "neutre": int((verdicts == "NEUTRE").sum()),
+                "tres_bonne_sortie": int((verdicts == "TRES_BONNE_SORTIE").sum()),
+                "excellente_sortie": int((verdicts == "EXCELLENTE_SORTIE").sum()),
+                "score_moyen": round(float(quality_scores.mean()), 1) if quality_scores.notna().any() else 0,
             }
         else:
             result["post_trade_summary"]["pending"] = int(len(pending_items))
@@ -1401,7 +1453,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.2 Adaptive Intelligence GitHub Backup Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.3 Adaptive Intelligence Exit Quality Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1662,7 +1714,7 @@ document.getElementById('storageStatusBox').textContent=renderStorageStatus(d.st
 document.getElementById('githubSyncBox').textContent=renderGithubSync(d.github_sync);
 document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
-document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Trop tôt ${pts.sortie_trop_tot||0} · Bonnes sorties ${pts.bonne_sortie||0} · Neutres ${pts.neutre||0}`;
+document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Score moyen ${fmt(pts.score_moyen,1)}/100 · Excellentes ${pts.excellente_sortie||0} · Très bonnes ${pts.tres_bonne_sortie||0} · Bonnes ${pts.bonne_sortie||0} · Acceptables ${pts.sortie_acceptable||0} · Trop tôt ${pts.sortie_trop_tot||0}`;
 table('postTradePending',[
 {label:'Date',key:'date'},
 {label:'Coin',key:'symbol'},
@@ -1688,6 +1740,9 @@ table('postTrade',[
 {label:'+4h',get:r=>fmt(r.pnl_4h_pct,2),cls:v=>cls(v)},
 {label:'Max après',get:r=>fmt(r.max_gain_after_exit_pct,2),cls:v=>cls(v)},
 {label:'Min après',get:r=>fmt(r.max_loss_after_exit_pct,2),cls:v=>cls(v)},
+{label:'Laissé',get:r=>fmt(r.opportunity_left_pct,2)},
+{label:'Baisse évitée',get:r=>fmt(r.downside_avoided_pct,2)},
+{label:'Qualité',get:r=>r.exit_quality_score===''?'-':fmt(r.exit_quality_score,1)+'/100'},
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
@@ -4316,8 +4371,15 @@ def rebuild_adaptive_smart_exit_from_posttrade():
 
         total = int(len(work))
         too_early = int((verdicts == "SORTIE_TROP_TOT").sum())
-        good = int((verdicts == "BONNE_SORTIE").sum())
-        neutral = int((verdicts == "NEUTRE").sum())
+        good = int(verdicts.isin([
+            "BONNE_SORTIE",
+            "TRES_BONNE_SORTIE",
+            "EXCELLENTE_SORTIE",
+        ]).sum())
+        neutral = int(verdicts.isin([
+            "SORTIE_ACCEPTABLE",
+            "NEUTRE",
+        ]).sum())
 
         too_early_ratio = (too_early / total) if total else 0
         good_ratio = (good / total) if total else 0
@@ -5304,7 +5366,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.2 Adaptive Intelligence GitHub Backup démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.3 Adaptive Intelligence Exit Quality démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
