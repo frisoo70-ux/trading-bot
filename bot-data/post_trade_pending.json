@@ -1,18 +1,1 @@
-[
-  {
-    "id": "kSHIB_1783912071035",
-    "date": "2026-07-13 03:07:51",
-    "symbol": "kSHIB",
-    "mode": null,
-    "exit_reason": "ATR_STOP",
-    "entry": 0.004254,
-    "exit": 0.004192,
-    "real_pnl_usdc": null,
-    "pnl_at_exit_pct": -1.4575,
-    "exit_time_ms": 1783912071035,
-    "horizons": {},
-    "max_price": 0.004192,
-    "min_price": 0.004192,
-    "status": "PENDING"
-  }
-]
+[]
