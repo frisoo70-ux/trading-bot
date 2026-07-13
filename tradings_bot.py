@@ -184,6 +184,16 @@ POST_TRADE_FORCE_FINALIZE_AFTER_MS = 4 * 60 * 60 * 1000
 
 # ADAPTIVE SMART EXIT - apprend avec le Post Trade Analyzer
 SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT = True
+
+# SMART EXIT PATIENCE V6.4
+SMART_EXIT_PATIENCE_ENABLED = True
+SMART_EXIT_PATIENCE_MIN_SAMPLE = 3
+SMART_EXIT_PATIENCE_MAX_CANDLES = 2
+SMART_EXIT_PATIENCE_MIN_EXPECTED_IMPROVEMENT_PCT = 0.15
+SMART_EXIT_PATIENCE_CANCEL_HEALTH = 58
+SMART_EXIT_PATIENCE_CRITICAL_HEALTH = 12
+SMART_EXIT_PATIENCE_PEAK_GIVEBACK_PCT = 0.18
+
 SMART_EXIT_ADAPTIVE_MIN_ANALYSES = 8
 SMART_EXIT_ADAPTIVE_WINDOW = 30
 SMART_EXIT_ADAPTIVE_TOO_EARLY_RATIO = 0.50
@@ -299,6 +309,14 @@ trade_state = {
     "mode_f_details_text": None,
     "smart_exit_score": None,
     "smart_exit_health": None,
+    "smart_exit_pending": False,
+    "smart_exit_pending_since": None,
+    "smart_exit_pending_candle_time": None,
+    "smart_exit_wait_candles": 0,
+    "smart_exit_pending_peak": None,
+    "smart_exit_pending_score": None,
+    "smart_exit_pending_reason": None,
+    "smart_exit_learning_note": None,
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
@@ -1313,6 +1331,7 @@ def compute_dashboard_stats():
         "order_state": get_order_state_for_dashboard(),
         "storage_status": persistent_storage_status(),
         "github_sync": github_sync_status(),
+        "smart_exit_patience": smart_exit_patience_snapshot(),
     }
 
     try:
@@ -1453,7 +1472,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.3 Adaptive Intelligence Exit Quality Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.4 Adaptive Intelligence Self-Correcting Smart Exit Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1505,6 +1524,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="mobileHint">Balaye le tableau vers la droite.</div>
     <div class="scroll"><table id="postTrade"></table></div>
   </div>
+  <div class="card" style="margin-top:12px">
+    <h3>🟡 Smart Exit adaptatif</h3>
+    <div id="smartExitPatienceBox" class="aiBox">-</div>
+  </div>
+
   <div class="card" style="margin-top:12px">
     <h3>🧬 Adaptive Intelligence</h3>
     <div id="adaptiveBox" class="aiBox">-</div>
@@ -1625,6 +1649,17 @@ Cache hits: ${hit} | misses: ${miss} | hit rate: ${cacheRate}%
 Dernière erreur: ${s.last_error||'-'}`;
 }
 
+function renderSmartExitPatience(s){
+ if(!s)return '-';
+ return `État: ${s.active?'PRÉ-SORTIE':'NORMAL'}
+Attente prévue: ${s.wait_candles||0} bougie(s)
+Score initial: ${s.score??'-'}
+Pic depuis pré-sortie: ${s.peak??'-'}
+Temps écoulé: ${s.elapsed_seconds||0}s
+Raison: ${s.reason||'-'}
+Apprentissage: ${s.learning_note||'-'}`;
+}
+
 function renderAdaptive(a){
  if(!a){return '-'}
  let out=`Enabled: ${a.enabled}\nMAJ: ${a.last_updated||'-'}\n`;
@@ -1712,6 +1747,7 @@ document.getElementById('apiStatusBox').textContent=renderApiStatus(d.api_status
 document.getElementById('orderStateBox').textContent=renderOrderState(d.order_state);
 document.getElementById('storageStatusBox').textContent=renderStorageStatus(d.storage_status);
 document.getElementById('githubSyncBox').textContent=renderGithubSync(d.github_sync);
+document.getElementById('smartExitPatienceBox').textContent=renderSmartExitPatience(d.smart_exit_patience);
 document.getElementById('aiCoach').textContent=(d.ai_recommendations||[]).map(x=>'• '+x).join('\n')||'-';
 const pts=d.post_trade_summary||{};
 document.getElementById('postTradeSummary').textContent=`En attente ${pts.pending||0} · Terminées ${pts.total||0} · Score moyen ${fmt(pts.score_moyen,1)}/100 · Excellentes ${pts.excellente_sortie||0} · Très bonnes ${pts.tres_bonne_sortie||0} · Bonnes ${pts.bonne_sortie||0} · Acceptables ${pts.sortie_acceptable||0} · Trop tôt ${pts.sortie_trop_tot||0}`;
@@ -3358,6 +3394,14 @@ def reset_trade_state_after_sell(candle_time):
         "mode_f_details_text": None,
         "smart_exit_score": None,
         "smart_exit_health": None,
+    "smart_exit_pending": False,
+    "smart_exit_pending_since": None,
+    "smart_exit_pending_candle_time": None,
+    "smart_exit_wait_candles": 0,
+    "smart_exit_pending_peak": None,
+    "smart_exit_pending_score": None,
+    "smart_exit_pending_reason": None,
+    "smart_exit_learning_note": None,
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
@@ -3379,6 +3423,15 @@ def sync_state_with_position(pos):
         trade_state["highest_price"] = pos["entry"]
         trade_state["trailing_stop"] = None
         trade_state["entry_candle_time"] = int(time.time() * 1000)
+
+    trade_state.setdefault("smart_exit_pending", False)
+    trade_state.setdefault("smart_exit_pending_since", None)
+    trade_state.setdefault("smart_exit_pending_candle_time", None)
+    trade_state.setdefault("smart_exit_wait_candles", 0)
+    trade_state.setdefault("smart_exit_pending_peak", None)
+    trade_state.setdefault("smart_exit_pending_score", None)
+    trade_state.setdefault("smart_exit_pending_reason", None)
+    trade_state.setdefault("smart_exit_learning_note", None)
 
 
 
@@ -4785,11 +4838,155 @@ def is_smart_exit_mode():
     return trade_state.get("signal_mode") in SMART_EXIT_REVERSAL_MODES
 
 
+
+def learn_smart_exit_patience(mode=None, symbol=None):
+    """
+    Apprentissage statistique déterministe :
+    estime si attendre 0, 1 ou 2 bougies aurait historiquement amélioré la sortie.
+    Les statistiques sont filtrées par mode, puis par token si l'échantillon est suffisant.
+    """
+    result = {
+        "wait_candles": 0,
+        "sample_size": 0,
+        "avg_improvement_15m": 0.0,
+        "avg_improvement_30m": 0.0,
+        "confidence": 0.0,
+        "scope": "GLOBAL",
+        "note": "Données insuffisantes",
+    }
+    if not SMART_EXIT_PATIENCE_ENABLED:
+        result["note"] = "Patience désactivée"
+        return result
+
+    try:
+        df = load_post_trade_dataframe()
+        if df.empty:
+            return result
+
+        work = df.copy()
+        if "exit_reason" in work.columns:
+            work = work[
+                work["exit_reason"].astype(str).str.contains(
+                    "SMART_EXIT", case=False, na=False
+                )
+            ].copy()
+
+        def usable(frame):
+            needed = ["pnl_at_exit_pct", "pnl_15m_pct", "pnl_30m_pct"]
+            for col in needed:
+                if col not in frame.columns:
+                    frame[col] = pd.NA
+                frame[col] = pd.to_numeric(frame[col], errors="coerce")
+            return frame.dropna(subset=["pnl_at_exit_pct", "pnl_15m_pct"])
+
+        selected = work
+        scope = "GLOBAL"
+
+        if mode and "mode" in work.columns:
+            by_mode = usable(work[work["mode"].astype(str) == str(mode)].copy())
+            if len(by_mode) >= SMART_EXIT_PATIENCE_MIN_SAMPLE:
+                selected = by_mode
+                scope = f"MODE:{mode}"
+
+        if symbol and "symbol" in work.columns:
+            by_pair = usable(
+                work[
+                    (work["symbol"].astype(str) == str(symbol))
+                    & (work["mode"].astype(str) == str(mode))
+                ].copy()
+            )
+            if len(by_pair) >= SMART_EXIT_PATIENCE_MIN_SAMPLE:
+                selected = by_pair
+                scope = f"{symbol}+{mode}"
+            else:
+                by_symbol = usable(work[work["symbol"].astype(str) == str(symbol)].copy())
+                if len(by_symbol) >= SMART_EXIT_PATIENCE_MIN_SAMPLE and scope == "GLOBAL":
+                    selected = by_symbol
+                    scope = f"TOKEN:{symbol}"
+
+        selected = usable(selected).tail(40)
+        if len(selected) < SMART_EXIT_PATIENCE_MIN_SAMPLE:
+            return result
+
+        improvement_15 = selected["pnl_15m_pct"] - selected["pnl_at_exit_pct"]
+        valid_30 = selected.dropna(subset=["pnl_30m_pct"])
+        improvement_30 = (
+            valid_30["pnl_30m_pct"] - valid_30["pnl_at_exit_pct"]
+            if not valid_30.empty else pd.Series(dtype=float)
+        )
+
+        avg15 = float(improvement_15.mean())
+        avg30 = float(improvement_30.mean()) if not improvement_30.empty else 0.0
+        positive15 = float((improvement_15 > 0).mean())
+        positive30 = float((improvement_30 > 0).mean()) if not improvement_30.empty else 0.0
+
+        wait = 0
+        if avg15 >= SMART_EXIT_PATIENCE_MIN_EXPECTED_IMPROVEMENT_PCT and positive15 >= 0.55:
+            wait = 1
+        if (
+            avg30 >= SMART_EXIT_PATIENCE_MIN_EXPECTED_IMPROVEMENT_PCT + 0.05
+            and positive30 >= 0.55
+            and len(valid_30) >= SMART_EXIT_PATIENCE_MIN_SAMPLE
+        ):
+            wait = 2
+
+        wait = min(wait, SMART_EXIT_PATIENCE_MAX_CANDLES)
+        confidence = min(100.0, len(selected) * 8.0) * max(positive15, positive30, 0.4)
+
+        result.update({
+            "wait_candles": int(wait),
+            "sample_size": int(len(selected)),
+            "avg_improvement_15m": round(avg15, 3),
+            "avg_improvement_30m": round(avg30, 3),
+            "confidence": round(confidence, 1),
+            "scope": scope,
+            "note": (
+                f"{scope} · {len(selected)} analyses · "
+                f"gain moyen attente 15m {avg15:+.3f}% · 30m {avg30:+.3f}%"
+            ),
+        })
+        return result
+    except Exception as e:
+        result["note"] = f"Erreur apprentissage patience: {e}"
+        return result
+
+
+def clear_smart_exit_pending(reason=""):
+    trade_state["smart_exit_pending"] = False
+    trade_state["smart_exit_pending_since"] = None
+    trade_state["smart_exit_pending_candle_time"] = None
+    trade_state["smart_exit_wait_candles"] = 0
+    trade_state["smart_exit_pending_peak"] = None
+    trade_state["smart_exit_pending_score"] = None
+    trade_state["smart_exit_pending_reason"] = reason
+
+
+def smart_exit_patience_snapshot():
+    started = trade_state.get("smart_exit_pending_since")
+    elapsed_seconds = 0
+    if started:
+        try:
+            elapsed_seconds = max(0, int(time.time() - float(started)))
+        except Exception:
+            elapsed_seconds = 0
+    return {
+        "active": bool(trade_state.get("smart_exit_pending")),
+        "wait_candles": int(trade_state.get("smart_exit_wait_candles") or 0),
+        "pending_since": trade_state.get("smart_exit_pending_since"),
+        "pending_candle_time": trade_state.get("smart_exit_pending_candle_time"),
+        "peak": trade_state.get("smart_exit_pending_peak"),
+        "score": trade_state.get("smart_exit_pending_score"),
+        "reason": trade_state.get("smart_exit_pending_reason"),
+        "learning_note": trade_state.get("smart_exit_learning_note"),
+        "elapsed_seconds": elapsed_seconds,
+    }
+
+
 def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_value, pnl_pct, candle_time, min_hold_active):
     """
-    V4.7 FIX :
-    Pour les modes C / D / E / F, on force l'évaluation Smart Exit AVANT toute ancienne sortie EMA20.
-    Retourne True si la fonction a pris la main et qu'il ne faut pas exécuter la suite legacy.
+    V6.4 : Smart Exit avec pré-sortie adaptative.
+    Le délai (0, 1 ou 2 bougies) est appris sur les résultats post-trade.
+    Les protections critiques restent immédiates.
     """
     global LAST_SELL_REASON
 
@@ -4798,32 +4995,31 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
             return False
 
         hard_stop = entry - SMART_EXIT_ATR_STOP_MULT * atr_value
-
         smart_close, smart_tighten, smart_score, smart_details = smart_exit_reversal_decision(
             df, current_price, entry, trade_state.get("signal_mode")
         )
 
+        health = float(smart_details.get("health", 50) or 50)
         trade_state["smart_exit_score"] = round(smart_score, 2)
-        trade_state["smart_exit_health"] = smart_details.get("health")
+        trade_state["smart_exit_health"] = health
 
         print(
             f"[SMART EXIT CHECK] {symbol} mode={trade_state.get('signal_mode')} "
-            f"score={smart_score:.2f} health={smart_details.get('health')} "
-            f"close={smart_close} tighten={smart_tighten} pnl={pnl_pct:.2f}%"
+            f"score={smart_score:.2f} health={health:.1f} "
+            f"close={smart_close} pending={trade_state.get('smart_exit_pending')} "
+            f"pnl={pnl_pct:.2f}%"
         )
 
+        # Sécurité absolue : jamais retardée.
         if current_price <= hard_stop:
+            clear_smart_exit_pending("ATR_STOP")
             LAST_SELL_REASON = "SMART_EXIT_ATR_STOP"
-            print("[SMART EXIT] ATR stop touché. Sortie totale.")
             notify_telegram(
                 f"🛑 <b>SMART EXIT - ATR STOP</b>\n"
-                f"Symbole: {symbol}\n"
-                f"Mode: {trade_state.get('signal_mode')}\n"
-                f"Entry: {entry:.5f}\n"
-                f"Prix: {current_price:.5f}\n"
-                f"Stop: {hard_stop:.5f}\n"
-                f"PnL: {pnl_pct:.2f}%\n"
-                f"Health: {smart_details.get('health')} / 100"
+                f"Symbole: {symbol}\nMode: {trade_state.get('signal_mode')}\n"
+                f"Entry: {entry:.5f}\nPrix: {current_price:.5f}\n"
+                f"Stop: {hard_stop:.5f}\nPnL: {pnl_pct:.2f}%\n"
+                f"Health: {health:.1f}/100"
             )
             if close_position_full(pos, current_price):
                 final_balance = round(get_balance(), 2)
@@ -4831,32 +5027,130 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
                 reset_trade_state_after_sell(candle_time)
             return True
 
-        if smart_close and not min_hold_active:
-            if is_order_blocked(symbol, "SELL"):
-                print(f"[SMART EXIT] Smart Exit déjà en attente. retry={get_order_state_for_dashboard().get('retry_in_seconds')}s")
+        critical_exit = (
+            health <= SMART_EXIT_PATIENCE_CRITICAL_HEALTH
+            or bool(smart_details.get("two_closes_under_ema20"))
+            or (
+                bool(smart_details.get("close_under_ema50"))
+                and bool(smart_details.get("obv_bad"))
+            )
+        )
+
+        # Gestion d'une pré-sortie déjà active.
+        if trade_state.get("smart_exit_pending"):
+            peak = trade_state.get("smart_exit_pending_peak")
+            peak = max(float(peak or current_price), float(current_price))
+            trade_state["smart_exit_pending_peak"] = peak
+
+            peak_giveback_pct = ((peak - float(current_price)) / peak) * 100 if peak else 0
+            tf_ms = get_timeframe_minutes() * 60 * 1000
+            pending_candle = int(trade_state.get("smart_exit_pending_candle_time") or candle_time or 0)
+            elapsed_candles = max(0, int(((candle_time or pending_candle) - pending_candle) // tf_ms))
+            required = int(trade_state.get("smart_exit_wait_candles") or 1)
+
+            recovered = (
+                not smart_close
+                and health >= SMART_EXIT_PATIENCE_CANCEL_HEALTH
+                and not bool(smart_details.get("close_under_ema20"))
+            )
+
+            if recovered:
+                print("[SMART EXIT PATIENCE] Signal récupéré, pré-sortie annulée.")
+                notify_telegram(
+                    f"✅ <b>Pré-sortie annulée</b>\nSymbole: {symbol}\n"
+                    f"Health revenu à {health:.1f}/100\n"
+                    f"Le bot conserve la position."
+                )
+                clear_smart_exit_pending("RECOVERY")
                 return True
 
-            LAST_SELL_REASON = "SMART_EXIT_UNIFIED"
-            print(f"[SMART EXIT] Sortie unifiée score={smart_score} details={smart_details}")
-            notify_telegram(
-                f"📉 <b>SMART EXIT UNIFIÉ - Sortie</b>\n"
-                f"Symbole: {symbol}\n"
-                f"Mode: {trade_state.get('signal_mode')}\n"
-                f"Entry: {entry:.5f}\n"
-                f"Prix: {current_price:.5f}\n"
-                f"PnL: {pnl_pct:.2f}%\n"
-                f"Score sortie: {smart_score:.2f}\n"
-                f"Health: {smart_details.get('health')} / 100\n"
-                f"Seuil mode: {smart_details.get('close_threshold')}\n"
-                f"2 rouges: {smart_details.get('two_red_candles')}\n"
-                f"OBV faible: {smart_details.get('obv_bad')}\n"
-                f"Giveback: {smart_details.get('giveback_pct')}%\n"
-                f"Sous EMA20: {smart_details.get('close_under_ema20')}"
+            confirm_now = (
+                critical_exit
+                or peak_giveback_pct >= SMART_EXIT_PATIENCE_PEAK_GIVEBACK_PCT
+                or elapsed_candles >= required
             )
-            if close_position_full(pos, current_price):
-                final_balance = round(get_balance(), 2)
-                send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
-                reset_trade_state_after_sell(candle_time)
+
+            if confirm_now and not min_hold_active:
+                if is_order_blocked(symbol, "SELL"):
+                    return True
+                LAST_SELL_REASON = (
+                    "SMART_EXIT_CONFIRMED_CRITICAL" if critical_exit
+                    else "SMART_EXIT_CONFIRMED_PATIENCE"
+                )
+                print(
+                    f"[SMART EXIT CONFIRMED] elapsed={elapsed_candles}/{required} "
+                    f"giveback={peak_giveback_pct:.3f}% critical={critical_exit}"
+                )
+                notify_telegram(
+                    f"📉 <b>SMART EXIT CONFIRMÉ</b>\n"
+                    f"Symbole: {symbol}\nMode: {trade_state.get('signal_mode')}\n"
+                    f"Entry: {entry:.5f}\nPrix: {current_price:.5f}\n"
+                    f"PnL: {pnl_pct:.2f}%\nScore: {smart_score:.2f}\n"
+                    f"Health: {health:.1f}/100\n"
+                    f"Attente: {elapsed_candles}/{required} bougie(s)\n"
+                    f"Repli depuis pic attente: {peak_giveback_pct:.3f}%\n"
+                    f"Apprentissage: {trade_state.get('smart_exit_learning_note')}"
+                )
+                if close_position_full(pos, current_price):
+                    final_balance = round(get_balance(), 2)
+                    send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                    reset_trade_state_after_sell(candle_time)
+                return True
+
+            print(
+                f"[SMART EXIT PATIENCE] attente {elapsed_candles}/{required} "
+                f"peak={peak:.6f} giveback={peak_giveback_pct:.3f}%"
+            )
+            return True
+
+        # Nouveau signal de sortie.
+        if smart_close and not min_hold_active:
+            learning = learn_smart_exit_patience(
+                mode=trade_state.get("signal_mode"),
+                symbol=symbol,
+            )
+            wait_candles = int(learning.get("wait_candles", 0) or 0)
+            trade_state["smart_exit_learning_note"] = learning.get("note")
+
+            if critical_exit or wait_candles <= 0:
+                if is_order_blocked(symbol, "SELL"):
+                    return True
+                LAST_SELL_REASON = (
+                    "SMART_EXIT_UNIFIED_CRITICAL" if critical_exit
+                    else "SMART_EXIT_UNIFIED"
+                )
+                notify_telegram(
+                    f"📉 <b>SMART EXIT - Sortie immédiate</b>\n"
+                    f"Symbole: {symbol}\nMode: {trade_state.get('signal_mode')}\n"
+                    f"PnL: {pnl_pct:.2f}%\nScore: {smart_score:.2f}\n"
+                    f"Health: {health:.1f}/100\n"
+                    f"Apprentissage: {learning.get('note')}"
+                )
+                if close_position_full(pos, current_price):
+                    final_balance = round(get_balance(), 2)
+                    send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
+                    reset_trade_state_after_sell(candle_time)
+                return True
+
+            trade_state["smart_exit_pending"] = True
+            trade_state["smart_exit_pending_since"] = time.time()
+            trade_state["smart_exit_pending_candle_time"] = candle_time
+            trade_state["smart_exit_wait_candles"] = wait_candles
+            trade_state["smart_exit_pending_peak"] = float(current_price)
+            trade_state["smart_exit_pending_score"] = round(smart_score, 2)
+            trade_state["smart_exit_pending_reason"] = "STATISTICAL_PATIENCE"
+
+            print(f"[SMART EXIT PRE-EXIT] attente adaptative {wait_candles} bougie(s).")
+            notify_telegram(
+                f"🟡 <b>SMART EXIT - Pré-sortie adaptative</b>\n"
+                f"Symbole: {symbol}\nMode: {trade_state.get('signal_mode')}\n"
+                f"PnL: {pnl_pct:.2f}%\nScore sortie: {smart_score:.2f}\n"
+                f"Health: {health:.1f}/100\n"
+                f"Attente prévue: {wait_candles} bougie(s)\n"
+                f"Confiance statistique: {learning.get('confidence')}%\n"
+                f"{learning.get('note')}\n"
+                f"Le stop ATR reste actif."
+            )
             return True
 
         if smart_tighten:
@@ -4864,18 +5158,8 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
             current_trail = trade_state.get("trailing_stop")
             if current_trail is None or tightened_stop > current_trail:
                 trade_state["trailing_stop"] = tightened_stop
-                print(f"[SMART EXIT] Trailing resserré à {tightened_stop:.5f} score={smart_score:.2f}")
 
-            if trade_state.get("trailing_stop") is not None and current_price <= trade_state["trailing_stop"]:
-                LAST_SELL_REASON = "SMART_EXIT_TIGHT_TRAIL"
-                print("[SMART EXIT] Trailing resserré touché. Sortie totale.")
-                if close_position_full(pos, current_price):
-                    final_balance = round(get_balance(), 2)
-                    send_trade_summary(symbol, current_price, LAST_SELL_REASON, final_balance)
-                    reset_trade_state_after_sell(candle_time)
-                return True
-
-        # Pour C/D/E/F, on empêche les anciennes sorties EMA20 legacy.
+        # Les modes Smart Exit ne passent pas dans les anciennes sorties EMA20.
         return True
 
     except Exception as e:
@@ -4929,7 +5213,7 @@ def manage_open_position(pos, df, current_price, candle_time):
     )
 
     entry_candle_time = trade_state.get("entry_candle_time")
-    min_hold_ms = MIN_HOLD_CANDLES_AFTER_BUY * 15 * 60 * 1000
+    min_hold_ms = MIN_HOLD_CANDLES_AFTER_BUY * get_timeframe_minutes() * 60 * 1000
     min_hold_active = (
         entry_candle_time is not None
         and candle_time is not None
@@ -5337,7 +5621,7 @@ def run():
     migrate_legacy_data_files()
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V4.8 ADAPTIVE INTELLIGENCE")
+    print("BOT MULTI V6.4 ADAPTIVE INTELLIGENCE SELF-CORRECTING")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -5366,7 +5650,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.3 Adaptive Intelligence Exit Quality démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.4 Adaptive Intelligence Self-Correcting Smart Exit démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
