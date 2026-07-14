@@ -5095,7 +5095,7 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
             trade_state["smart_exit_pending_peak"] = peak
 
             peak_giveback_pct = ((peak - float(current_price)) / peak) * 100 if peak else 0
-            tf_ms = get_timeframe_minutes() * 60 * 1000
+            tf_ms = get_active_timeframe_minutes() * 60 * 1000
             pending_candle = int(trade_state.get("smart_exit_pending_candle_time") or candle_time or 0)
             elapsed_candles = max(0, int(((candle_time or pending_candle) - pending_candle) // tf_ms))
             required = int(trade_state.get("smart_exit_wait_candles") or 1)
@@ -5265,7 +5265,7 @@ def manage_open_position(pos, df, current_price, candle_time):
     )
 
     entry_candle_time = trade_state.get("entry_candle_time")
-    min_hold_ms = MIN_HOLD_CANDLES_AFTER_BUY * get_timeframe_minutes() * 60 * 1000
+    min_hold_ms = MIN_HOLD_CANDLES_AFTER_BUY * get_active_timeframe_minutes() * 60 * 1000
     min_hold_active = (
         entry_candle_time is not None
         and candle_time is not None
