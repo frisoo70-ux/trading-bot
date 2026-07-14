@@ -253,6 +253,21 @@ POST_TRADE_DATA_MISSING_STATUS = "DATA_MISSING"
 
 COOLDOWN_CANDLES_AFTER_SELL = 2
 
+# RÉENTRÉE INTELLIGENTE V6.7
+SMART_REENTRY_ENABLED = True
+SMART_REENTRY_OTHER_TOKEN_MIN_SCORE = 3.0
+SMART_REENTRY_OTHER_TOKEN_MIN_TREND_SCORE = 3
+SMART_REENTRY_SAME_TOKEN_MIN_SCORE = 5.0
+SMART_REENTRY_SAME_TOKEN_STRONG_SCORE = 7.0
+SMART_REENTRY_SAME_TOKEN_MIN_TREND_SCORE = 4
+SMART_REENTRY_BLOCKED_EXIT_REASONS = {
+    "ATR_STOP",
+    "SMART_EXIT_ATR_STOP",
+    "MODE_E_ATR_STOP",
+    "SMART_EXIT_CONFIRMED_CRITICAL",
+    "SMART_EXIT_UNIFIED_CRITICAL",
+}
+
 MIN_HOLD_CANDLES_AFTER_BUY = 1
 
 last_candle_times = {symbol: None for symbol in SYMBOLS}
@@ -351,6 +366,12 @@ META_BY_SYMBOL = {}
 SIZE_DECIMALS_BY_SYMBOL = {symbol: 2 for symbol in SYMBOLS}
 LAST_ENTRY_PRICE_BY_SYMBOL = {symbol: None for symbol in SYMBOLS}
 LAST_SELL_REASON = None
+REENTRY_RESCAN_PENDING = False
+LAST_EXIT_SYMBOL = None
+LAST_EXIT_REASON = None
+LAST_EXIT_MODE = None
+LAST_EXIT_CANDLE_TIME = None
+LAST_EXIT_WALL_TIME = None
 TELEGRAM_LAST_UPDATE_ID = None
 
 
@@ -1365,6 +1386,14 @@ def compute_dashboard_stats():
         "storage_status": persistent_storage_status(),
         "github_sync": github_sync_status(),
         "smart_exit_patience": smart_exit_patience_snapshot(),
+        "smart_reentry": {
+            "enabled": SMART_REENTRY_ENABLED,
+            "rescan_pending": REENTRY_RESCAN_PENDING,
+            "last_exit_symbol": LAST_EXIT_SYMBOL,
+            "last_exit_reason": LAST_EXIT_REASON,
+            "last_exit_mode": LAST_EXIT_MODE,
+            "last_exit_candle_time": LAST_EXIT_CANDLE_TIME,
+        },
     }
 
     try:
@@ -1505,7 +1534,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.6 Adaptive Intelligence Dynamic TP1 Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.7 Adaptive Intelligence Smart Reentry Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -3391,6 +3420,15 @@ def close_position_full(pos, price):
 
 def reset_trade_state_after_sell(candle_time):
     global trade_state
+    global REENTRY_RESCAN_PENDING, LAST_EXIT_SYMBOL, LAST_EXIT_REASON
+    global LAST_EXIT_MODE, LAST_EXIT_CANDLE_TIME, LAST_EXIT_WALL_TIME
+
+    LAST_EXIT_SYMBOL = trade_state.get("symbol")
+    LAST_EXIT_REASON = LAST_SELL_REASON
+    LAST_EXIT_MODE = trade_state.get("signal_mode")
+    LAST_EXIT_CANDLE_TIME = candle_time
+    LAST_EXIT_WALL_TIME = time.time()
+    REENTRY_RESCAN_PENDING = True
 
     trade_state = {
         "in_position": False,
@@ -5690,7 +5728,7 @@ def prepare_df_for_symbol(symbol):
     return df, confirmed_time, current_price
 
 
-def scan_symbols_for_best_buy():
+def scan_symbols_for_best_buy(force_rescan=False):
     global last_candle_times
     candidates = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5701,10 +5739,13 @@ def scan_symbols_for_best_buy():
             continue
 
         new_candle = confirmed_time != last_candle_times.get(symbol)
-        if not new_candle:
+        if not new_candle and not force_rescan:
             continue
 
-        last_candle_times[symbol] = confirmed_time
+        # En rescannage après une vente, la bougie est évaluée une seule fois
+        # sans modifier artificiellement son horodatage.
+        if new_candle:
+            last_candle_times[symbol] = confirmed_time
         last = df.iloc[-1]
         ok, score, details = buy_signal(df)
 
@@ -5822,6 +5863,74 @@ def scan_symbols_for_best_buy():
     return candidates[0]
 
 
+
+def evaluate_smart_reentry(candidate, cooldown_until):
+    """
+    Décide si un signal BUY peut contourner le cooldown après une vente.
+    Retourne (autorisé, motif).
+    """
+    if not cooldown_until:
+        return True, "NO_COOLDOWN"
+
+    confirmed_time = candidate.get("confirmed_time")
+    if confirmed_time is None or confirmed_time >= cooldown_until:
+        return True, "COOLDOWN_FINISHED"
+
+    if not SMART_REENTRY_ENABLED:
+        return False, "SMART_REENTRY_DISABLED"
+
+    symbol = candidate.get("symbol")
+    score = float(candidate.get("score", 0) or 0)
+    details = candidate.get("details") or {}
+    trend_score = int(details.get("trend_score", 0) or 0)
+    mode = details.get("signal_mode")
+    breakout = bool(details.get("breakout_ok"))
+    green = bool(details.get("green_candle"))
+    obv = bool(details.get("obv_rising"))
+
+    # Un autre token n'est pas responsable de la sortie précédente.
+    if symbol != LAST_EXIT_SYMBOL:
+        allowed = (
+            score >= SMART_REENTRY_OTHER_TOKEN_MIN_SCORE
+            and trend_score >= SMART_REENTRY_OTHER_TOKEN_MIN_TREND_SCORE
+            and green
+            and (breakout or obv)
+        )
+        return allowed, (
+            f"OTHER_TOKEN score={score:.2f} trend={trend_score} "
+            f"green={green} breakout={breakout} obv={obv}"
+        )
+
+    # Après un stop de sécurité, aucune réentrée immédiate sur le même token.
+    if LAST_EXIT_REASON in SMART_REENTRY_BLOCKED_EXIT_REASONS:
+        return False, f"SAME_TOKEN_BLOCKED_EXIT:{LAST_EXIT_REASON}"
+
+    changed_mode = bool(mode and LAST_EXIT_MODE and mode != LAST_EXIT_MODE)
+    very_strong = score >= SMART_REENTRY_SAME_TOKEN_STRONG_SCORE
+
+    allowed = (
+        score >= SMART_REENTRY_SAME_TOKEN_MIN_SCORE
+        and trend_score >= SMART_REENTRY_SAME_TOKEN_MIN_TREND_SCORE
+        and breakout
+        and green
+        and obv
+        and (changed_mode or very_strong)
+    )
+
+    return allowed, (
+        f"SAME_TOKEN score={score:.2f} trend={trend_score} "
+        f"mode={mode} previous_mode={LAST_EXIT_MODE} changed={changed_mode} "
+        f"strong={very_strong} breakout={breakout} green={green} obv={obv}"
+    )
+
+
+def consume_reentry_rescan():
+    global REENTRY_RESCAN_PENDING
+    force = bool(REENTRY_RESCAN_PENDING)
+    REENTRY_RESCAN_PENDING = False
+    return force
+
+
 def run():
     github_restore_data()
     migrate_legacy_data_files()
@@ -5856,7 +5965,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.6 Adaptive Intelligence Dynamic TP1 démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.7 Adaptive Intelligence Smart Reentry démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -5910,7 +6019,8 @@ def run():
                 continue
 
             cooldown_until = trade_state.get("cooldown_until_candle")
-            best = scan_symbols_for_best_buy()
+            force_reentry_rescan = consume_reentry_rescan()
+            best = scan_symbols_for_best_buy(force_rescan=force_reentry_rescan)
 
             if best is None:
                 time.sleep(CHECK_INTERVAL)
@@ -5922,10 +6032,28 @@ def run():
             last = best["last"]
             details = best["details"]
 
-            if cooldown_until and confirmed_time < cooldown_until:
-                print("[COOLDOWN] Attente après vente.")
+            reentry_allowed, reentry_reason = evaluate_smart_reentry(best, cooldown_until)
+            if not reentry_allowed:
+                print(f"[COOLDOWN] Signal refusé après vente: {reentry_reason}")
+                LOG_HISTORY.append(
+                    f"[REENTRY BLOCK] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"{symbol} {reentry_reason}"
+                )
+                if len(LOG_HISTORY) > MAX_LOG_HISTORY:
+                    del LOG_HISTORY[:-MAX_LOG_HISTORY]
                 time.sleep(CHECK_INTERVAL)
                 continue
+
+            if cooldown_until and confirmed_time < cooldown_until:
+                print(f"[SMART REENTRY] Signal autorisé: {reentry_reason}")
+                notify_telegram(
+                    f"🔄 <b>Réentrée intelligente autorisée</b>\n"
+                    f"Symbole: {symbol}\n"
+                    f"Après sortie: {LAST_EXIT_SYMBOL} / {LAST_EXIT_REASON}\n"
+                    f"Score: {best['score']:.4f}\n"
+                    f"Mode: {details.get('signal_mode')}\n"
+                    f"Raison: {reentry_reason}"
+                )
 
             balance = get_balance()
 
