@@ -116,6 +116,13 @@ ATR_PERIOD = 14
 RSI_BUY_LEVEL = 55
 RSI_BUY_MAX = 70
 
+# TREND SCORE V6.5
+TREND_SCORE_MODE_A_MIN = 6
+TREND_SCORE_MODE_B_MIN = 4
+TREND_SCORE_MODE_D_MIN = 3
+TREND_SCORE_MODE_F_MIN = 2
+
+
 ATR_STOP_MULT = 2.5
 ATR_TP_MULT = 2.0
 ATR_TRAIL_MULT = 1.0
@@ -1472,7 +1479,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.4 Adaptive Intelligence Self-Correcting Smart Exit Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.5 Adaptive Intelligence Trend Score Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -3836,12 +3843,51 @@ def mode_f_context_filter(df, mode_f_score, mode_f_details, volume_ratio):
         return False, {"ok": False, "blocking_reasons": [str(e)]}
 
 
+def calculate_trend_score(df):
+    """Score de tendance progressif sur 8 points, plus explicite qu'un booléen."""
+    try:
+        if len(df) < 6:
+            return 0, {}
+        last = df.iloc[-1]
+        prev1 = df.iloc[-2]
+        prev3 = df.iloc[-4]
+
+        checks = {
+            "ema20_above_ema50": bool(last["ema20"] > last["ema50"]),
+            "close_above_ema20": bool(last["close"] > last["ema20"]),
+            "ema20_rising": bool(last["ema20"] > prev3["ema20"]),
+            "ema50_rising": bool(last["ema50"] > prev3["ema50"]),
+            "higher_close": bool(last["close"] > prev1["close"]),
+            "higher_low": bool(last["low"] > prev1["low"]),
+            "obv_above_ma5": bool(last["obv"] > last["obv_ma5"]),
+        }
+
+        score = 0
+        score += 2 if checks["ema20_above_ema50"] else 0
+        score += 2 if checks["close_above_ema20"] else 0
+        score += 1 if checks["ema20_rising"] else 0
+        score += 1 if checks["ema50_rising"] else 0
+        score += 1 if (checks["higher_close"] and checks["higher_low"]) else 0
+        score += 1 if checks["obv_above_ma5"] else 0
+
+        missing = [name for name, ok in checks.items() if not ok]
+        return int(score), {
+            **checks,
+            "score": int(score),
+            "max_score": 8,
+            "missing": missing,
+        }
+    except Exception as e:
+        return 0, {"score": 0, "max_score": 8, "missing": [str(e)]}
+
+
 def buy_signal(df):
     last = df.iloc[-1]
     prev1 = df.iloc[-2]
     prev2 = df.iloc[-3]
 
-    trend_ok = last["ema20"] > last["ema50"]
+    trend_score, trend_details = calculate_trend_score(df)
+    trend_ok = trend_score >= TREND_SCORE_MODE_A_MIN
     rsi_ok = RSI_BUY_LEVEL < last["rsi"] < RSI_BUY_MAX
     vwap_ok = last["close"] > last["vwap"]
     obv_rising = last["obv"] > last["obv_ma5"]
@@ -3868,7 +3914,7 @@ def buy_signal(df):
     # MODE A : breakout en tendance confirmée.
     # Correction : close doit être au-dessus EMA20.
     mode_a_ok = (
-        trend_ok
+        trend_score >= TREND_SCORE_MODE_A_MIN
         and last["close"] > last["ema20"]
         and rsi_ok
         and vwap_ok
@@ -3882,10 +3928,11 @@ def buy_signal(df):
     # Les entrées entre EMA50 et EMA20 sont réservées au MODE D.
     mode_b_ok = (
         patt_details["pattern_score"] >= 2.0
+        and trend_score >= TREND_SCORE_MODE_B_MIN
         and last["close"] > last["ema20"]
         and breakout_ok
         and obv_rising
-        and vwap_ok
+        and (vwap_ok or trend_score >= 6)
         and green_candle
         and 45 < last["rsi"] < 85
     )
@@ -3901,7 +3948,7 @@ def buy_signal(df):
     # MODE D v2 - Pullback EMA agressif sans condition RSI.
     # D1 : rebond progressif, prix entre EMA basse et EMA haute.
     mode_d_pullback_between_emas = (
-        trend_ok
+        trend_score >= TREND_SCORE_MODE_D_MIN
         and prev1["close"] <= prev_ema_low
         and last["close"] > ema_low
         and last["close"] < ema_high
@@ -3909,7 +3956,7 @@ def buy_signal(df):
 
     # D2 : rebond fort, la bougie traverse EMA basse ET EMA haute d'un coup.
     mode_d_cross_both_emas = (
-        trend_ok
+        trend_score >= TREND_SCORE_MODE_D_MIN
         and prev1["close"] <= prev_ema_low
         and last["close"] >= ema_high
         and green_candle
@@ -3938,7 +3985,7 @@ def buy_signal(df):
 
     mode_f_score, mode_f_details = candle_reversal_patterns(df)
     mode_f_filter_ok, mode_f_filter_details = mode_f_context_filter(df, mode_f_score, mode_f_details, volume_ratio)
-    mode_f_ok = mode_f_filter_ok
+    mode_f_ok = mode_f_filter_ok and trend_score >= TREND_SCORE_MODE_F_MIN
 
     signal_mode = None
     # Activation / désactivation via dashboard
@@ -3977,6 +4024,7 @@ def buy_signal(df):
         + rsi_score
         + patt_score
         + mode_c_score
+        + (trend_score / 8.0) * 2.0
     )
 
     if mode_b_ok:
@@ -3997,6 +4045,10 @@ def buy_signal(df):
 
     return ok, score, {
         "trend_ok": trend_ok,
+        "trend_score": trend_score,
+        "trend_score_max": 8,
+        "trend_details": trend_details,
+        "trend_missing": ",".join(trend_details.get("missing", [])),
         "rsi_ok": rsi_ok,
         "vwap_ok": vwap_ok,
         "obv_rising": obv_rising,
@@ -5533,6 +5585,8 @@ def scan_symbols_for_best_buy():
             symbol,
             "BUY" if ok else "HOLD",
             "| trend:", details["trend_ok"],
+            "| trend_score:", f"{details.get('trend_score')}/8",
+            "| trend_missing:", details.get("trend_missing"),
             "| rsi:", details["rsi_ok"],
             "| vwap:", details["vwap_ok"],
             "| obv:", details["obv_rising"],
@@ -5563,7 +5617,8 @@ def scan_symbols_for_best_buy():
             f"ATR={last['atr']:.5f} VWAP={last['vwap']:.5f} OBV={last['obv']:.2f} OBV_MA5={last['obv_ma5']:.2f}"
         )
         add_log_line(
-            f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} rsi={details['rsi_ok']} "
+            f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} trend_score={details.get('trend_score')}/8 "
+            f"trend_missing={details.get('trend_missing')} rsi={details['rsi_ok']} "
             f"vwap={details['vwap_ok']} obv={details['obv_rising']} breakout={details['breakout_ok']} "
             f"green={details['green_candle']} mode={details.get('signal_mode')} "
             f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} "
@@ -5621,7 +5676,7 @@ def run():
     migrate_legacy_data_files()
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
-    print("BOT MULTI V6.4 ADAPTIVE INTELLIGENCE SELF-CORRECTING")
+    print("BOT MULTI V6.5 ADAPTIVE INTELLIGENCE TREND SCORE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
@@ -5650,7 +5705,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.4 Adaptive Intelligence Self-Correcting Smart Exit démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.5 Adaptive Intelligence Trend Score démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -5746,6 +5801,8 @@ def run():
                 f"Prix: {current_price:.5f}\n"
                 f"Score: {best['score']:.4f}\n"
                 f"Mode: {details.get('signal_mode')}\n"
+                f"Trend score: {details.get('trend_score')}/8\n"
+                f"Trend manquant: {details.get('trend_missing') or 'aucun'}\n"
                 f"Score avant adaptive: {details.get('score_before_adaptive')}\n"
                 f"Adaptive multiplier: {details.get('adaptive_multiplier')}\n"
                 f"Adaptive info: {details.get('adaptive_info')}\n"
