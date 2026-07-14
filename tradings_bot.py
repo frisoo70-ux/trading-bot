@@ -125,6 +125,21 @@ TREND_SCORE_MODE_F_MIN = 2
 
 ATR_STOP_MULT = 2.5
 ATR_TP_MULT = 2.0
+
+# TP1 ADAPTATIF V6.6
+ADAPTIVE_TP1_ENABLED = True
+ADAPTIVE_TP1_WINDOW = 30
+ADAPTIVE_TP1_MIN_SAMPLE = 3
+ADAPTIVE_TP1_MIN_MULT = 0.90
+ADAPTIVE_TP1_MAX_MULT = 2.00
+ADAPTIVE_TP1_MODE_MULT = {
+    "MODE_A_CLASSIQUE": 1.70,
+    "MODE_B_PATTERN": 1.45,
+    "MODE_C_CAPITULATION": 1.15,
+    "MODE_D_EMA_PULLBACK": 1.25,
+    "MODE_E_EARLY_MOMENTUM": 1.35,
+    "MODE_F_CANDLE_REVERSAL": 1.10,
+}
 ATR_TRAIL_MULT = 1.0
 
 # MODE C - Capitulation / rebond après forte baisse
@@ -327,6 +342,9 @@ trade_state = {
     "tp1_price": None,
     "tp1_exec_price": None,
     "tp1_qty": None,
+    "tp1_adaptive_mult": None,
+    "tp1_adaptive_reason": None,
+    "tp1_adaptive_sample": 0,
 }
 
 META_BY_SYMBOL = {}
@@ -1209,7 +1227,15 @@ def get_live_trade_snapshot_v48():
 
         if atr_value and entry:
             if not tp1_price:
-                tp1_price = entry + ATR_TP_MULT * atr_value
+                tp1_price = trade_state.get("tp1_price")
+            if not tp1_price:
+                tp1_info = calculate_adaptive_tp1(
+                    entry=entry,
+                    atr_value=atr_value,
+                    mode=trade_state.get("signal_mode"),
+                    symbol=symbol,
+                )
+                tp1_price = tp1_info["price"]
             hard_stop = entry - ATR_STOP_MULT * atr_value
 
         highest = trade_state.get("highest_price")
@@ -1479,7 +1505,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.5 Adaptive Intelligence Trend Score Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.6 Adaptive Intelligence Dynamic TP1 Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -3412,6 +3438,9 @@ def reset_trade_state_after_sell(candle_time):
         "tp1_price": None,
         "tp1_exec_price": None,
         "tp1_qty": None,
+    "tp1_adaptive_mult": None,
+    "tp1_adaptive_reason": None,
+    "tp1_adaptive_sample": 0,
     }
 
 
@@ -5220,6 +5249,112 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
 
 
 
+
+def _tp1_stats_for_scope(df, mode=None, symbol=None):
+    """Retourne des statistiques prudentes sur les trades comparables."""
+    if df.empty:
+        return None
+
+    work = df.copy()
+    if mode and "mode" in work.columns:
+        scoped = work[work["mode"].astype(str) == str(mode)].copy()
+        if symbol and "symbol" in scoped.columns:
+            pair = scoped[scoped["symbol"].astype(str) == str(symbol)].copy()
+            if len(pair) >= ADAPTIVE_TP1_MIN_SAMPLE:
+                work = pair
+            elif len(scoped) >= ADAPTIVE_TP1_MIN_SAMPLE:
+                work = scoped
+    elif symbol and "symbol" in work.columns:
+        scoped = work[work["symbol"].astype(str) == str(symbol)].copy()
+        if len(scoped) >= ADAPTIVE_TP1_MIN_SAMPLE:
+            work = scoped
+
+    work = work.tail(ADAPTIVE_TP1_WINDOW).copy()
+    if len(work) < ADAPTIVE_TP1_MIN_SAMPLE:
+        return None
+
+    tp1 = work.get("tp1_done", pd.Series(False, index=work.index))
+    tp1_hit = tp1.astype(str).str.lower().eq("true")
+    pnl = pd.to_numeric(work.get("pnl_price_pct"), errors="coerce").fillna(0)
+
+    # Trades positifs qui n'ont pas atteint TP1 :
+    # signal fort que l'objectif est probablement trop éloigné.
+    positive_without_tp1 = ((pnl > 0.10) & (~tp1_hit)).mean()
+    tp1_rate = tp1_hit.mean()
+    median_positive = float(pnl[pnl > 0].median()) if (pnl > 0).any() else 0.0
+
+    return {
+        "sample": int(len(work)),
+        "tp1_rate": float(tp1_rate),
+        "positive_without_tp1": float(positive_without_tp1),
+        "median_positive_pct": median_positive,
+    }
+
+
+def calculate_adaptive_tp1(entry, atr_value, mode=None, symbol=None):
+    """
+    Calcule un TP1 fixé à l'entrée.
+    Il ne se déplace plus ensuite pendant le trade.
+    """
+    base_mult = float(ADAPTIVE_TP1_MODE_MULT.get(mode, ATR_TP_MULT))
+    mult = base_mult
+    reasons = [f"base_{mode or 'DEFAULT'}={base_mult:.2f}ATR"]
+    sample = 0
+
+    if ADAPTIVE_TP1_ENABLED:
+        try:
+            stats = _tp1_stats_for_scope(load_trades_dataframe(), mode=mode, symbol=symbol)
+            if stats:
+                sample = stats["sample"]
+                tp1_rate = stats["tp1_rate"]
+                missed_positive = stats["positive_without_tp1"]
+                median_positive = stats["median_positive_pct"]
+
+                # TP1 rarement atteint : on rapproche progressivement l'objectif.
+                if tp1_rate < 0.20:
+                    mult -= 0.25
+                    reasons.append("TP1<20%:-0.25")
+                elif tp1_rate < 0.35:
+                    mult -= 0.15
+                    reasons.append("TP1<35%:-0.15")
+                elif tp1_rate > 0.65:
+                    mult += 0.10
+                    reasons.append("TP1>65%:+0.10")
+
+                # Beaucoup de trades positifs retournent sans toucher TP1.
+                if missed_positive >= 0.50:
+                    mult -= 0.20
+                    reasons.append("positifs_sans_TP1>=50%:-0.20")
+                elif missed_positive >= 0.30:
+                    mult -= 0.10
+                    reasons.append("positifs_sans_TP1>=30%:-0.10")
+
+                # Si les gains positifs habituels sont modestes par rapport à l'ATR,
+                # on rapproche encore légèrement le TP1.
+                atr_pct = (float(atr_value) / float(entry)) * 100 if entry else 0
+                if atr_pct > 0 and median_positive > 0:
+                    observed_mult = median_positive / atr_pct
+                    target_from_history = max(
+                        ADAPTIVE_TP1_MIN_MULT,
+                        min(ADAPTIVE_TP1_MAX_MULT, observed_mult * 0.90)
+                    )
+                    mult = mult * 0.65 + target_from_history * 0.35
+                    reasons.append(f"historique={target_from_history:.2f}ATR")
+
+        except Exception as e:
+            reasons.append(f"fallback:{e}")
+
+    mult = round(max(ADAPTIVE_TP1_MIN_MULT, min(ADAPTIVE_TP1_MAX_MULT, mult)), 3)
+    price = float(entry) + mult * float(atr_value)
+
+    return {
+        "price": price,
+        "multiplier": mult,
+        "sample": sample,
+        "reason": " | ".join(reasons),
+    }
+
+
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
@@ -5242,7 +5377,21 @@ def manage_open_position(pos, df, current_price, candle_time):
         trade_state["highest_price"] = current_price
 
     pnl_pct = ((current_price - entry) / entry) * 100
-    tp1_price = entry + ATR_TP_MULT * atr_value
+    tp1_price = trade_state.get("tp1_price")
+    if not tp1_price:
+        tp1_info = calculate_adaptive_tp1(
+            entry=entry,
+            atr_value=atr_value,
+            mode=trade_state.get("signal_mode"),
+            symbol=symbol,
+        )
+        tp1_price = tp1_info["price"]
+        trade_state["tp1_price"] = round(tp1_price, 8)
+        trade_state["tp1_adaptive_mult"] = tp1_info["multiplier"]
+        trade_state["tp1_adaptive_reason"] = tp1_info["reason"]
+        trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
+    else:
+        tp1_price = float(tp1_price)
     hard_stop = entry - ATR_STOP_MULT * atr_value
 
     if trade_state["tp1_done"]:
@@ -5456,13 +5605,15 @@ def manage_open_position(pos, df, current_price, candle_time):
         trade_state["tp1_price"] = round(tp1_price, 5)
         trade_state["tp1_exec_price"] = round(current_price, 5)
         trade_state["tp1_qty"] = abs(pos["size"]) * 0.5
-        print("[TP1] Objectif +2 ATR atteint. Vente de 50%.")
+        print(f"[TP1] Objectif adaptatif {trade_state.get('tp1_adaptive_mult')} ATR atteint. Vente de 50%.")
         notify_telegram(
             f"🎯 <b>TP1 atteint</b>\n"
             f"Symbole: {symbol}\n"
             f"Entry: {entry:.5f}\n"
             f"Prix: {current_price:.5f}\n"
             f"TP1: {tp1_price:.5f}\n"
+            f"Multiplicateur: {trade_state.get('tp1_adaptive_mult')} ATR\n"
+            f"Apprentissage: {trade_state.get('tp1_adaptive_reason')}\n"
             f"PnL: {pnl_pct:.2f}%\n"
             f"Solde: {round(get_balance(), 2)} USDC\n"
             f"Action: vente 50%"
@@ -5705,7 +5856,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.5 Adaptive Intelligence Trend Score démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.6 Adaptive Intelligence Dynamic TP1 démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -5882,7 +6033,16 @@ def run():
                 if details.get("signal_mode") in ["MODE_D_EMA_PULLBACK", "MODE_E_EARLY_MOMENTUM"]:
                     trade_state["tp1_price"] = None
                 else:
-                    trade_state["tp1_price"] = round(current_price + ATR_TP_MULT * last["atr"], 5)
+                    tp1_info = calculate_adaptive_tp1(
+                    entry=current_price,
+                    atr_value=last["atr"],
+                    mode=details.get("signal_mode"),
+                    symbol=symbol,
+                )
+                trade_state["tp1_price"] = round(tp1_info["price"], 8)
+                trade_state["tp1_adaptive_mult"] = tp1_info["multiplier"]
+                trade_state["tp1_adaptive_reason"] = tp1_info["reason"]
+                trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
