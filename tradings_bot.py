@@ -61,6 +61,19 @@ POST_TRADE_PENDING_PATH = DATA_DIR / "post_trade_pending.json"
 LAST_MONTHLY_REPORT_FILE = DATA_DIR / "last_monthly_report.txt"
 BOT_CONFIG_PATH = DATA_DIR / "bot_config.json"
 ADAPTIVE_CONFIG_PATH = DATA_DIR / "adaptive_config.json"
+AUTO_OPTIMIZER_PATH = DATA_DIR / "auto_optimizer.json"
+
+# AUTO-OPTIMIZER V6.8
+AUTO_OPTIMIZER_ENABLED = True
+AUTO_OPTIMIZER_WINDOW = 80
+AUTO_OPTIMIZER_MIN_SAMPLE = 4
+AUTO_OPTIMIZER_MIN_TP1_MULT = 0.85
+AUTO_OPTIMIZER_MAX_TP1_MULT = 2.00
+AUTO_OPTIMIZER_MIN_STOP_MULT = 1.60
+AUTO_OPTIMIZER_MAX_STOP_MULT = 3.00
+AUTO_OPTIMIZER_MIN_PATIENCE = 0
+AUTO_OPTIMIZER_MAX_PATIENCE = 2
+
 
 # Sauvegarde GitHub privée (facultative mais recommandée)
 # Variables Railway :
@@ -360,6 +373,12 @@ trade_state = {
     "tp1_adaptive_mult": None,
     "tp1_adaptive_reason": None,
     "tp1_adaptive_sample": 0,
+    "optimizer_profile_key": None,
+    "optimizer_tp1_mult": None,
+    "optimizer_stop_mult": None,
+    "optimizer_patience_candles": None,
+    "optimizer_confidence": None,
+    "optimizer_reason": None,
 }
 
 META_BY_SYMBOL = {}
@@ -1379,6 +1398,7 @@ def compute_dashboard_stats():
         "adaptive": rebuild_adaptive_config_from_trades(),
         "adaptive_smart_exit": rebuild_adaptive_smart_exit_from_posttrade(),
         "auto_learning": rebuild_auto_learning_from_history(),
+        "auto_optimizer": rebuild_auto_optimizer_profiles(),
         "analysis_history": ANALYSIS_HISTORY[-80:],
         "log_history": LOG_HISTORY[-120:],
         "api_status": dict(API_STATS),
@@ -1534,7 +1554,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.7 Adaptive Intelligence Smart Reentry Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.8 Adaptive Intelligence Auto Optimizer Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1589,6 +1609,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="card" style="margin-top:12px">
     <h3>🟡 Smart Exit adaptatif</h3>
     <div id="smartExitPatienceBox" class="aiBox">-</div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>🎛️ Auto-Optimizer</h3>
+    <div id="autoOptimizerBox" class="aiBox">-</div>
   </div>
 
   <div class="card" style="margin-top:12px">
@@ -1720,6 +1745,19 @@ Pic depuis pré-sortie: ${s.peak??'-'}
 Temps écoulé: ${s.elapsed_seconds||0}s
 Raison: ${s.reason||'-'}
 Apprentissage: ${s.learning_note||'-'}`;
+}
+
+function renderAutoOptimizer(o){
+ if(!o)return '-';
+ const profiles=o.profiles||{};
+ const rows=Object.values(profiles).sort((a,b)=>(b.sample||0)-(a.sample||0)).slice(0,12);
+ let out=`Activé: ${o.enabled?'OUI':'NON'}\nMAJ: ${o.updated_at||'-'}\nProfils: ${Object.keys(profiles).length}\n`;
+ rows.forEach(p=>{
+   out+=`\n• ${p.symbol} | ${p.mode} | ${p.timeframe}\n`;
+   out+=`  TP1 ${p.tp1_mult} ATR · Stop ${p.stop_mult} ATR · Patience ${p.patience_candles} bougie(s)\n`;
+   out+=`  ${p.sample} trades · WR ${p.winrate}% · Confiance ${p.confidence}%\n`;
+ });
+ return out;
 }
 
 function renderAdaptive(a){
@@ -3479,6 +3517,12 @@ def reset_trade_state_after_sell(candle_time):
     "tp1_adaptive_mult": None,
     "tp1_adaptive_reason": None,
     "tp1_adaptive_sample": 0,
+    "optimizer_profile_key": None,
+    "optimizer_tp1_mult": None,
+    "optimizer_stop_mult": None,
+    "optimizer_patience_candles": None,
+    "optimizer_confidence": None,
+    "optimizer_reason": None,
     }
 
 
@@ -5229,6 +5273,17 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
                 symbol=symbol,
             )
             wait_candles = int(learning.get("wait_candles", 0) or 0)
+            optimizer_profile = get_optimizer_profile(
+                symbol,
+                trade_state.get("signal_mode"),
+                get_active_timeframe(),
+            )
+            if optimizer_profile and optimizer_profile.get("patience_candles") is not None:
+                wait_candles = int(optimizer_profile.get("patience_candles"))
+                learning["note"] = (
+                    f"{learning.get('note')} | optimizer="
+                    f"{optimizer_profile.get('reason')}"
+                )
             trade_state["smart_exit_learning_note"] = learning.get("note")
 
             if critical_exit or wait_candles <= 0:
@@ -5329,14 +5384,223 @@ def _tp1_stats_for_scope(df, mode=None, symbol=None):
     }
 
 
+
+def _optimizer_default():
+    return {
+        "enabled": AUTO_OPTIMIZER_ENABLED,
+        "updated_at": None,
+        "profiles": {},
+        "global": {
+            "tp1_mult": 1.25,
+            "stop_mult": ATR_STOP_MULT,
+            "patience_candles": 0,
+            "sample": 0,
+            "confidence": 0,
+        },
+    }
+
+
+def load_auto_optimizer():
+    try:
+        if AUTO_OPTIMIZER_PATH.exists():
+            data = json.loads(AUTO_OPTIMIZER_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                base = _optimizer_default()
+                base.update(data)
+                base["profiles"] = data.get("profiles", {}) if isinstance(data.get("profiles"), dict) else {}
+                return base
+    except Exception as e:
+        print("[AUTO OPTIMIZER LOAD ERROR]", e)
+    return _optimizer_default()
+
+
+def save_auto_optimizer(data):
+    try:
+        AUTO_OPTIMIZER_PATH.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        schedule_github_backup(delay_seconds=15)
+        return True
+    except Exception as e:
+        print("[AUTO OPTIMIZER SAVE ERROR]", e)
+        return False
+
+
+def optimizer_profile_key(symbol, mode, timeframe=None):
+    return f"{symbol}|{mode or 'UNKNOWN'}|{timeframe or get_active_timeframe()}"
+
+
+def _clip(value, low, high):
+    return max(low, min(high, value))
+
+
+def rebuild_auto_optimizer_profiles():
+    """
+    Construit des paramètres prudents par token + mode + timeframe.
+    Il s'agit d'une adaptation statistique bornée, pas d'un modèle prédictif.
+    """
+    result = load_auto_optimizer()
+    if not AUTO_OPTIMIZER_ENABLED:
+        result["enabled"] = False
+        return result
+
+    try:
+        trades = load_trades_dataframe()
+        post = load_post_trade_dataframe()
+
+        if trades.empty:
+            result["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_auto_optimizer(result)
+            return result
+
+        work = trades.tail(AUTO_OPTIMIZER_WINDOW).copy()
+        for col in ["pnl_price_pct", "real_pnl_usdc", "smart_exit_health"]:
+            if col in work.columns:
+                work[col] = pd.to_numeric(work[col], errors="coerce")
+
+        if "timeframe" not in work.columns:
+            work["timeframe"] = get_active_timeframe()
+        work["timeframe"] = work["timeframe"].fillna(get_active_timeframe()).astype(str)
+        work["mode"] = work.get("mode", "").fillna("UNKNOWN").astype(str)
+        work["symbol"] = work.get("symbol", "").fillna("").astype(str)
+        work["tp1_hit"] = work.get("tp1_done", False).astype(str).str.lower().eq("true")
+
+        post_map = {}
+        if not post.empty:
+            post = post.copy()
+            for c in ["pnl_at_exit_pct", "pnl_15m_pct", "pnl_30m_pct", "max_gain_after_exit_pct"]:
+                if c in post.columns:
+                    post[c] = pd.to_numeric(post[c], errors="coerce")
+            if "mode" in post.columns and "symbol" in post.columns:
+                for (sym, mode), g in post.groupby(["symbol", "mode"], dropna=False):
+                    g = g.tail(AUTO_OPTIMIZER_WINDOW)
+                    imp15 = (g["pnl_15m_pct"] - g["pnl_at_exit_pct"]).dropna() if "pnl_15m_pct" in g else pd.Series(dtype=float)
+                    imp30 = (g["pnl_30m_pct"] - g["pnl_at_exit_pct"]).dropna() if "pnl_30m_pct" in g else pd.Series(dtype=float)
+                    post_map[(str(sym), str(mode))] = {
+                        "imp15": float(imp15.mean()) if not imp15.empty else 0.0,
+                        "imp30": float(imp30.mean()) if not imp30.empty else 0.0,
+                        "n": int(len(g)),
+                    }
+
+        profiles = {}
+        for (symbol, mode, timeframe), g in work.groupby(["symbol", "mode", "timeframe"], dropna=False):
+            if not symbol or len(g) < AUTO_OPTIMIZER_MIN_SAMPLE:
+                continue
+
+            pnl_pct = pd.to_numeric(g["pnl_price_pct"], errors="coerce").dropna()
+            real_pnl = pd.to_numeric(g.get("real_pnl_usdc"), errors="coerce").dropna()
+            tp1_rate = float(g["tp1_hit"].mean())
+            positive_without_tp1 = float(((g["pnl_price_pct"].fillna(0) > 0.10) & (~g["tp1_hit"])).mean())
+            winrate = float((real_pnl > 0).mean()) if not real_pnl.empty else float((pnl_pct > 0).mean())
+            avg_pnl = float(real_pnl.mean()) if not real_pnl.empty else float(pnl_pct.mean() if not pnl_pct.empty else 0)
+
+            # TP1: rapprocher si rarement atteint, éloigner légèrement s'il est trop facile.
+            base_tp1 = float(ADAPTIVE_TP1_MODE_MULT.get(mode, 1.25))
+            tp1_mult = base_tp1
+            if tp1_rate < 0.20:
+                tp1_mult -= 0.25
+            elif tp1_rate < 0.35:
+                tp1_mult -= 0.15
+            elif tp1_rate > 0.70:
+                tp1_mult += 0.10
+            if positive_without_tp1 >= 0.50:
+                tp1_mult -= 0.20
+            elif positive_without_tp1 >= 0.30:
+                tp1_mult -= 0.10
+            tp1_mult = round(_clip(tp1_mult, AUTO_OPTIMIZER_MIN_TP1_MULT, AUTO_OPTIMIZER_MAX_TP1_MULT), 3)
+
+            # Stop: réduire légèrement si les pertes sont fréquentes, sans devenir excessivement serré.
+            stop_mult = float(ATR_STOP_MULT)
+            loss_rate = 1.0 - winrate
+            median_loss_pct = abs(float(pnl_pct[pnl_pct < 0].median())) if (pnl_pct < 0).any() else 0.0
+            if loss_rate >= 0.70 and avg_pnl < 0:
+                stop_mult -= 0.35
+            elif loss_rate >= 0.55 and avg_pnl < 0:
+                stop_mult -= 0.20
+            if median_loss_pct > 0.60:
+                stop_mult -= 0.15
+            if winrate >= 0.60 and avg_pnl > 0:
+                stop_mult += 0.10
+            stop_mult = round(_clip(stop_mult, AUTO_OPTIMIZER_MIN_STOP_MULT, AUTO_OPTIMIZER_MAX_STOP_MULT), 3)
+
+            # Patience: attendre seulement si les sorties passées auraient bénéficié de 15/30 min.
+            ps = post_map.get((str(symbol), str(mode)), {"imp15": 0, "imp30": 0, "n": 0})
+            patience = 0
+            if ps["n"] >= AUTO_OPTIMIZER_MIN_SAMPLE and ps["imp15"] >= 0.15:
+                patience = 1
+            if ps["n"] >= AUTO_OPTIMIZER_MIN_SAMPLE and ps["imp30"] >= 0.25:
+                patience = 2
+            patience = int(_clip(patience, AUTO_OPTIMIZER_MIN_PATIENCE, AUTO_OPTIMIZER_MAX_PATIENCE))
+
+            confidence = round(min(100.0, len(g) * 8.0), 1)
+            key = optimizer_profile_key(symbol, mode, timeframe)
+            profiles[key] = {
+                "symbol": str(symbol),
+                "mode": str(mode),
+                "timeframe": str(timeframe),
+                "sample": int(len(g)),
+                "winrate": round(winrate * 100, 1),
+                "avg_pnl": round(avg_pnl, 4),
+                "tp1_rate": round(tp1_rate * 100, 1),
+                "positive_without_tp1": round(positive_without_tp1 * 100, 1),
+                "tp1_mult": tp1_mult,
+                "stop_mult": stop_mult,
+                "patience_candles": patience,
+                "post_exit_improvement_15m": round(ps["imp15"], 3),
+                "post_exit_improvement_30m": round(ps["imp30"], 3),
+                "confidence": confidence,
+                "reason": (
+                    f"{len(g)} trades | WR {winrate*100:.1f}% | "
+                    f"TP1 {tp1_rate*100:.1f}% | +15m {ps['imp15']:+.3f}%"
+                ),
+            }
+
+        result.update({
+            "enabled": True,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "profiles": profiles,
+        })
+        save_auto_optimizer(result)
+        return result
+
+    except Exception as e:
+        print("[AUTO OPTIMIZER BUILD ERROR]", e)
+        result["last_error"] = str(e)
+        return result
+
+
+def get_optimizer_profile(symbol, mode, timeframe=None):
+    try:
+        data = load_auto_optimizer()
+        key = optimizer_profile_key(symbol, mode, timeframe)
+        profile = data.get("profiles", {}).get(key)
+        if profile:
+            return profile
+
+        # Recalcul au besoin, puis nouvelle tentative.
+        data = rebuild_auto_optimizer_profiles()
+        return data.get("profiles", {}).get(key)
+    except Exception as e:
+        print("[AUTO OPTIMIZER PROFILE ERROR]", e)
+        return None
+
+
 def calculate_adaptive_tp1(entry, atr_value, mode=None, symbol=None):
     """
     Calcule un TP1 fixé à l'entrée.
     Il ne se déplace plus ensuite pendant le trade.
     """
-    base_mult = float(ADAPTIVE_TP1_MODE_MULT.get(mode, ATR_TP_MULT))
+    profile = get_optimizer_profile(symbol, mode, get_active_timeframe())
+    base_mult = float(
+        profile.get("tp1_mult")
+        if profile and profile.get("tp1_mult") is not None
+        else ADAPTIVE_TP1_MODE_MULT.get(mode, ATR_TP_MULT)
+    )
     mult = base_mult
     reasons = [f"base_{mode or 'DEFAULT'}={base_mult:.2f}ATR"]
+    if profile:
+        reasons.append(f"optimizer:{profile.get('reason')}")
     sample = 0
 
     if ADAPTIVE_TP1_ENABLED:
@@ -5430,7 +5694,33 @@ def manage_open_position(pos, df, current_price, candle_time):
         trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
     else:
         tp1_price = float(tp1_price)
-    hard_stop = entry - ATR_STOP_MULT * atr_value
+    optimizer_profile = get_optimizer_profile(
+        symbol,
+        trade_state.get("signal_mode"),
+        get_active_timeframe(),
+    )
+    stop_mult = float(
+        optimizer_profile.get("stop_mult")
+        if optimizer_profile and optimizer_profile.get("stop_mult") is not None
+        else ATR_STOP_MULT
+    )
+    hard_stop = entry - stop_mult * atr_value
+    trade_state["optimizer_profile_key"] = optimizer_profile_key(
+        symbol, trade_state.get("signal_mode"), get_active_timeframe()
+    )
+    trade_state["optimizer_tp1_mult"] = (
+        optimizer_profile.get("tp1_mult") if optimizer_profile else None
+    )
+    trade_state["optimizer_stop_mult"] = stop_mult
+    trade_state["optimizer_patience_candles"] = (
+        optimizer_profile.get("patience_candles") if optimizer_profile else None
+    )
+    trade_state["optimizer_confidence"] = (
+        optimizer_profile.get("confidence") if optimizer_profile else None
+    )
+    trade_state["optimizer_reason"] = (
+        optimizer_profile.get("reason") if optimizer_profile else "profil insuffisant"
+    )
 
     if trade_state["tp1_done"]:
         trailing = trade_state["highest_price"] - ATR_TRAIL_MULT * atr_value
@@ -5934,6 +6224,7 @@ def consume_reentry_rescan():
 def run():
     github_restore_data()
     migrate_legacy_data_files()
+    rebuild_auto_optimizer_profiles()
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
     print("BOT MULTI V6.5 ADAPTIVE INTELLIGENCE TREND SCORE")
@@ -5965,7 +6256,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.7 Adaptive Intelligence Smart Reentry démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.8 Adaptive Intelligence Auto Optimizer démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
