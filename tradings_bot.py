@@ -1554,7 +1554,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.8 Adaptive Intelligence Auto Optimizer Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.8.1 Adaptive Intelligence Auto Optimizer TP1 Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -6256,7 +6256,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.8 Adaptive Intelligence Auto Optimizer démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.8.1.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -6450,18 +6450,23 @@ def run():
                 trade_state["mode_f_score"] = details.get("mode_f_score")
                 trade_state["mode_f_details_text"] = details.get("mode_f_details_text")
                 if details.get("signal_mode") in ["MODE_D_EMA_PULLBACK", "MODE_E_EARLY_MOMENTUM"]:
+                    # Pour ces modes, le TP1 sera calculé au premier cycle
+                    # de gestion de la position.
                     trade_state["tp1_price"] = None
+                    trade_state["tp1_adaptive_mult"] = None
+                    trade_state["tp1_adaptive_reason"] = "Calcul au premier cycle de gestion"
+                    trade_state["tp1_adaptive_sample"] = 0
                 else:
                     tp1_info = calculate_adaptive_tp1(
-                    entry=current_price,
-                    atr_value=last["atr"],
-                    mode=details.get("signal_mode"),
-                    symbol=symbol,
-                )
-                trade_state["tp1_price"] = round(tp1_info["price"], 8)
-                trade_state["tp1_adaptive_mult"] = tp1_info["multiplier"]
-                trade_state["tp1_adaptive_reason"] = tp1_info["reason"]
-                trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
+                        entry=current_price,
+                        atr_value=last["atr"],
+                        mode=details.get("signal_mode"),
+                        symbol=symbol,
+                    )
+                    trade_state["tp1_price"] = round(tp1_info["price"], 8)
+                    trade_state["tp1_adaptive_mult"] = tp1_info["multiplier"]
+                    trade_state["tp1_adaptive_reason"] = tp1_info["reason"]
+                    trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
