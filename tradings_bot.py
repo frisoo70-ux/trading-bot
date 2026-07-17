@@ -261,6 +261,10 @@ AUTO_LEARNING_BAD_AVG_PNL = -0.06
 AUTO_LEARNING_GOOD_WINRATE = 58.0
 AUTO_LEARNING_GOOD_AVG_PNL = 0.04
 AUTO_LEARNING_DISABLE_MULT = 0.45
+# Aucun blocage Auto Learning n'est définitif.
+# Un élément mauvais passe en quarantaine, puis revient automatiquement en phase de retest.
+AUTO_LEARNING_BLOCK_HOURS = 12
+AUTO_LEARNING_RETEST_TRADES = 3
 POST_TRADE_RECALC_HISTORICAL_ENABLED = True
 POST_TRADE_DATA_MISSING_STATUS = "DATA_MISSING"
 
@@ -1070,6 +1074,10 @@ def default_adaptive_config():
             "blocked_modes": [],
             "blocked_patterns": [],
             "blocked_tokens": [],
+            "temporary_blocks": {"modes": {}, "patterns": {}, "tokens": {}},
+            "retesting_modes": [],
+            "retesting_patterns": [],
+            "retesting_tokens": [],
             "notes": [],
             "last_updated": None,
         },
@@ -1554,7 +1562,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.9.0 Adaptive Intelligence Auto Optimizer Dashboard Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.9.1 Adaptive Intelligence Auto Optimizer Dashboard Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1785,9 +1793,13 @@ function renderAdaptive(a){
  out+='\nAuto Learning V6:\n';
  out+=`• Recommandation: ${al.recommendation||'-'} | Auto: ${al.auto_apply?'ON':'OFF'} | Trades: ${al.sample_size??0}\n`;
  out+=`• WR: ${al.winrate??0}% | PnL fenêtre: ${al.pnl_total??0} USDC\n`;
- if((al.blocked_modes||[]).length){out+=`• Modes bloqués: ${(al.blocked_modes||[]).join(', ')}\n`;}
- if((al.blocked_patterns||[]).length){out+=`• Patterns bloqués: ${(al.blocked_patterns||[]).join(', ')}\n`;}
- if((al.blocked_tokens||[]).length){out+=`• Tokens bloqués: ${(al.blocked_tokens||[]).join(', ')}\n`;}
+ if((al.blocked_modes||[]).length){out+=`• Modes en quarantaine: ${(al.blocked_modes||[]).join(', ')}\n`;}
+ if((al.blocked_patterns||[]).length){out+=`• Patterns en quarantaine: ${(al.blocked_patterns||[]).join(', ')}\n`;}
+ if((al.blocked_tokens||[]).length){out+=`• Tokens en quarantaine: ${(al.blocked_tokens||[]).join(', ')}\n`;}
+ if((al.retesting_modes||[]).length){out+=`• Modes en retest: ${(al.retesting_modes||[]).join(', ')}\n`;}
+ if((al.retesting_patterns||[]).length){out+=`• Patterns en retest: ${(al.retesting_patterns||[]).join(', ')}\n`;}
+ if((al.retesting_tokens||[]).length){out+=`• Tokens en retest: ${(al.retesting_tokens||[]).join(', ')}\n`;}
+ out+=`• Quarantaine: ${al.block_duration_hours||12} h · Retest: ${al.retest_trade_count||3} trade(s)\n`;
  (al.notes||[]).forEach(n=>{out+=`• ${n}\n`;});
  return out;
 }
@@ -4421,6 +4433,93 @@ def _al_stats(df, col, min_trades):
     return out
 
 
+def _al_parse_datetime(value):
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _al_temporary_status(stats, previous_states, now=None):
+    """Construit les quarantaines temporaires et les phases de retest.
+
+    Cycle : mauvais -> quarantaine temporaire -> retest sur N nouveaux trades
+    -> réactivation si amélioration, sinon nouvelle quarantaine.
+    Rien n'est bloqué définitivement.
+    """
+    now = now or datetime.now()
+    states = previous_states if isinstance(previous_states, dict) else {}
+    new_states = {}
+    blocked = []
+    retesting = []
+
+    for key, info in (stats or {}).items():
+        trade_count = int(info.get("trades", 0) or 0)
+        bad_now = float(info.get("multiplier", 1.0) or 1.0) <= AUTO_LEARNING_DISABLE_MULT
+        previous = states.get(key, {}) if isinstance(states.get(key, {}), dict) else {}
+        status = str(previous.get("status", ""))
+
+        if status == "blocked":
+            until = _al_parse_datetime(previous.get("blocked_until"))
+            if until and now < until:
+                state = dict(previous)
+                state["last_seen_trades"] = trade_count
+                new_states[key] = state
+                blocked.append(key)
+                continue
+
+            # Fin automatique de quarantaine : phase de retest obligatoire.
+            state = {
+                "status": "retesting",
+                "retest_started_at": now.isoformat(timespec="seconds"),
+                "retest_start_trades": trade_count,
+                "retest_until_trades": trade_count + AUTO_LEARNING_RETEST_TRADES,
+                "last_seen_trades": trade_count,
+            }
+            new_states[key] = state
+            retesting.append(key)
+            continue
+
+        if status == "retesting":
+            target = int(previous.get("retest_until_trades", trade_count + AUTO_LEARNING_RETEST_TRADES) or 0)
+            if trade_count < target:
+                state = dict(previous)
+                state["last_seen_trades"] = trade_count
+                new_states[key] = state
+                retesting.append(key)
+                continue
+
+            # Le quota de retest est atteint : décision avec les statistiques actualisées.
+            if bad_now:
+                until = now + pd.Timedelta(hours=AUTO_LEARNING_BLOCK_HOURS)
+                state = {
+                    "status": "blocked",
+                    "blocked_at": now.isoformat(timespec="seconds"),
+                    "blocked_until": until.to_pydatetime().isoformat(timespec="seconds"),
+                    "last_seen_trades": trade_count,
+                    "reason": "performance_insuffisante_apres_retest",
+                }
+                new_states[key] = state
+                blocked.append(key)
+            # Sinon, aucune entrée persistée : l'élément redevient pleinement actif.
+            continue
+
+        # Premier passage sous le seuil : quarantaine limitée dans le temps.
+        if bad_now:
+            until = now + pd.Timedelta(hours=AUTO_LEARNING_BLOCK_HOURS)
+            state = {
+                "status": "blocked",
+                "blocked_at": now.isoformat(timespec="seconds"),
+                "blocked_until": until.to_pydatetime().isoformat(timespec="seconds"),
+                "last_seen_trades": trade_count,
+                "reason": "performance_insuffisante",
+            }
+            new_states[key] = state
+            blocked.append(key)
+
+    return new_states, blocked, retesting
+
+
 def rebuild_auto_learning_from_history():
     try:
         cfg = load_adaptive_config()
@@ -4441,6 +4540,10 @@ def rebuild_auto_learning_from_history():
                 "blocked_modes": [],
                 "blocked_patterns": [],
                 "blocked_tokens": [],
+                "temporary_blocks": {"modes": {}, "patterns": {}, "tokens": {}},
+                "retesting_modes": [],
+                "retesting_patterns": [],
+                "retesting_tokens": [],
                 "notes": ["Aucun trade disponible."],
                 "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
@@ -4459,9 +4562,22 @@ def rebuild_auto_learning_from_history():
         pattern_mult = _al_stats(work, "auto_pattern", AUTO_LEARNING_MIN_TRADES_PATTERN)
         token_mult = _al_stats(work, "symbol", AUTO_LEARNING_MIN_TRADES_TOKEN)
 
-        blocked_modes = [k for k, v in mode_mult.items() if v.get("multiplier") <= AUTO_LEARNING_DISABLE_MULT]
-        blocked_patterns = [k for k, v in pattern_mult.items() if v.get("multiplier") <= AUTO_LEARNING_DISABLE_MULT]
-        blocked_tokens = [k for k, v in token_mult.items() if v.get("multiplier") <= AUTO_LEARNING_DISABLE_MULT]
+        previous_blocks = al.get("temporary_blocks", {}) if isinstance(al.get("temporary_blocks", {}), dict) else {}
+        now_dt = datetime.now()
+        mode_states, blocked_modes, retesting_modes = _al_temporary_status(
+            mode_mult, previous_blocks.get("modes", {}), now_dt
+        )
+        pattern_states, blocked_patterns, retesting_patterns = _al_temporary_status(
+            pattern_mult, previous_blocks.get("patterns", {}), now_dt
+        )
+        token_states, blocked_tokens, retesting_tokens = _al_temporary_status(
+            token_mult, previous_blocks.get("tokens", {}), now_dt
+        )
+        temporary_blocks = {
+            "modes": mode_states,
+            "patterns": pattern_states,
+            "tokens": token_states,
+        }
 
         total = len(work)
         pnl_total = round(float(work["real_pnl_usdc"].sum()), 4)
@@ -4470,11 +4586,17 @@ def rebuild_auto_learning_from_history():
 
         notes = []
         if blocked_modes:
-            notes.append("Modes à bloquer: " + ", ".join(blocked_modes))
+            notes.append("Modes en quarantaine temporaire: " + ", ".join(blocked_modes))
         if blocked_patterns:
-            notes.append("Patterns à bloquer: " + ", ".join(blocked_patterns))
+            notes.append("Patterns en quarantaine temporaire: " + ", ".join(blocked_patterns))
         if blocked_tokens:
-            notes.append("Tokens à bloquer: " + ", ".join(blocked_tokens))
+            notes.append("Tokens en quarantaine temporaire: " + ", ".join(blocked_tokens))
+        if retesting_modes:
+            notes.append("Modes en retest automatique: " + ", ".join(retesting_modes))
+        if retesting_patterns:
+            notes.append("Patterns en retest automatique: " + ", ".join(retesting_patterns))
+        if retesting_tokens:
+            notes.append("Tokens en retest automatique: " + ", ".join(retesting_tokens))
 
         try:
             post = load_post_trade_dataframe()
@@ -4509,6 +4631,12 @@ def rebuild_auto_learning_from_history():
             "blocked_modes": blocked_modes,
             "blocked_patterns": blocked_patterns,
             "blocked_tokens": blocked_tokens,
+            "temporary_blocks": temporary_blocks,
+            "retesting_modes": retesting_modes,
+            "retesting_patterns": retesting_patterns,
+            "retesting_tokens": retesting_tokens,
+            "block_duration_hours": AUTO_LEARNING_BLOCK_HOURS,
+            "retest_trade_count": AUTO_LEARNING_RETEST_TRADES,
             "notes": notes,
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
@@ -6275,7 +6403,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.9.0.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.9.1.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
