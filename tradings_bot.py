@@ -1554,7 +1554,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.8.1 Adaptive Intelligence Auto Optimizer TP1 Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.8.2 Adaptive Intelligence Auto Optimizer Dashboard Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1748,15 +1748,21 @@ Apprentissage: ${s.learning_note||'-'}`;
 }
 
 function renderAutoOptimizer(o){
- if(!o)return '-';
+ if(!o)return 'Données Auto-Optimizer indisponibles.';
  const profiles=o.profiles||{};
  const rows=Object.values(profiles).sort((a,b)=>(b.sample||0)-(a.sample||0)).slice(0,12);
- let out=`Activé: ${o.enabled?'OUI':'NON'}\nMAJ: ${o.updated_at||'-'}\nProfils: ${Object.keys(profiles).length}\n`;
+ let out=`Activé: ${o.enabled?'OUI':'NON'}\nMAJ: ${o.updated_at||'-'}\nProfils actifs: ${Object.keys(profiles).length}\n`;
+ if(rows.length===0){
+   out+='\nAucun profil appliqué pour le moment. Il faut au moins 4 trades comparables pour une même combinaison token + mode + timeframe.';
+   if(o.last_error){out+=`\nErreur: ${o.last_error}`;}
+   return out;
+ }
  rows.forEach(p=>{
    out+=`\n• ${p.symbol} | ${p.mode} | ${p.timeframe}\n`;
    out+=`  TP1 ${p.tp1_mult} ATR · Stop ${p.stop_mult} ATR · Patience ${p.patience_candles} bougie(s)\n`;
    out+=`  ${p.sample} trades · WR ${p.winrate}% · Confiance ${p.confidence}%\n`;
  });
+ if(o.last_error){out+=`\nDernière erreur: ${o.last_error}`;}
  return out;
 }
 
@@ -1842,6 +1848,7 @@ const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'W
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
 lastTrades=(d.recent_trades||[]).slice().reverse();
 table('recentTrades',[{label:'Date',key:'date'},{label:'Coin',key:'symbol'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Entry',key:'entry'},{label:'Exit',key:'exit'},{label:'Sortie',key:'exit_reason'},{label:'TP1',key:'tp1_done'},{label:'PnL %',get:r=>fmt(r.pnl_price_pct,2),cls:v=>cls(v)},{label:'USDC',get:r=>fmt(r.real_pnl_usdc,4),cls:v=>cls(v)},{label:'Pattern F',get:r=>r._mode_f_pattern_label||r.mode_f_pattern||'-'}],lastTrades,true);
+document.getElementById('autoOptimizerBox').textContent=renderAutoOptimizer(d.auto_optimizer);
 document.getElementById('adaptiveBox').textContent=renderAdaptive(d.adaptive);
 document.getElementById('apiStatusBox').textContent=renderApiStatus(d.api_status);
 document.getElementById('orderStateBox').textContent=renderOrderState(d.order_state);
@@ -6256,7 +6263,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.8.1.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.8.2.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
