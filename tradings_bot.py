@@ -1554,7 +1554,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.8.2 Adaptive Intelligence Auto Optimizer Dashboard Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
+<header><h1>🤖 Trading Bot</h1><div class="sub">Dashboard iPhone · V6.9.0 Adaptive Intelligence Auto Optimizer Dashboard Fix Live PnL Robust · Modes A/B/C/D/E/F · SOL / XRP / kSHIB</div></header>
 <div class="wrap">
   <div class="grid cards">
     <div class="card"><div class="muted">Solde</div><div id="balance" class="metric">-</div></div>
@@ -1806,7 +1806,7 @@ function openTradeModal(i){const r=lastTrades[i];if(!r)return;const html=`<div c
 <div class="aiBox">${esc(r._mode_f_pattern_details||'Aucun pattern Mode F enregistré pour ce trade.')}</div>
 <h3 style="margin-top:16px">🧠 Analyse IA</h3>
 <div class="aiBox">${esc(r._ai_comment||'-')}</div>`;document.getElementById('tradeDetailContent').innerHTML=html;document.getElementById('tradeModal').style.display='block'}
-function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E',MODE_F_CANDLE_REVERSAL:'Mode F'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA, sortie sous EMA20.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('');const opts=['1m','3m','5m','15m'];document.getElementById('timeframeToggles').innerHTML=opts.map(tf=>`<label class="toggle"><span>${tf}</span><input type="radio" name="timeframe" data-timeframe="${tf}" ${cfg.timeframe===tf?'checked':''}></label>`).join('');document.getElementById('activeTimeframeLabel').textContent='Timeframe actif : '+(cfg.timeframe||'15m')}
+function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E',MODE_F_CANDLE_REVERSAL:'Mode F'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA confirmé : D1 désactivé, D2 attend une bougie de confirmation.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('');const opts=['1m','3m','5m','15m'];document.getElementById('timeframeToggles').innerHTML=opts.map(tf=>`<label class="toggle"><span>${tf}</span><input type="radio" name="timeframe" data-timeframe="${tf}" ${cfg.timeframe===tf?'checked':''}></label>`).join('');document.getElementById('activeTimeframeLabel').textContent='Timeframe actif : '+(cfg.timeframe||'15m')}
 async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
 
 function renderLiveTradeV48(live){
@@ -4055,32 +4055,41 @@ def buy_signal(df):
         and 45 < last["rsi"] < 85
     )
 
-    # MODE D - Pullback EMA agressif sans condition RSI.
-    # En tendance haussière EMA20 > EMA50 :
-    # achat dès que la clôture repasse au-dessus de l'EMA basse = EMA50,
-    # tant que le prix reste encore sous EMA20.
+    # MODE D v3 - Pullback EMA confirmé.
+    # Les statistiques ont montré que D1_BETWEEN_EMAS provoquait trop de faux rebonds.
+    # D1 est donc désactivé temporairement.
+    # D2 n'achète plus sur la bougie de franchissement : il attend UNE clôture
+    # supplémentaire qui confirme réellement la reprise au-dessus des deux EMA.
     ema_low = min(last["ema20"], last["ema50"])
     ema_high = max(last["ema20"], last["ema50"])
     prev_ema_low = min(prev1["ema20"], prev1["ema50"])
+    prev_ema_high = max(prev1["ema20"], prev1["ema50"])
+    prev2_ema_low = min(prev2["ema20"], prev2["ema50"])
 
-    # MODE D v2 - Pullback EMA agressif sans condition RSI.
-    # D1 : rebond progressif, prix entre EMA basse et EMA haute.
-    mode_d_pullback_between_emas = (
-        trend_score >= TREND_SCORE_MODE_D_MIN
-        and prev1["close"] <= prev_ema_low
-        and last["close"] > ema_low
-        and last["close"] < ema_high
+    # D1 désactivé : prix seulement entre les EMA = confirmation insuffisante.
+    mode_d_pullback_between_emas = False
+
+    # Bougie précédente = bougie de reprise initiale ayant traversé les deux EMA.
+    mode_d_previous_cross = (
+        prev2["close"] <= prev2_ema_low
+        and prev1["close"] >= prev_ema_high
+        and prev1["close"] > prev1["open"]
     )
 
-    # D2 : rebond fort, la bougie traverse EMA basse ET EMA haute d'un coup.
+    # Bougie actuelle = confirmation obligatoire.
+    # Conditions renforcées : tendance plus solide, maintien au-dessus des deux EMA,
+    # clôture supérieure, bougie verte et OBV positif.
     mode_d_cross_both_emas = (
-        trend_score >= TREND_SCORE_MODE_D_MIN
-        and prev1["close"] <= prev_ema_low
+        trend_score >= max(TREND_SCORE_MODE_D_MIN + 1, 4)
+        and mode_d_previous_cross
         and last["close"] >= ema_high
+        and last["close"] > prev1["close"]
+        and last["low"] >= (ema_low * 0.998)
         and green_candle
+        and obv_rising
     )
 
-    mode_d_ok = mode_d_pullback_between_emas or mode_d_cross_both_emas
+    mode_d_ok = mode_d_cross_both_emas
 
     # MODE E - Early Momentum :
     # Volume explosif + OBV positif + bougie impulsive + cassure EMA20.
@@ -4182,6 +4191,9 @@ def buy_signal(df):
         "mode_d_ok": mode_d_ok,
         "mode_d_pullback_between_emas": mode_d_pullback_between_emas,
         "mode_d_cross_both_emas": mode_d_cross_both_emas,
+        "mode_d_previous_cross": mode_d_previous_cross,
+        "mode_d_confirmation_required": True,
+        "mode_d_d1_disabled": True,
         "mode_e_ok": mode_e_ok,
         "mode_e_volume_ratio": round(volume_ratio, 2),
         "mode_e_body_ratio": round(body_ratio, 2),
@@ -6263,7 +6275,7 @@ def run():
     initialize_telegram_offset()
 
     notify_telegram(
-        "🤖 <b>BOT MULTI V6.8.2.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
+        "🤖 <b>BOT MULTI V6.9.0.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
         f"Coins: {', '.join(SYMBOLS)}\n"
         f"Max position: 1\n"
         f"Solde: {start_balance} USDC\n"
@@ -6400,8 +6412,8 @@ def run():
                 f"Mode C Volume OK: {details.get('mode_c_volume_ok')}\n"
                 f"Mode C Wick OK: {details.get('mode_c_wick_ok')}\n"
                 f"Mode D: {details.get('mode_d_ok')}\n"
-                f"Mode D type D1 entre EMA: {details.get('mode_d_pullback_between_emas')}\n"
-                f"Mode D type D2 cross double EMA: {details.get('mode_d_cross_both_emas')}\n"
+                f"Mode D D1 désactivé: {not details.get('mode_d_pullback_between_emas')}\n"
+                f"Mode D D2 confirmé sur bougie suivante: {details.get('mode_d_cross_both_emas')}\n"
                 f"Mode D EMA basse: {details.get('mode_d_entry_ema_low')}\n"
                 f"Mode D EMA haute cible: {details.get('mode_d_target_ema_high')}\n"
                 f"Mode D sortie: clôture sous EMA20\n"
