@@ -45,7 +45,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 SYMBOLS = ["SOL", "XRP", "kSHIB"]
-TRADE_SIZE_USD = 30
+TRADE_SIZE_USD = 25
 CHECK_INTERVAL = 60
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
