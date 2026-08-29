@@ -64,7 +64,7 @@ ADAPTIVE_CONFIG_PATH = DATA_DIR / "adaptive_config.json"
 AUTO_OPTIMIZER_PATH = DATA_DIR / "auto_optimizer.json"
 
 # AUTO-OPTIMIZER V6.8
-AUTO_OPTIMIZER_ENABLED = True
+AUTO_OPTIMIZER_ENABLED = False
 AUTO_OPTIMIZER_WINDOW = 80
 AUTO_OPTIMIZER_MIN_SAMPLE = 4
 AUTO_OPTIMIZER_MIN_TP1_MULT = 0.85
@@ -73,6 +73,24 @@ AUTO_OPTIMIZER_MIN_STOP_MULT = 1.60
 AUTO_OPTIMIZER_MAX_STOP_MULT = 3.00
 AUTO_OPTIMIZER_MIN_PATIENCE = 0
 AUTO_OPTIMIZER_MAX_PATIENCE = 2
+
+# ============================================================
+# V7 STABILISATION / PROTECTION
+# Basée sur l'analyse des 241 trades fournis.
+# - désactive les deux systèmes adaptatifs qui apprenaient trop tôt
+# - supprime la sortie mécanique EMA20 après 2 clôtures
+# - remet MODE D/E dans la gestion standard quand Smart Exit n'est pas actif
+# - utilise un ATR de référence robuste pour éviter les stops trop serrés
+# ============================================================
+V7_STABILIZATION_ENABLED = True
+V7_DISABLE_AUTO_OPTIMIZER = True
+V7_DISABLE_AUTO_LEARNING = True
+V7_DISABLE_ADAPTIVE_BLOCKING = True
+V7_EMA20_EXIT_ENABLED = False
+V7_DYNAMIC_ATR_STOP_ENABLED = True
+V7_ATR_STOP_MULT = 2.8
+V7_SMART_EXIT_ATR_STOP_MULT = 2.8
+V7_ATR_REFERENCE_MIN_FACTOR = 0.85
 
 
 # Sauvegarde GitHub privée (facultative mais recommandée)
@@ -214,11 +232,11 @@ SMART_EXIT_HEALTH_EXIT_LEVEL = {
 }
 SMART_EXIT_TIGHTEN_SCORE = 4
 SMART_EXIT_VOLUME_MULT = 1.3
-SMART_EXIT_ATR_STOP_MULT = 2.5
+SMART_EXIT_ATR_STOP_MULT = 2.8
 POST_TRADE_FORCE_FINALIZE_AFTER_MS = 4 * 60 * 60 * 1000
 
 # ADAPTIVE SMART EXIT - apprend avec le Post Trade Analyzer
-SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT = True
+SMART_EXIT_ADAPTIVE_ENABLED_DEFAULT = False
 
 # SMART EXIT PATIENCE V6.4
 SMART_EXIT_PATIENCE_ENABLED = True
@@ -250,8 +268,8 @@ ADAPTIVE_HARD_BLOCK_MULT = 0.65
 ADAPTIVE_RECENT_TRADES_WINDOW = 50
 
 # AUTO LEARNING V6
-AUTO_LEARNING_ENABLED_DEFAULT = True
-AUTO_LEARNING_AUTO_APPLY_DEFAULT = True
+AUTO_LEARNING_ENABLED_DEFAULT = False
+AUTO_LEARNING_AUTO_APPLY_DEFAULT = False
 AUTO_LEARNING_WINDOW = 80
 AUTO_LEARNING_MIN_TRADES_MODE = 8
 AUTO_LEARNING_MIN_TRADES_PATTERN = 5
@@ -1199,6 +1217,8 @@ def get_adaptive_multiplier(symbol, mode, details=None):
         return 1.0, {"enabled": False, "error": str(e)}
 
 def should_adaptive_block(symbol, mode, details=None):
+    if V7_STABILIZATION_ENABLED and V7_DISABLE_ADAPTIVE_BLOCKING:
+        return False, 1.0, {"enabled": False, "reason": "V7 stabilization"}
     mult, info = get_adaptive_multiplier(symbol, mode, details)
     return mult <= ADAPTIVE_HARD_BLOCK_MULT, mult, info
 
@@ -4650,6 +4670,8 @@ def rebuild_auto_learning_from_history():
 
 def get_auto_learning_adjustment(mode=None, symbol=None, pattern=None):
     try:
+        if V7_STABILIZATION_ENABLED and V7_DISABLE_AUTO_LEARNING:
+            return {"multiplier": 1.0, "blocked": False, "reasons": ["V7 stabilization"]}
         al = load_adaptive_config().get("auto_learning", {})
         if not al or not al.get("enabled", True) or not al.get("auto_apply", True):
             return {"multiplier": 1.0, "blocked": False, "reasons": []}
@@ -4797,6 +4819,14 @@ def rebuild_adaptive_smart_exit_from_posttrade():
 
 def get_adaptive_smart_exit_adjustment():
     try:
+        if V7_STABILIZATION_ENABLED:
+            return {
+                "level": 0,
+                "threshold_bonus": 0,
+                "health_bonus": 0,
+                "tighten_bonus": 0,
+                "recommendation": "V7 stabilization",
+            }
         cfg = load_adaptive_config()
         se = cfg.get("smart_exit", {})
         if not se or not se.get("enabled", True) or not se.get("auto_apply", True):
@@ -4870,10 +4900,8 @@ def smart_exit_reversal_decision(df, current_price, entry_price, mode=None):
         pnl_pct = ((float(current_price) - float(entry_price)) / float(entry_price)) * 100 if entry_price else 0
 
         score = float(bearish_score)
-        if close_under_ema20:
-            score += 2.0
-        if two_closes_under_ema20:
-            score += 1.5
+        # V7 : EMA20 seule ne déclenche plus de score de sortie.
+        # Elle reste informative dans details, mais n'est plus une raison suffisante pour sortir.
         if close_under_ema50:
             score += 2.5
         if obv_bad:
@@ -4912,8 +4940,7 @@ def smart_exit_reversal_decision(df, current_price, entry_price, mode=None):
 
         health = 100.0
         health -= min(score * 7.0, 70)
-        if close_under_ema20:
-            health -= 8
+        # V7 : pas de pénalité Health pour une simple clôture sous EMA20.
         if close_under_ema50:
             health -= 12
         if obv_bad:
@@ -5304,7 +5331,9 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
         if not is_smart_exit_mode():
             return False
 
-        hard_stop = entry - SMART_EXIT_ATR_STOP_MULT * atr_value
+        stop_atr = get_v7_atr_reference(trade_state.get("entry_atr"), atr_value)
+        smart_stop_mult = V7_SMART_EXIT_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else SMART_EXIT_ATR_STOP_MULT
+        hard_stop = entry - smart_stop_mult * stop_atr
         smart_close, smart_tighten, smart_score, smart_details = smart_exit_reversal_decision(
             df, current_price, entry, trade_state.get("signal_mode")
         )
@@ -5339,7 +5368,6 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
 
         critical_exit = (
             health <= SMART_EXIT_PATIENCE_CRITICAL_HEALTH
-            or bool(smart_details.get("two_closes_under_ema20"))
             or (
                 bool(smart_details.get("close_under_ema50"))
                 and bool(smart_details.get("obv_bad"))
@@ -5361,7 +5389,6 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
             recovered = (
                 not smart_close
                 and health >= SMART_EXIT_PATIENCE_CANCEL_HEALTH
-                and not bool(smart_details.get("close_under_ema20"))
             )
 
             if recovered:
@@ -5475,7 +5502,7 @@ def apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_va
             return True
 
         if smart_tighten:
-            tightened_stop = current_price - 0.8 * atr_value
+            tightened_stop = current_price - 0.8 * get_v7_atr_reference(trade_state.get("entry_atr"), atr_value)
             current_trail = trade_state.get("trailing_stop")
             if current_trail is None or tightened_stop > current_trail:
                 trade_state["trailing_stop"] = tightened_stop
@@ -5719,6 +5746,8 @@ def rebuild_auto_optimizer_profiles():
 
 def get_optimizer_profile(symbol, mode, timeframe=None):
     try:
+        if V7_STABILIZATION_ENABLED and V7_DISABLE_AUTO_OPTIMIZER:
+            return None
         data = load_auto_optimizer()
         key = optimizer_profile_key(symbol, mode, timeframe)
         profile = data.get("profiles", {}).get(key)
@@ -5804,13 +5833,30 @@ def calculate_adaptive_tp1(entry, atr_value, mode=None, symbol=None):
     }
 
 
+def get_v7_atr_reference(entry_atr, current_atr):
+    """ATR de référence V7 : évite qu'un stop basé sur un ATR d'entrée
+    trop faible soit déclenché par le bruit normal du marché."""
+    try:
+        e = float(entry_atr or 0)
+        c = float(current_atr or 0)
+        if e <= 0:
+            return c
+        if not V7_STABILIZATION_ENABLED or not V7_DYNAMIC_ATR_STOP_ENABLED or c <= 0:
+            return e
+        return max(e, c * V7_ATR_REFERENCE_MIN_FACTOR)
+    except Exception:
+        return float(entry_atr or current_atr or 0)
+
+
 def manage_open_position(pos, df, current_price, candle_time):
     global trade_state, LAST_SELL_REASON
     symbol = pos["symbol"]
     last = df.iloc[-1]
 
     entry = trade_state["entry_price"] or pos["entry"]
-    atr_value = trade_state["entry_atr"] or last["atr"]
+    current_atr = last["atr"]
+    atr_value = trade_state["entry_atr"] or current_atr
+    atr_stop_value = get_v7_atr_reference(trade_state.get("entry_atr"), current_atr)
 
     if atr_value is None or pd.isna(atr_value) or atr_value <= 0:
         print("[INFO] ATR indisponible pour gestion position.")
@@ -5851,7 +5897,8 @@ def manage_open_position(pos, df, current_price, candle_time):
         if optimizer_profile and optimizer_profile.get("stop_mult") is not None
         else ATR_STOP_MULT
     )
-    hard_stop = entry - stop_mult * atr_value
+    effective_stop_mult = V7_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else stop_mult
+    hard_stop = entry - effective_stop_mult * atr_stop_value
     trade_state["optimizer_profile_key"] = optimizer_profile_key(
         symbol, trade_state.get("signal_mode"), get_active_timeframe()
     )
@@ -5870,7 +5917,7 @@ def manage_open_position(pos, df, current_price, candle_time):
     )
 
     if trade_state["tp1_done"]:
-        trailing = trade_state["highest_price"] - ATR_TRAIL_MULT * atr_value
+        trailing = trade_state["highest_price"] - ATR_TRAIL_MULT * atr_stop_value
         trade_state["trailing_stop"] = trailing
         trailing_hit = current_price <= trailing
         trailing_display = f"{trailing:.5f}"
@@ -5896,7 +5943,7 @@ def manage_open_position(pos, df, current_price, candle_time):
         and candle_time < entry_candle_time + min_hold_ms
     )
 
-    ema_break = raw_ema_break and not min_hold_active
+    ema_break = raw_ema_break and not min_hold_active and V7_EMA20_EXIT_ENABLED
     hard_stop_hit = current_price <= hard_stop
 
     print(
@@ -5914,7 +5961,7 @@ def manage_open_position(pos, df, current_price, candle_time):
     if apply_smart_exit_before_legacy(symbol, pos, df, current_price, entry, atr_value, pnl_pct, candle_time, min_hold_active):
         return
 
-    if trade_state.get("signal_mode") == "MODE_D_EMA_PULLBACK" and not is_smart_exit_mode():
+    if trade_state.get("signal_mode") == "MODE_D_EMA_PULLBACK" and not is_smart_exit_mode() and V7_EMA20_EXIT_ENABLED:
         if not min_hold_active and last["close"] < last["ema20"]:
             LAST_SELL_REASON = "MODE_D_CLOSE_UNDER_EMA20"
             print("[MODE D] Clôture sous EMA20. Sortie totale.")
@@ -5960,7 +6007,7 @@ def manage_open_position(pos, df, current_price, candle_time):
     # Gestion spéciale MODE E :
     # Pas de TP1, pas de vente partielle.
     # Sorties : 2 clôtures sous EMA20 ou ATR stop x2.5.
-    if trade_state.get("signal_mode") == "MODE_E_EARLY_MOMENTUM" and not is_smart_exit_mode():
+    if trade_state.get("signal_mode") == "MODE_E_EARLY_MOMENTUM" and not is_smart_exit_mode() and V7_EMA20_EXIT_ENABLED:
         mode_e_stop = entry - MODE_E_ATR_STOP_MULT * atr_value
         mode_e_ema_break = (
             not min_hold_active
@@ -6010,7 +6057,9 @@ def manage_open_position(pos, df, current_price, candle_time):
 
     # SMART EXIT pour les modes de retournement C / E / F
     if trade_state.get("signal_mode") in SMART_EXIT_REVERSAL_MODES:
-        hard_stop = entry - SMART_EXIT_ATR_STOP_MULT * atr_value
+        stop_atr = get_v7_atr_reference(trade_state.get("entry_atr"), atr_value)
+        smart_stop_mult = V7_SMART_EXIT_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else SMART_EXIT_ATR_STOP_MULT
+        hard_stop = entry - smart_stop_mult * stop_atr
 
         if current_price <= hard_stop:
             LAST_SELL_REASON = "SMART_EXIT_ATR_STOP"
