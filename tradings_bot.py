@@ -3485,9 +3485,37 @@ def place_order_usd(symbol, side, size_usd, price, reduce_only=False):
     return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
 
 
+# Hyperliquid refuse les ordres dont la valeur notionnelle est < 10 USDC.
+# Avec un petit compte, 50% d'une position peut donc être sous le minimum.
+# Dans ce cas, on ferme la position entière plutôt que d'envoyer en boucle un TP1 invalide.
+MIN_ORDER_NOTIONAL_USD = 10.05  # petite marge pour éviter un ordre à 9.99/10.00 après arrondi
+
 def close_position_fraction(pos, fraction, price):
     symbol = pos["symbol"]
-    qty = abs(pos["size"]) * fraction
+    total_qty = abs(float(pos.get("size", 0) or 0))
+    qty = total_qty * fraction
+    notional = qty * float(price)
+
+    if qty <= 0 or float(price) <= 0:
+        print(f"[SELL] Taille invalide: {symbol} qty={qty} price={price}")
+        return False
+
+    # Une réduction partielle sous le minimum d'Hyperliquid est refusée.
+    # Si la position totale respecte le minimum, on la ferme entièrement.
+    if fraction < 1.0 and notional < MIN_ORDER_NOTIONAL_USD:
+        total_notional = total_qty * float(price)
+        if total_notional >= MIN_ORDER_NOTIONAL_USD:
+            print(
+                f"[TP1] 50% impossible: valeur partielle={notional:.2f} USDC < "
+                f"minimum={MIN_ORDER_NOTIONAL_USD:.2f}. Fermeture totale pour éviter la boucle d'erreur."
+            )
+            return place_order_qty(symbol, "SELL", total_qty, price, reduce_only=True)
+        print(
+            f"[TP1] Position entière sous le minimum: {total_notional:.2f} USDC. "
+            "Aucun ordre envoyé."
+        )
+        return False
+
     return place_order_qty(symbol, "SELL", qty, price, reduce_only=True)
 
 
@@ -6125,25 +6153,44 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
     if not trade_state["tp1_done"] and current_price >= tp1_price:
-        LAST_SELL_REASON = "TP1_PARTIAL"
         trade_state["tp1_price"] = round(tp1_price, 5)
         trade_state["tp1_exec_price"] = round(current_price, 5)
-        trade_state["tp1_qty"] = abs(pos["size"]) * 0.5
-        print(f"[TP1] Objectif adaptatif {trade_state.get('tp1_adaptive_mult')} ATR atteint. Vente de 50%.")
-        notify_telegram(
-            f"🎯 <b>TP1 atteint</b>\n"
-            f"Symbole: {symbol}\n"
-            f"Entry: {entry:.5f}\n"
-            f"Prix: {current_price:.5f}\n"
-            f"TP1: {tp1_price:.5f}\n"
-            f"Multiplicateur: {trade_state.get('tp1_adaptive_mult')} ATR\n"
-            f"Apprentissage: {trade_state.get('tp1_adaptive_reason')}\n"
-            f"PnL: {pnl_pct:.2f}%\n"
-            f"Solde: {round(get_balance(), 2)} USDC\n"
-            f"Action: vente 50%"
+        partial_qty = abs(pos["size"]) * 0.5
+        partial_notional = partial_qty * current_price
+        total_notional = abs(pos["size"]) * current_price
+
+        # Si 50% est sous le minimum de 10 USDC, close_position_fraction()
+        # bascule automatiquement sur une fermeture totale.
+        LAST_SELL_REASON = (
+            "TP1_PARTIAL" if partial_notional >= MIN_ORDER_NOTIONAL_USD
+            else "TP1_MIN_ORDER_FULL_CLOSE"
         )
+
+        action_text = (
+            "vente 50%" if partial_notional >= MIN_ORDER_NOTIONAL_USD
+            else "position trop petite pour 50% → vente 100%"
+        )
+        print(
+            f"[TP1] Objectif adaptatif {trade_state.get('tp1_adaptive_mult')} ATR atteint. "
+            f"Partiel={partial_notional:.2f} USDC / Total={total_notional:.2f} USDC | {action_text}"
+        )
+
         if close_position_fraction(pos, 0.5, current_price):
             trade_state["tp1_done"] = True
+            notify_telegram(
+                f"🎯 <b>TP1 exécuté</b>\n"
+                f"Symbole: {symbol}\n"
+                f"Entry: {entry:.5f}\n"
+                f"Prix: {current_price:.5f}\n"
+                f"TP1: {tp1_price:.5f}\n"
+                f"Multiplicateur: {trade_state.get('tp1_adaptive_mult')} ATR\n"
+                f"Apprentissage: {trade_state.get('tp1_adaptive_reason')}\n"
+                f"PnL: {pnl_pct:.2f}%\n"
+                f"Solde: {round(get_balance(), 2)} USDC\n"
+                f"Action: {action_text}"
+            )
+        else:
+            print("[TP1] Ordre non exécuté; TP1 reste en attente sans notifier un faux TP1.")
         return
 
     if hard_stop_hit:
