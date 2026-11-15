@@ -305,6 +305,16 @@ SMART_REENTRY_BLOCKED_EXIT_REASONS = {
 
 MIN_HOLD_CANDLES_AFTER_BUY = 1
 
+# MODE L - Liquidity Sweep (pools, sweep/reclaim, directionnel)
+MODE_L_ENABLED_DEFAULT = True
+MODE_L_LOOKBACK = 30
+MODE_L_PIVOT_LEFT = 2
+MODE_L_PIVOT_RIGHT = 2
+MODE_L_EQUAL_TOL_PCT = 0.0015
+MODE_L_SWEEP_BUFFER_ATR = 0.08
+MODE_L_ATR_STOP_MULT = 1.8
+MODE_L_MIN_RR = 1.25
+
 last_candle_times = {symbol: None for symbol in SYMBOLS}
 
 # Historique en mémoire pour commandes Telegram /analysis et /log
@@ -401,6 +411,7 @@ trade_state = {
     "optimizer_patience_candles": None,
     "optimizer_confidence": None,
     "optimizer_reason": None,
+    "mode_l_side": None, "mode_l_stop": None, "mode_l_target": None, "mode_l_liquidity": None,
 }
 
 META_BY_SYMBOL = {}
@@ -1410,6 +1421,8 @@ def compute_dashboard_stats():
             "profit_factor": 0,
         },
         "by_mode": [],
+        "mode_l_stats": {"trades": 0, "wins": 0, "losses": 0, "pnl": 0, "winrate": 0},
+        "mode_l_live": {"active": trade_state.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP", "side": trade_state.get("mode_l_side"), "liquidity": trade_state.get("mode_l_liquidity"), "stop": trade_state.get("mode_l_stop"), "target": trade_state.get("mode_l_target")},
         "by_symbol": [],
         "by_exit_reason": [],
         "recent_trades": [],
@@ -1525,6 +1538,10 @@ def compute_dashboard_stats():
         return sorted(rows, key=lambda x: x["pnl"], reverse=True)
 
     result["by_mode"] = grouped_stats("mode")
+    mode_l_df=df[df.get("mode",pd.Series(index=df.index,dtype=str)).astype(str).str.contains("MODE_L",na=False)]
+    if not mode_l_df.empty:
+        lp=pd.to_numeric(mode_l_df["real_pnl_usdc"],errors="coerce").fillna(0)
+        result["mode_l_stats"]={"trades":int(len(lp)),"wins":int((lp>0).sum()),"losses":int((lp<0).sum()),"pnl":round(float(lp.sum()),4),"winrate":round(float((lp>0).mean()*100),2)}
     result["by_symbol"] = grouped_stats("symbol")
     result["by_exit_reason"] = grouped_stats("exit_reason")
 
@@ -2469,7 +2486,7 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
     if not entry:
         return None
 
-    pnl_pct = ((exit_price - entry) / entry) * 100
+    pnl_pct = (((entry - exit_price) if trade_state.get("mode_l_side") == "SHORT" else (exit_price - entry)) / entry) * 100
     real_pnl = ""
 
     if entry_balance is not None:
@@ -3509,14 +3526,14 @@ def close_position_fraction(pos, fraction, price):
                 f"[TP1] 50% impossible: valeur partielle={notional:.2f} USDC < "
                 f"minimum={MIN_ORDER_NOTIONAL_USD:.2f}. Fermeture totale pour éviter la boucle d'erreur."
             )
-            return place_order_qty(symbol, "SELL", total_qty, price, reduce_only=True)
+            return place_order_qty(symbol, "BUY" if float(pos.get("size",0))<0 else "SELL", total_qty, price, reduce_only=True)
         print(
             f"[TP1] Position entière sous le minimum: {total_notional:.2f} USDC. "
             "Aucun ordre envoyé."
         )
         return False
 
-    return place_order_qty(symbol, "SELL", qty, price, reduce_only=True)
+    return place_order_qty(symbol, "BUY" if float(pos.get("size",0))<0 else "SELL", qty, price, reduce_only=True)
 
 
 def close_position_full(pos, price):
@@ -4059,6 +4076,55 @@ def calculate_trend_score(df):
         return 0, {"score": 0, "max_score": 8, "missing": [str(e)]}
 
 
+
+def detect_liquidity_sweep(df):
+    """Pools de liquidité par pivots/equal highs-lows, sweep puis reclaim confirmé."""
+    if df is None or len(df) < MODE_L_LOOKBACK + 5:
+        return {"valid": False, "side": None, "reason": "historique insuffisant"}
+    w=df.iloc[-(MODE_L_LOOKBACK+3):-1]
+    last=df.iloc[-1]; prev=df.iloc[-2]; atr=float(last.get("atr",0) or 0)
+    if atr<=0: return {"valid":False,"side":None,"reason":"ATR invalide"}
+    highs=[]; lows=[]; hv=w.high.astype(float).tolist(); lv=w.low.astype(float).tolist()
+    for i in range(MODE_L_PIVOT_LEFT,len(w)-MODE_L_PIVOT_RIGHT):
+        if hv[i]>=max(hv[i-MODE_L_PIVOT_LEFT:i+MODE_L_PIVOT_RIGHT+1]): highs.append(hv[i])
+        if lv[i]<=min(lv[i-MODE_L_PIVOT_LEFT:i+MODE_L_PIVOT_RIGHT+1]): lows.append(lv[i])
+    def pools(values):
+        out=[]
+        for x in values:
+            group=[v for v in values if abs(v-x)/max(abs(x),1e-12)<=MODE_L_EQUAL_TOL_PCT]
+            if len(group)>=2 and not any(abs(y-x)/max(abs(x),1e-12)<=MODE_L_EQUAL_TOL_PCT for y in out): out.append(sum(group)/len(group))
+        return sorted(out)
+    hp=pools(highs); lp=pools(lows)
+    sh=[x for x in hp if prev.high>x+MODE_L_SWEEP_BUFFER_ATR*atr and prev.close<x]
+    sl=[x for x in lp if prev.low<x-MODE_L_SWEEP_BUFFER_ATR*atr and prev.close>x]
+    if sl and last.close>last.open and last.close>min(sl):
+        level=min(sl); targets=[x for x in hp if x>last.close]; target=min(targets) if targets else last.close+2*atr
+        stop=min(prev.low,last.low)-MODE_L_ATR_STOP_MULT*atr
+        return {"valid":True,"side":"LONG","level":level,"sweep_extreme":float(prev.low),"stop":float(stop),"target":float(target),"atr":atr,"pools_high":hp,"pools_low":lp,"reason":"sell-side sweep + reclaim"}
+    if sh and last.close<last.open and last.close>0 and last.close<max(sh):
+        level=max(sh); targets=[x for x in lp if x<last.close]; target=max(targets) if targets else last.close-2*atr
+        stop=max(prev.high,last.high)+MODE_L_ATR_STOP_MULT*atr
+        return {"valid":True,"side":"SHORT","level":level,"sweep_extreme":float(prev.high),"stop":float(stop),"target":float(target),"atr":atr,"pools_high":hp,"pools_low":lp,"reason":"buy-side sweep + reclaim"}
+    return {"valid":False,"side":None,"pools_high":hp,"pools_low":lp,"reason":"aucun sweep confirmé"}
+
+
+def manage_mode_l_position(pos, df, current_price, candle_time):
+    """Gestion du Mode L, stop directionnel + TP poche de liquidité."""
+    global LAST_SELL_REASON
+    side=trade_state.get("mode_l_side") or ("SHORT" if float(pos.get("size",0))<0 else "LONG")
+    entry=float(trade_state.get("entry_price") or pos.get("entry") or current_price)
+    atr=float(trade_state.get("entry_atr") or df.iloc[-1]["atr"])
+    stop=float(trade_state.get("mode_l_stop") or (entry-MODE_L_ATR_STOP_MULT*atr if side=="LONG" else entry+MODE_L_ATR_STOP_MULT*atr))
+    target=float(trade_state.get("mode_l_target") or (entry+2*atr if side=="LONG" else entry-2*atr))
+    stop_hit=current_price<=stop if side=="LONG" else current_price>=stop
+    tp_hit=current_price>=target if side=="LONG" else current_price<=target
+    if stop_hit or tp_hit:
+        LAST_SELL_REASON="MODE_L_SWEEP_INVALIDATION" if stop_hit else "MODE_L_LIQUIDITY_TP"
+        notify_telegram(f"{'🛑' if stop_hit else '🎯'} <b>MODE L {'STOP' if stop_hit else 'TP LIQUIDITÉ'}</b>\n{pos['symbol']} {side}\nEntrée: {entry:.5f}\nPrix: {current_price:.5f}\nNiveau: {stop if stop_hit else target:.5f}")
+        if close_position_full(pos,current_price):
+            send_trade_summary(pos["symbol"],current_price,LAST_SELL_REASON,round(get_balance(),2)); reset_trade_state_after_sell(candle_time)
+    return True
+
 def buy_signal(df):
     last = df.iloc[-1]
     prev1 = df.iloc[-2]
@@ -4173,6 +4239,8 @@ def buy_signal(df):
     mode_f_score, mode_f_details = candle_reversal_patterns(df)
     mode_f_filter_ok, mode_f_filter_details = mode_f_context_filter(df, mode_f_score, mode_f_details, volume_ratio)
     mode_f_ok = mode_f_filter_ok and trend_score >= TREND_SCORE_MODE_F_MIN
+    mode_l = detect_liquidity_sweep(df) if is_mode_enabled("MODE_L_LIQUIDITY_SWEEP") else {"valid":False}
+    mode_l_ok = bool(mode_l.get("valid"))
 
     signal_mode = None
     # Activation / désactivation via dashboard
@@ -4183,7 +4251,9 @@ def buy_signal(df):
     mode_e_ok = mode_e_ok and is_mode_enabled("MODE_E_EARLY_MOMENTUM")
     mode_f_ok = mode_f_ok and is_mode_enabled("MODE_F_CANDLE_REVERSAL")
 
-    if mode_a_ok:
+    if mode_l_ok:
+        signal_mode = "MODE_L_LIQUIDITY_SWEEP"
+    elif mode_a_ok:
         signal_mode = "MODE_A_CLASSIQUE"
     elif mode_b_ok:
         signal_mode = "MODE_B_PATTERN"
@@ -4228,7 +4298,7 @@ def buy_signal(df):
     if signal_mode and auto_learning.get("multiplier", 1.0) != 1.0:
         score = score * float(auto_learning.get("multiplier", 1.0))
 
-    ok = mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok or mode_f_ok
+    ok = mode_l_ok or mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok or mode_f_ok
 
     return ok, score, {
         "trend_ok": trend_ok,
@@ -4261,6 +4331,8 @@ def buy_signal(df):
         "mode_e_intrabar_move_pct": None,
         "mode_e_intrabar_distance_ema20_pct": None,
         "mode_f_ok": mode_f_ok,
+        "mode_l_ok": mode_l_ok,
+        "mode_l": mode_l,
         "mode_f_pattern": ",".join(mode_f_details.get("patterns", [])),
         "mode_f_pattern_label": format_mode_f_patterns(mode_f_details.get("patterns", [])),
         "mode_f_details_text": format_mode_f_pattern_details(mode_f_details.get("patterns", [])),
@@ -6548,7 +6620,10 @@ def run():
                     f"ATR={last['atr']:.5f} VWAP={last['vwap']:.5f} OBV={last['obv']:.2f}"
                 )
 
-                manage_open_position(pos, df, current_price, confirmed_time)
+                if trade_state.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP":
+                    manage_mode_l_position(pos, df, current_price, confirmed_time)
+                else:
+                    manage_open_position(pos, df, current_price, confirmed_time)
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -6652,7 +6727,8 @@ def run():
                 f"Solde avant ordre: {round(balance, 2)} USDC"
             )
 
-            if place_order_usd(symbol, "BUY", TRADE_SIZE_USD, current_price, reduce_only=False):
+            entry_side = "SELL" if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" and details.get("mode_l", {}).get("side") == "SHORT" else "BUY"
+            if place_order_usd(symbol, entry_side, TRADE_SIZE_USD, current_price, reduce_only=False):
                 trades += 1
                 trade_state["in_position"] = True
                 trade_state["symbol"] = symbol
@@ -6663,6 +6739,10 @@ def run():
                 trade_state["trailing_stop"] = None
                 trade_state["cooldown_until_candle"] = None
                 trade_state["entry_candle_time"] = confirmed_time
+                trade_state["mode_l_side"] = details.get("mode_l", {}).get("side") if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" else None
+                trade_state["mode_l_stop"] = details.get("mode_l", {}).get("stop") if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" else None
+                trade_state["mode_l_target"] = details.get("mode_l", {}).get("target") if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" else None
+                trade_state["mode_l_liquidity"] = details.get("mode_l", {}).get("level") if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" else None
 
                 # Sauvegarde infos signal pour résumé final Telegram
                 trade_state["entry_balance"] = round(balance, 2)
