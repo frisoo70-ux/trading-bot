@@ -62,6 +62,7 @@ PAPER_START_BALANCE = 1000.0
 PAPER_TAKER_FEE_RATE = 0.00035
 PAPER_SLIPPAGE_RATE = 0.0005
 PAPER_LOCK = threading.RLock()
+TRADING_MODE_LOCK = threading.RLock()
 PAPER_STATE = {"balance": PAPER_START_BALANCE, "open_position": None, "last_closed_trade": None, "trade_state": None}
 POST_TRADE_CSV_PATH = DATA_DIR / "post_trade_analysis.csv"
 POST_TRADE_PENDING_PATH = DATA_DIR / "post_trade_pending.json"
@@ -2405,33 +2406,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 requested_mode = "PAPER" if str(cfg.get("trading_mode", base_cfg.get("trading_mode", "LIVE"))).upper() == "PAPER" else "LIVE"
                 if requested_mode != base_cfg.get("trading_mode", "LIVE"):
-                    if PAPER_STATE.get("open_position"):
+                    with TRADING_MODE_LOCK:
+                        if ORDER_STATE.get("pending"):
+                            return self._json({"ok": False, "error": "Un ordre est en cours ou en attente. Réessayez après sa résolution."}, 409)
+                        if PAPER_STATE.get("open_position"):
                         return self._json({"ok": False, "error": "Fermez la position simulée avant de changer de mode."}, 409)
-                    if requested_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
-                        return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible d’activer le mode LIVE."}, 409)
-                    if not WALLET_ADDRESS:
-                        return self._json({"ok": False, "error": "Adresse wallet indisponible : impossible de vérifier les positions réelles."}, 409)
-                    try:
-                        wallet_state = info_post(
-                            {"type": "clearinghouseState", "user": WALLET_ADDRESS},
-                            cache_key="mode_switch_safety_check",
-                            cache_ttl=0,
-                            max_retries=0,
-                        )
-                        if not isinstance(wallet_state, dict):
-                            return self._json({"ok": False, "error": "Impossible de vérifier le compte Hyperliquid. Aucun changement de mode effectué."}, 503)
-                        real_positions = []
-                        for item in wallet_state.get("assetPositions", []):
-                            position = item.get("position", {})
-                            if position.get("coin") in SYMBOLS and float(position.get("szi", 0) or 0) != 0:
-                                real_positions.append(position)
-                        if real_positions:
-                            return self._json({"ok": False, "error": "Fermez toutes les positions réelles avant de changer de mode."}, 409)
-                    except Exception as check_error:
-                        return self._json({"ok": False, "error": "Vérification Hyperliquid impossible : " + str(check_error)[:160]}, 503)
-                    base_cfg["trading_mode"] = requested_mode
-                    for s in SYMBOLS:
-                        last_candle_times[s] = None
+                        if requested_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
+                            return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible d’activer le mode LIVE."}, 409)
+                        if not WALLET_ADDRESS:
+                            return self._json({"ok": False, "error": "Adresse wallet indisponible : impossible de vérifier les positions réelles."}, 409)
+                        try:
+                            wallet_state = info_post(
+                                {"type": "clearinghouseState", "user": WALLET_ADDRESS},
+                                cache_key="mode_switch_safety_check",
+                                cache_ttl=0,
+                                max_retries=0,
+                            )
+                            if not isinstance(wallet_state, dict):
+                                return self._json({"ok": False, "error": "Impossible de vérifier le compte Hyperliquid. Aucun changement de mode effectué."}, 503)
+                            real_positions = []
+                            for item in wallet_state.get("assetPositions", []):
+                                position = item.get("position", {})
+                                if position.get("coin") in SYMBOLS and float(position.get("szi", 0) or 0) != 0:
+                                    real_positions.append(position)
+                            if real_positions:
+                                return self._json({"ok": False, "error": "Fermez toutes les positions réelles avant de changer de mode."}, 409)
+                        except Exception as check_error:
+                            return self._json({"ok": False, "error": "Vérification Hyperliquid impossible : " + str(check_error)[:160]}, 503)
+                        base_cfg["trading_mode"] = requested_mode
+                        save_bot_config(base_cfg)
+                        for s in SYMBOLS:
+                            last_candle_times[s] = None
 
                 if cfg.get("timeframe") in TIMEFRAME_OPTIONS:
                     old_tf = base_cfg.get("timeframe", DEFAULT_TIMEFRAME)
@@ -3951,8 +3956,15 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
         return False
 
 
-def place_order_usd(symbol, side, size_usd, price, reduce_only=False):
+def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_mode=None):
     qty = round(size_usd / price, get_size_decimals(symbol))
+    if expected_mode is not None:
+        with TRADING_MODE_LOCK:
+            current_mode = load_bot_config().get("trading_mode", "LIVE")
+            if current_mode != expected_mode:
+                print("[MODE] Entrée annulée : le mode a changé pendant l'analyse.")
+                return False
+            return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
     return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
 
 
@@ -7172,6 +7184,7 @@ def run():
 
     while True:
         try:
+            cycle_mode = load_bot_config().get("trading_mode", "LIVE")
             check_telegram_commands()
             maybe_send_monthly_report()
             pos = get_open_position()
@@ -7320,7 +7333,7 @@ def run():
             )
 
             entry_side = "SELL" if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" and details.get("mode_l", {}).get("side") == "SHORT" else "BUY"
-            if place_order_usd(symbol, entry_side, TRADE_SIZE_USD, current_price, reduce_only=False):
+            if place_order_usd(symbol, entry_side, TRADE_SIZE_USD, current_price, reduce_only=False, expected_mode=cycle_mode):
                 trades += 1
                 trade_state["in_position"] = True
                 trade_state["symbol"] = symbol
