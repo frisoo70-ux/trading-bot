@@ -1857,7 +1857,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="liquidityChart" class="chartCanvas"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
     <div id="chartLegend" class="chartLegend"></div>
     <div id="chartOrderbook" class="chartOrderbook"></div>
-    <div class="muted" style="margin-top:9px">EMA20 / EMA50 / VWAP · volumes · niveaux de liquidité estimés par pivots · sweeps détectés · carnet L2 réel (cache 60 s). Les ordres cachés ne sont pas visibles. Les niveaux affichés ne garantissent pas une exécution.</div>
+    <div class="muted" style="margin-top:9px">EMA20 / EMA50 / VWAP · volumes · zones de liquidité dynamiques (pivots regroupés, force, ancienneté, invalidation et sweeps) · carnet L2 réel (cache 60 s). Les ordres cachés ne sont pas visibles. Les zones sont indicatives et ne déclenchent aucun ordre.</div>
   </div>
 
   <div class="grid two" style="margin-top:12px">
@@ -2213,7 +2213,9 @@ function renderChart(d){
   const bars=all.slice(start,end);
  if(bars.length<5){host.textContent='Historique insuffisant';return}
  const trade=d.trade||null,book=d.orderbook||{bids:[],asks:[]};
- const levels=bars.map(b=>Number(b.low)).concat(bars.map(b=>Number(b.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number));
+ const zones=d.liquidity_zones||[];
+ const levels=bars.map(b=>Number(b.low)).concat(bars.map(b=>Number(b.high)));
+ zones.forEach(z=>{levels.push(Number(z.low),Number(z.high),Number(z.level))});
  if(trade){['entry','stop','target','tp1'].forEach(k=>{if(trade[k]!=null)levels.push(Number(trade[k]))})}
  let min=Math.min.apply(null,levels),max=Math.max.apply(null,levels);
  const pad=(max-min)*.055||Math.abs(max)*.002||.000001;min-=pad;max+=pad;
@@ -2235,6 +2237,24 @@ function renderChart(d){
   const xx=L+plotW*i/4;
   svg+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(volTop+volH)+'" stroke="'+grid+'" stroke-width="1" stroke-dasharray="2 7" opacity=".7"/>';
  }
+ // Zones semi-transparentes en arrière-plan des chandeliers.
+ zones.forEach(z=>{
+  const zLow=Number(z.low),zHigh=Number(z.high),level=Number(z.level);
+  if(!isFinite(zLow)||!isFinite(zHigh)||zHigh<min||zLow>max)return;
+  let first=bars.findIndex(b=>Number(b.time)>=Number(z.start_time));
+  if(first<0)first=0;
+  const x1=Math.max(L,x(first,bars.length)-bodyW),x2=W-R;
+  const yy=y(zHigh),hh=Math.max(3,y(zLow)-yy);
+  const swept=z.status==='swept',highSide=z.side==='high';
+  const col=swept?'#9aa7b8':(highSide?'#ed6677':'#27c995');
+  const opacity=swept?0.12:Math.max(0.055,Math.min(0.28,Number(z.opacity)||0.12));
+  const label=(highSide?'BUY-SIDE':'SELL-SIDE')+' · '+z.touches+' touches · '+z.strength+'/100';
+  svg+='<g><title>'+esc(label)+' · '+esc(z.status)+' · '+z.age_bars+' bougies · '+fmt(zLow,6)+' - '+fmt(zHigh,6)+'</title>';
+  svg+='<rect x="'+x1+'" y="'+yy+'" width="'+Math.max(8,x2-x1)+'" height="'+hh+'" rx="4" fill="'+col+'" fill-opacity="'+opacity+'" stroke="'+col+'" stroke-opacity="'+(swept?'.5':'.85')+'" stroke-width="1"'+(swept?' stroke-dasharray="4 4"':'')+'/>';
+  svg+='<line x1="'+x1+'" y1="'+y(level)+'" x2="'+x2+'" y2="'+y(level)+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="3 5" opacity="'+(swept?'.45':'.8')+'"/>';
+  if(hh>13)svg+='<text x="'+(x1+7)+'" y="'+(yy+12)+'" fill="'+col+'" font-size="9" font-weight="750" opacity="'+(swept?'.75':'.95')+'">'+esc(label)+'</text>';
+  svg+='</g>';
+ });
  svg+='<rect x="'+L+'" y="'+volTop+'" width="'+plotW+'" height="'+volH+'" fill="#101b2b" opacity=".8"/>';
  svg+='<line x1="'+L+'" y1="'+(volTop-13)+'" x2="'+(W-R)+'" y2="'+(volTop-13)+'" stroke="#34465e" stroke-width="1"/>';
  const maxVol=Math.max.apply(null,bars.map(b=>Number(b.volume||0)).concat([1]));
@@ -2255,8 +2275,7 @@ function renderChart(d){
   const yy=y(price);
   return '<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="'+color+'" stroke-width="'+width+'" stroke-dasharray="'+dash+'" opacity=".9"/><rect x="'+(W-R+5)+'" y="'+(yy-10)+'" width="'+(R-10)+'" height="20" rx="5" fill="'+color+'" opacity=".96"/><text x="'+(W-R+10)+'" y="'+(yy+3.5)+'" fill="#081321" font-size="9.5" font-weight="800">'+esc(label)+' '+fmt(price,6)+'</text>';
  };
- (d.pools_high||[]).forEach(p=>{svg+=hline(p,'#e9a45e','LIQ. HAUTE','5 5',1.3)});
- (d.pools_low||[]).forEach(p=>{svg+=hline(p,'#42c9a1','LIQ. BASSE','5 5',1.3)});
+ // Les poches sont dessinées en rectangles; pas de traits isolés.
  if(trade){
   svg+=hline(trade.entry,'#e8bd62','ENTRÉE','',2);
   svg+=hline(trade.stop,'#f06b78','STOP','4 4',1.8);
@@ -2277,7 +2296,7 @@ function renderChart(d){
  svg+='<text x="'+L+'" y="'+(volTop-19)+'" fill="'+muted+'" font-size="10" font-weight="800" letter-spacing="1">VOLUME</text>';
  svg+='<text x="'+L+'" y="548" fill="#60738d" font-size="9">Données marché · affichage indicatif</text></svg>';
  host.innerHTML=svg;
- const legend=[['#55b9ed','EMA 20'],['#b18ae8','EMA 50'],['#e8bd62','VWAP'],['#e9a45e','Liquidité haute'],['#42c9a1','Liquidité basse'],['#f2f6fc','Prix actuel']];
+ const legend=[['#55b9ed','EMA 20'],['#b18ae8','EMA 50'],['#e8bd62','VWAP'],['#ed6677','Zone buy-side'],['#27c995','Zone sell-side'],['#9aa7b8','Zone balayée'],['#f2f6fc','Prix actuel']];
  if(trade){legend.push(['#facc15','Entrée'],['#fb7185','Stop'],['#4ade80','Cible / TP'])}
  document.getElementById('chartLegend').innerHTML=legend.map(v=>'<span><i style="background:'+v[0]+'"></i>'+v[1]+'</span>').join('');
  const renderBook=(name,rows,color)=>{
@@ -2296,7 +2315,8 @@ async function loadChart(){
   const d=await r.json();
   const summary=document.getElementById('chartSummary');
   if(!d.ready){summary.textContent=d.message||'Données indisponibles';document.getElementById('liquidityChart').innerHTML='<div class="muted">En attente du prochain scan du bot.</div>';return}
-  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies'+(chartOffset?' · historique -'+chartOffset:' · récent')+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
+  const zoneList=d.liquidity_zones||[];const activeZones=zoneList.filter(z=>z.status==='active'||z.status==='weakened').length;const sweptZones=zoneList.filter(z=>z.status==='swept').length;
+  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies'+(chartOffset?' · historique -'+chartOffset:' · récent')+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · Zones '+activeZones+' actives / '+sweptZones+' balayées · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
   renderChart(d);
   if(d.sweep&&d.sweep.valid)summary.textContent+=' · SWEEP '+d.sweep.side+' confirmé · Niveau '+fmt(d.sweep.level,6)+' · SL '+fmt(d.sweep.stop,6)+' · TP '+fmt(d.sweep.target,6);
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
@@ -6838,6 +6858,89 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
 
+def compute_dashboard_liquidity_zones(df):
+    """Zones visuelles dynamiques issues des pivots; aucune influence sur les ordres."""
+    try:
+        if df is None or len(df) < MODE_L_LOOKBACK + 5:
+            return []
+        tf = get_active_timeframe()
+        max_age = {"1m": 180, "3m": 140, "5m": 120, "15m": 96}.get(tf, 96)
+        atr = float(df.iloc[-1].get("atr", 0) or 0)
+        if atr <= 0:
+            return []
+        w = df.tail(min(220, len(df))).reset_index(drop=True)
+        highs = w["high"].astype(float).tolist()
+        lows = w["low"].astype(float).tolist()
+        pivots = {"high": [], "low": []}
+        for i in range(MODE_L_PIVOT_LEFT, len(w) - MODE_L_PIVOT_RIGHT):
+            if highs[i] >= max(highs[i-MODE_L_PIVOT_LEFT:i+MODE_L_PIVOT_RIGHT+1]):
+                pivots["high"].append((i, highs[i]))
+            if lows[i] <= min(lows[i-MODE_L_PIVOT_LEFT:i+MODE_L_PIVOT_RIGHT+1]):
+                pivots["low"].append((i, lows[i]))
+        zones = []
+        last_close = float(w.iloc[-1]["close"])
+        for side in ("high", "low"):
+            groups = []
+            for item in pivots[side]:
+                price = item[1]
+                match = next((g for g in groups if abs(price-sum(v[1] for v in g)/len(g))/max(abs(price),1e-12) <= MODE_L_EQUAL_TOL_PCT), None)
+                if match is None:
+                    groups.append([item])
+                else:
+                    match.append(item)
+            for group in groups:
+                if len(group) < 2:
+                    continue
+                values = [v[1] for v in group]
+                level = sum(values) / len(values)
+                pad = max(atr * 0.06, abs(level) * MODE_L_EQUAL_TOL_PCT * 0.35)
+                zone_low, zone_high = min(values)-pad, max(values)+pad
+                first_idx = min(v[0] for v in group)
+                last_idx = max(v[0] for v in group)
+                age_bars = len(w)-1-last_idx
+                if age_bars > max_age:
+                    continue
+                status, swept_idx, invalidated = "active", None, False
+                for j in range(last_idx+1, len(w)):
+                    candle = w.iloc[j]
+                    close = float(candle["close"])
+                    if side == "high":
+                        if close > zone_high:
+                            invalidated = True
+                            break
+                        if float(candle["high"]) > zone_high and close < level:
+                            status, swept_idx = "swept", j
+                    else:
+                        if close < zone_low:
+                            invalidated = True
+                            break
+                        if float(candle["low"]) < zone_low and close > level:
+                            status, swept_idx = "swept", j
+                if invalidated:
+                    continue
+                if status == "swept" and swept_idx is not None and len(w)-1-swept_idx > 6:
+                    continue
+                touches = len(group)
+                strength = min(100, 42 + max(0, touches-2)*17)
+                if age_bars > max_age*0.55 and status == "active":
+                    status = "weakened"
+                fade = max(0.25, 1.0-age_bars/max_age)
+                zones.append({
+                    "side": side, "low": round(zone_low,8), "high": round(zone_high,8),
+                    "level": round(level,8), "start_time": int(w.iloc[first_idx]["time"]),
+                    "last_pivot_time": int(w.iloc[last_idx]["time"]), "age_bars": int(age_bars),
+                    "touches": int(touches), "strength": int(strength),
+                    "opacity": round((0.10+0.20*strength/100)*fade,3),
+                    "status": status, "timeframe": tf,
+                    "distance_pct": round(abs(level-last_close)/max(abs(last_close),1e-12)*100,3)
+                })
+        zones.sort(key=lambda z: (z["status"] == "swept", z["distance_pct"], -z["strength"]))
+        return zones[:10]
+    except Exception as e:
+        print("[DASHBOARD LIQUIDITY ZONES ERROR]", e)
+        return []
+
+
 def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
     """Mémorise un mini-snapshot graphique à partir du dataframe déjà traité."""
     try:
@@ -6904,6 +7007,7 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
             "rsi": round(float(last["rsi"]), 2),
             "atr": round(float(last["atr"]), 8),
             "candles": rows,
+            "liquidity_zones": compute_dashboard_liquidity_zones(df),
             "pools_high": [round(float(x), 8) for x in sweep.get("pools_high", [])[:8]],
             "pools_low": [round(float(x), 8) for x in sweep.get("pools_low", [])[:8]],
             "sweep": {
