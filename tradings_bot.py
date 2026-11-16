@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime
 import os
 import csv
+import io
 import shutil
 import base64
 from pathlib import Path
@@ -56,6 +57,16 @@ except Exception:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 TRADES_CSV_PATH = DATA_DIR / "trades.csv"
+PAPER_TRADES_CSV_PATH = DATA_DIR / "paper_trades.csv"
+PAPER_STATE_PATH = DATA_DIR / "paper_state.json"
+PAPER_START_BALANCE = 1000.0
+PAPER_TAKER_FEE_RATE = 0.00035
+PAPER_SLIPPAGE_RATE = 0.0005
+PAPER_LOCK = threading.RLock()
+TRADING_MODE_LOCK = threading.RLock()
+TRADE_TRANSITION_PENDING = False
+PAPER_LAST_GITHUB_SYNC = 0
+PAPER_STATE = {"balance": PAPER_START_BALANCE, "open_position": None, "last_closed_trade": None, "trade_state": None, "trades": []}
 POST_TRADE_CSV_PATH = DATA_DIR / "post_trade_analysis.csv"
 POST_TRADE_PENDING_PATH = DATA_DIR / "post_trade_pending.json"
 LAST_MONTHLY_REPORT_FILE = DATA_DIR / "last_monthly_report.txt"
@@ -111,6 +122,8 @@ GITHUB_BACKUP_FILES = [
     "last_monthly_report.txt",
     "bot_config.json",
     "adaptive_config.json",
+    "paper_trades.csv",
+    "paper_state.json",
 ]
 
 GITHUB_SYNC_LOCK = threading.Lock()
@@ -448,7 +461,8 @@ DEFAULT_BOT_CONFIG = {
     "dashboard": {
         "refresh_seconds": 10
     },
-    "timeframe": DEFAULT_TIMEFRAME
+    "timeframe": DEFAULT_TIMEFRAME,
+    "trading_mode": "LIVE"
 }
 
 
@@ -467,6 +481,7 @@ def load_bot_config():
                 merged[section].update(cfg[section])
 
         merged["timeframe"] = cfg.get("timeframe", DEFAULT_TIMEFRAME)
+        merged["trading_mode"] = "PAPER" if str(cfg.get("trading_mode", "LIVE")).upper() == "PAPER" else "LIVE"
         if merged["timeframe"] not in TIMEFRAME_OPTIONS:
             merged["timeframe"] = DEFAULT_TIMEFRAME
 
@@ -490,6 +505,251 @@ def save_bot_config(cfg):
     except Exception as e:
         print("[ERREUR CONFIG SAVE]", e)
         return False
+
+
+def is_paper_mode():
+    """Mode de simulation connecté aux données live, sans exécution réelle."""
+    try:
+        return load_bot_config().get("trading_mode", "LIVE") == "PAPER"
+    except Exception:
+        return False
+
+
+def _paper_github_upload_text(filename, content):
+    if not GITHUB_BACKUP_ENABLED:
+        return False
+    remote = _github_get_remote_file(filename)
+    payload = {
+        "message": f"Paper trading backup: {filename}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": GITHUB_BACKUP_BRANCH,
+    }
+    if remote and remote.get("sha"):
+        payload["sha"] = remote["sha"]
+    response = requests.put(_github_api_url(filename), headers=_github_headers(), json=payload, timeout=25)
+    response.raise_for_status()
+    return True
+
+
+def _paper_csv_text():
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["date","symbol","mode","side","entry","exit","qty","exit_reason","gross_pnl_usdc","fees_usdc","net_pnl_usdc","pnl_pct"])
+    for item in PAPER_STATE.get("trades", []):
+        writer.writerow([
+            item.get("date"), item.get("symbol"), item.get("mode"), item.get("side"),
+            item.get("entry"), item.get("exit"), item.get("qty"), item.get("exit_reason"),
+            item.get("gross_pnl_usdc"), item.get("fees_usdc"), item.get("net_pnl_usdc"), item.get("pnl_pct")
+        ])
+    return buffer.getvalue()
+
+
+def paper_save_state(force_github=False):
+    global PAPER_LAST_GITHUB_SYNC
+    payload = dict(PAPER_STATE)
+    payload["saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    serialized = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    local_ok = False
+    try:
+        with PAPER_LOCK:
+            PAPER_STATE_PATH.write_text(serialized, encoding="utf-8")
+            PAPER_TRADES_CSV_PATH.write_text(_paper_csv_text(), encoding="utf-8")
+        local_ok = True
+    except Exception as e:
+        print("[PAPER] Stockage local indisponible, tentative GitHub directe:", str(e)[:160])
+
+    github_ok = False
+    should_sync = GITHUB_BACKUP_ENABLED and (force_github or time.time() - PAPER_LAST_GITHUB_SYNC >= 300)
+    if should_sync:
+        try:
+            with GITHUB_SYNC_LOCK:
+                _paper_github_upload_text("paper_state.json", serialized)
+                _paper_github_upload_text("paper_trades.csv", _paper_csv_text())
+            PAPER_LAST_GITHUB_SYNC = time.time()
+            github_ok = True
+            GITHUB_SYNC_STATE["last_backup"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            GITHUB_SYNC_STATE["last_status"] = "PAPER_BACKUP_OK"
+            GITHUB_SYNC_STATE["last_error"] = ""
+        except Exception as e:
+            GITHUB_SYNC_STATE["last_status"] = "PAPER_BACKUP_ERROR"
+            GITHUB_SYNC_STATE["last_error"] = str(e)[:220]
+            print("[PAPER] Échec sauvegarde GitHub directe:", e)
+
+    if local_ok and (not GITHUB_BACKUP_ENABLED or (should_sync and not github_ok)):
+        schedule_github_backup()
+    return local_ok or github_ok
+
+
+def paper_load_state():
+    global PAPER_STATE, trade_state
+    try:
+        saved = None
+        if GITHUB_BACKUP_ENABLED:
+            try:
+                remote = _github_get_remote_file("paper_state.json")
+                if remote and remote.get("content"):
+                    saved = json.loads(remote["content"].decode("utf-8"))
+            except Exception as remote_error:
+                print("[PAPER] Lecture GitHub directe impossible:", str(remote_error)[:160])
+        if not isinstance(saved, dict) and PAPER_STATE_PATH.exists():
+            with open(PAPER_STATE_PATH, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+        if isinstance(saved, dict):
+            PAPER_STATE.update(saved)
+        PAPER_STATE.setdefault("balance", PAPER_START_BALANCE)
+        PAPER_STATE.setdefault("open_position", None)
+        PAPER_STATE.setdefault("last_closed_trade", None)
+        PAPER_STATE.setdefault("trades", [])
+        if not PAPER_STATE.get("trades") and GITHUB_BACKUP_ENABLED:
+            try:
+                remote_csv = _github_get_remote_file("paper_trades.csv")
+                if remote_csv and remote_csv.get("content"):
+                    rows = pd.read_csv(io.BytesIO(remote_csv["content"])).fillna("").to_dict(orient="records")
+                    PAPER_STATE["trades"] = rows
+            except Exception as csv_error:
+                print("[PAPER] Lecture historique GitHub impossible:", str(csv_error)[:160])
+        if not PAPER_STATE.get("trades") and PAPER_TRADES_CSV_PATH.exists():
+            try:
+                PAPER_STATE["trades"] = pd.read_csv(PAPER_TRADES_CSV_PATH).fillna("").to_dict(orient="records")
+            except Exception:
+                pass
+        saved_state = PAPER_STATE.get("trade_state")
+        if isinstance(saved_state, dict):
+            trade_state.update(saved_state)
+        try:
+            PAPER_TRADES_CSV_PATH.write_text(_paper_csv_text(), encoding="utf-8")
+            PAPER_STATE_PATH.write_text(json.dumps(PAPER_STATE, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        except Exception:
+            pass
+        if PAPER_STATE.get("last_closed_trade"):
+            paper_record_closed_trade()
+        print("[PAPER] Solde simulé:", round(float(PAPER_STATE["balance"]), 4), "USDC | trades:", len(PAPER_STATE.get("trades", [])))
+    except Exception as e:
+        print("[PAPER] Erreur chargement:", e)
+
+
+def paper_place_order_qty(symbol, side, qty, price, reduce_only=False, metadata=None):
+    """Exécution simulée centralisée : aucun client Exchange n'est instancié."""
+    try:
+        qty, price = abs(float(qty)), float(price)
+        if qty <= 0 or price <= 0:
+            return False
+        fill = price * (1 + PAPER_SLIPPAGE_RATE if side == "BUY" else 1 - PAPER_SLIPPAGE_RATE)
+        fee = qty * fill * PAPER_TAKER_FEE_RATE
+        with PAPER_LOCK:
+            pos = PAPER_STATE.get("open_position")
+            if not reduce_only:
+                if pos is not None:
+                    return False
+                signed_qty = qty if side == "BUY" else -qty
+                PAPER_STATE["balance"] = float(PAPER_STATE.get("balance", PAPER_START_BALANCE)) - fee
+                metadata = metadata if isinstance(metadata, dict) else {}
+                PAPER_STATE["open_position"] = {
+                    "symbol": symbol, "size": signed_qty, "entry": fill,
+                    "initial_qty": qty, "side": "LONG" if signed_qty > 0 else "SHORT",
+                    "fees": fee, "gross_pnl": 0.0, "last_price": fill,
+                    "metadata": metadata,
+                    "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                saved_details = metadata.get("details") if isinstance(metadata.get("details"), dict) else {}
+                PAPER_STATE["trade_state"] = {
+                    **saved_details,
+                    "in_position": True, "symbol": symbol, "entry_price": fill,
+                    "entry_atr": metadata.get("entry_atr"), "tp1_done": False,
+                    "highest_price": fill, "trailing_stop": None,
+                    "entry_candle_time": metadata.get("entry_candle_time"),
+                    "signal_mode": metadata.get("signal_mode"),
+                    "execution_mode": "PAPER", "score": metadata.get("score"),
+                    "pattern_score": metadata.get("pattern_score"),
+                    "mode_l_side": metadata.get("mode_l_side"),
+                    "mode_l_stop": metadata.get("mode_l_stop"),
+                    "mode_l_target": metadata.get("mode_l_target"),
+                    "mode_l_liquidity": metadata.get("mode_l_liquidity")
+                }
+            else:
+                if not pos or pos.get("symbol") != symbol:
+                    return False
+                signed = float(pos.get("size", 0) or 0)
+                if signed == 0 or (signed > 0 and side != "SELL") or (signed < 0 and side != "BUY"):
+                    return False
+                close_qty = min(qty, abs(signed))
+                direction = 1.0 if signed > 0 else -1.0
+                gross = (fill - float(pos["entry"])) * close_qty * direction
+                close_fee = close_qty * fill * PAPER_TAKER_FEE_RATE
+                PAPER_STATE["balance"] = float(PAPER_STATE.get("balance", PAPER_START_BALANCE)) + gross - close_fee
+                pos["gross_pnl"] = float(pos.get("gross_pnl", 0.0)) + gross
+                pos["fees"] = float(pos.get("fees", 0.0)) + close_fee
+                pos["size"] = signed - direction * close_qty
+                pos["last_price"] = fill
+                if abs(float(pos["size"])) < 1e-10:
+                    PAPER_STATE["last_closed_trade"] = {
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "symbol": symbol, "side": pos.get("side"),
+                        "entry": float(pos["entry"]), "exit": fill,
+                        "qty": float(pos.get("initial_qty", close_qty)),
+                        "gross_pnl_usdc": float(pos.get("gross_pnl", 0.0)),
+                        "fees_usdc": float(pos.get("fees", 0.0)),
+                        "net_pnl_usdc": float(pos.get("gross_pnl", 0.0)) - float(pos.get("fees", 0.0)),
+                        "mode": trade_state.get("signal_mode"),
+                        "exit_reason": LAST_SELL_REASON or "PAPER_EXIT"
+                    }
+                    PAPER_STATE["open_position"] = None
+        paper_save_state(force_github=True)
+        print(f"[PAPER] {side} {symbol} @ {fill:.8f} qty={qty:.8f} reduce_only={reduce_only}")
+        return True
+    except Exception as e:
+        print("[PAPER] Erreur exécution simulée:", e)
+        return False
+
+
+def paper_record_closed_trade():
+    try:
+        closed = PAPER_STATE.get("last_closed_trade")
+        if not closed:
+            return
+        entry = float(closed.get("entry", 0) or 0)
+        exit_price = float(closed.get("exit", 0) or 0)
+        initial_notional = entry * float(closed.get("qty", 0) or 0)
+        pnl_pct = (float(closed.get("net_pnl_usdc", 0) or 0) / initial_notional * 100) if initial_notional else 0
+        closed["pnl_pct"] = round(pnl_pct, 5)
+        PAPER_STATE.setdefault("trades", []).append(dict(closed))
+        PAPER_STATE["last_closed_trade"] = None
+        PAPER_STATE["trade_state"] = None
+        try:
+            PAPER_TRADES_CSV_PATH.write_text(_paper_csv_text(), encoding="utf-8")
+        except Exception as local_error:
+            print("[PAPER] CSV local indisponible:", str(local_error)[:120])
+        paper_save_state(force_github=True)
+    except Exception as e:
+        print("[PAPER] Erreur journal:", e)
+
+
+def paper_dashboard_stats():
+    try:
+        df = pd.DataFrame(PAPER_STATE.get("trades", []))
+        if df.empty and PAPER_TRADES_CSV_PATH.exists():
+            df = pd.read_csv(PAPER_TRADES_CSV_PATH)
+        if df.empty:
+            trades, wins, losses, pnl, winrate, recent = 0, 0, 0, 0.0, 0.0, []
+        else:
+            values = pd.to_numeric(df.get("net_pnl_usdc"), errors="coerce").fillna(0)
+            trades, wins, losses = int(len(df)), int((values>0).sum()), int((values<0).sum())
+            pnl = round(float(values.sum()), 5)
+            winrate = round(wins/trades*100, 2) if trades else 0.0
+            recent = df.tail(20).fillna("").to_dict(orient="records")
+        pos = PAPER_STATE.get("open_position")
+        open_pnl = 0.0
+        if pos:
+            px = float(pos.get("last_price") or pos.get("entry") or 0)
+            remaining_qty = abs(float(pos.get("size", 0) or 0))
+            direction = 1 if float(pos.get("size", 0) or 0) > 0 else -1
+            entry_price = float(pos.get("entry", 0) or 0)
+            gross_open = float(pos.get("gross_pnl", 0) or 0) + (px-entry_price)*remaining_qty*direction
+            estimated_close_fee = remaining_qty*px*PAPER_TAKER_FEE_RATE
+            open_pnl = gross_open-float(pos.get("fees", 0) or 0)-estimated_close_fee
+        return {"balance":round(float(PAPER_STATE.get("balance",PAPER_START_BALANCE)),5),"starting_balance":PAPER_START_BALANCE,"trades":trades,"wins":wins,"losses":losses,"winrate":winrate,"realized_pnl":pnl,"open_pnl_est":round(open_pnl,5),"net_pnl":round(pnl+open_pnl,5),"open_position":pos,"recent_trades":recent,"fee_rate_pct":PAPER_TAKER_FEE_RATE*100,"slippage_pct":PAPER_SLIPPAGE_RATE*100,"github_backup_enabled":GITHUB_BACKUP_ENABLED}
+    except Exception as e:
+        return {"error":str(e),"balance":round(float(PAPER_STATE.get("balance",PAPER_START_BALANCE)),5)}
 
 
 def is_mode_enabled(mode_name):
@@ -1413,6 +1673,8 @@ def compute_dashboard_stats():
 
     result = {
         "balance": balance,
+        "paper": paper_dashboard_stats(),
+        "trading_mode": load_bot_config().get("trading_mode", "LIVE"),
         "open_position": get_open_position(),
         "live_trade": get_live_trade_snapshot_v48(),
         "config": load_bot_config(),
@@ -1634,10 +1896,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card"><div class="muted">Winrate</div><div id="winrate" class="metric">-</div></div>
     <div class="card"><div class="muted">Trades</div><div id="trades" class="metric">-</div></div>
   </div>
+  <div class="card" style="margin-top:12px;border-color:#38bdf8"><h3>🧪 Mode TEST LIVE — Paper Trading</h3><div class="muted" id="paperWarning">Données de marché réelles. Capital simulé : 1 000 USDC. Frais taker estimés : 0,035 % par exécution ; slippage : 0,05 %. Funding non simulé.</div><div class="grid cards" style="margin-top:10px"><div><div class="muted">Solde simulé</div><div class="metric" id="paperBalance">-</div></div><div><div class="muted">PnL simulé</div><div class="metric" id="paperPnl">-</div></div><div><div class="muted">Winrate simulé</div><div class="metric" id="paperWinrate">-</div></div><div><div class="muted">Trades simulés</div><div class="metric" id="paperTrades">-</div></div></div><pre id="paperPosition" style="margin-top:10px">Aucune position simulée</pre><div class="muted" id="paperRecent">Historique paper trading séparé du live.</div></div>
   <div class="grid two" style="margin-top:12px">
     <div class="card">
       <h3>⚙️ Contrôle du bot</h3>
-      <div class="muted" style="margin-bottom:8px">Modes</div><div id="modeToggles" class="toggles"></div>
+      <div class="muted" style="margin-bottom:8px">Mode d’exécution</div><select id="tradingMode" style="width:100%;padding:12px;border-radius:10px;background:#172033;color:#e5e7eb;border:1px solid #2b3950;margin-bottom:12px"><option value="LIVE">LIVE — ordres réels</option><option value="PAPER">TEST LIVE — simulation sans ordres</option></select><div class="muted" style="margin-bottom:8px">Modes de stratégie</div><div id="modeToggles" class="toggles"></div>
       <div class="muted" style="margin:14px 0 8px">Tokens</div><div id="symbolToggles" class="toggles"></div>
       <div class="muted" style="margin:14px 0 8px">Timeframe</div><div id="timeframeToggles" class="toggles"></div>
       <div class="muted" id="activeTimeframeLabel" style="margin-top:8px">Timeframe actif : -</div>
@@ -1959,9 +2222,10 @@ function renderToggles(cfg){
 
     document.getElementById('activeTimeframeLabel').textContent=
         'Timeframe actif : '+(cfg.timeframe||'15m');
+    document.getElementById('tradingMode').value=cfg.trading_mode||'LIVE';
 }
 
-async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
+async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}currentConfig.trading_mode=document.getElementById('tradingMode').value;const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});const j=await r.json();document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':('❌ '+(j.error||'Erreur sauvegarde'));setTimeout(()=>document.getElementById('saveStatus').textContent='',4500);load()}
 
 function renderLiveTradeV48(live){
  const empty=!live||!live.in_position;
@@ -2108,7 +2372,7 @@ async function loadChart(){
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
  finally{chartBusy=false}
 }
-async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
+async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();const paperMode=(d.config&&d.config.trading_mode==='PAPER');const p=d.paper||{};document.getElementById('balance').textContent=fmt(paperMode?p.balance:d.balance,2)+(paperMode?' USDC simulés':' USDC');document.getElementById('pnl').innerHTML=`<span class="${cls(paperMode?p.net_pnl:d.summary.pnl_total)}">${fmt(paperMode?p.net_pnl:d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(paperMode?p.winrate:d.summary.winrate,1)+'%';document.getElementById('trades').textContent=paperMode?(p.trades||0):d.summary.trades;document.getElementById('position').textContent=paperMode?(p.open_position?JSON.stringify(p.open_position,null,2):'Aucune position simulée'):(d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte');document.getElementById('paperBalance').textContent=fmt(p.balance,2)+' USDC';document.getElementById('paperPnl').textContent=fmt(p.net_pnl,4)+' USDC';document.getElementById('paperWinrate').textContent=fmt(p.winrate,1)+'%';document.getElementById('paperTrades').textContent=p.trades||0;document.getElementById('paperPosition').textContent=p.open_position?JSON.stringify(p.open_position,null,2):'Aucune position simulée';document.getElementById('paperRecent').textContent=(p.recent_trades||[]).slice().reverse().slice(0,5).map(t=>[t.date,t.symbol,t.mode,'PnL '+t.net_pnl_usdc+' USDC'].join(' | ')).join('\\n')||'Aucun trade simulé clôturé';document.getElementById('paperWarning').textContent=(paperMode?'MODE TEST ACTIF : données réelles, ordres simulés uniquement. Aucun ordre réel envoyé. ':'Mode LIVE actif. Les statistiques Paper restent séparées du trading réel. ')+(p.github_backup_enabled?'Sauvegarde GitHub directe activée.':'ATTENTION : sauvegarde GitHub Paper non configurée.');renderToggles(d.config);renderLiveTradeV48(paperMode?{in_position:false}:d.live_trade);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
 lastTrades=(d.recent_trades||[]).slice().reverse();
@@ -2246,6 +2510,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     for k in base_cfg["symbols"].keys():
                         if k in cfg["symbols"]:
                             base_cfg["symbols"][k] = bool(cfg["symbols"][k])
+
+                requested_mode = "PAPER" if str(cfg.get("trading_mode", base_cfg.get("trading_mode", "LIVE"))).upper() == "PAPER" else "LIVE"
+                if requested_mode != base_cfg.get("trading_mode", "LIVE"):
+                    with TRADING_MODE_LOCK:
+                        if ORDER_STATE.get("pending") or TRADE_TRANSITION_PENDING:
+                            return self._json({"ok": False, "error": "Un ordre ou une entrée est en cours de validation. Réessayez dans quelques secondes."}, 409)
+                        if PAPER_STATE.get("open_position") or PAPER_STATE.get("last_closed_trade") or trade_state.get("in_position"):
+                            return self._json({"ok": False, "error": "Fermez la position en cours et terminez sa comptabilisation avant de changer de mode."}, 409)
+                        if requested_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
+                            return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible d’activer le mode LIVE."}, 409)
+                        if not WALLET_ADDRESS:
+                            return self._json({"ok": False, "error": "Adresse wallet indisponible : impossible de vérifier les positions réelles."}, 409)
+                        try:
+                            wallet_state = info_post(
+                                {"type": "clearinghouseState", "user": WALLET_ADDRESS},
+                                cache_key="mode_switch_safety_check",
+                                cache_ttl=0,
+                                max_retries=0,
+                            )
+                            if not isinstance(wallet_state, dict):
+                                return self._json({"ok": False, "error": "Impossible de vérifier le compte Hyperliquid. Aucun changement de mode effectué."}, 503)
+                            real_positions = []
+                            for item in wallet_state.get("assetPositions", []):
+                                position = item.get("position", {})
+                                if position.get("coin") in SYMBOLS and float(position.get("szi", 0) or 0) != 0:
+                                    real_positions.append(position)
+                            if real_positions:
+                                return self._json({"ok": False, "error": "Fermez toutes les positions réelles avant de changer de mode."}, 409)
+                        except Exception as check_error:
+                            return self._json({"ok": False, "error": "Vérification Hyperliquid impossible : " + str(check_error)[:160]}, 503)
+                        base_cfg["trading_mode"] = requested_mode
+                        save_bot_config(base_cfg)
+                        for s in SYMBOLS:
+                            last_candle_times[s] = None
 
                 if cfg.get("timeframe") in TIMEFRAME_OPTIONS:
                     old_tf = base_cfg.get("timeframe", DEFAULT_TIMEFRAME)
@@ -3442,6 +3740,8 @@ def round_order_price(price):
 
 def get_balance():
     global LAST_KNOWN_BALANCE
+    if is_paper_mode():
+        return round(float(PAPER_STATE.get("balance", PAPER_START_BALANCE)), 8)
     try:
         cached = api_cache_get("balance", 10)
         if cached is not None:
@@ -3501,6 +3801,9 @@ def get_positions():
         return LAST_KNOWN_POSITIONS if LAST_KNOWN_POSITIONS is not None else []
 
 def get_open_position():
+    if is_paper_mode():
+        pos = PAPER_STATE.get("open_position")
+        return dict(pos) if pos else None
     positions = get_positions()
     for pos in positions:
         if pos["symbol"] in SYMBOLS and pos["size"] > 0:
@@ -3645,8 +3948,10 @@ def get_order_state_for_dashboard():
         return {"pending": False}
 
 
-def place_order_qty(symbol, side, qty, price, reduce_only=False):
+def place_order_qty(symbol, side, qty, price, reduce_only=False, paper_metadata=None):
     global LAST_ENTRY_PRICE_BY_SYMBOL, LAST_SELL_REASON
+    if is_paper_mode():
+        return paper_place_order_qty(symbol, side, qty, price, reduce_only=reduce_only, metadata=paper_metadata)
     try:
         if is_order_blocked(symbol, side):
             print(f"[ORDER BLOCKED] ordre déjà en attente {ORDER_STATE.get('side')} {ORDER_STATE.get('symbol')} retry={get_order_state_for_dashboard().get('retry_in_seconds')}s")
@@ -3758,9 +4063,20 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
         return False
 
 
-def place_order_usd(symbol, side, size_usd, price, reduce_only=False):
+def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_mode=None, paper_metadata=None):
+    global TRADE_TRANSITION_PENDING
     qty = round(size_usd / price, get_size_decimals(symbol))
-    return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
+    if expected_mode is not None:
+        with TRADING_MODE_LOCK:
+            current_mode = load_bot_config().get("trading_mode", "LIVE")
+            if current_mode != expected_mode:
+                print("[MODE] Entrée annulée : le mode a changé pendant l'analyse.")
+                return False
+            ok = place_order_qty(symbol, side, qty, price, reduce_only=reduce_only, paper_metadata=paper_metadata)
+            if ok:
+                TRADE_TRANSITION_PENDING = True
+            return ok
+    return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only, paper_metadata=paper_metadata)
 
 
 # Hyperliquid refuse les ordres dont la valeur notionnelle est < 10 USDC.
@@ -3802,7 +4118,7 @@ def close_position_full(pos, price):
 
 
 def reset_trade_state_after_sell(candle_time):
-    global trade_state
+    global trade_state, TRADE_TRANSITION_PENDING
     global REENTRY_RESCAN_PENDING, LAST_EXIT_SYMBOL, LAST_EXIT_REASON
     global LAST_EXIT_MODE, LAST_EXIT_CANDLE_TIME, LAST_EXIT_WALL_TIME
 
@@ -3812,6 +4128,7 @@ def reset_trade_state_after_sell(candle_time):
     LAST_EXIT_CANDLE_TIME = candle_time
     LAST_EXIT_WALL_TIME = time.time()
     REENTRY_RESCAN_PENDING = True
+    TRADE_TRANSITION_PENDING = False
 
     trade_state = {
         "in_position": False,
@@ -4618,6 +4935,19 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
     """
     Notification Telegram compacte à copier/coller dans ChatGPT après chaque trade complet.
     """
+    if trade_state.get("execution_mode") == "PAPER" or (not trade_state.get("execution_mode") and is_paper_mode()):
+        closed = PAPER_STATE.get("last_closed_trade") or {}
+        closed["mode"] = trade_state.get("signal_mode")
+        closed["exit_reason"] = exit_reason
+        PAPER_STATE["last_closed_trade"] = closed
+        paper_record_closed_trade()
+        notify_telegram(
+            "🧪 <b>PAPER TRADE TERMINÉ</b>\n"
+            f"{symbol} | {trade_state.get('signal_mode')}\n"
+            f"Sortie: {exit_reason} | PnL net simulé: {closed.get('net_pnl_usdc', 0):.4f} USDC\n"
+            "Aucun ordre réel n'a été envoyé."
+        )
+        return
     entry = trade_state.get("entry_price")
     entry_balance = trade_state.get("entry_balance")
 
@@ -6914,17 +7244,18 @@ def consume_reentry_rescan():
 
 def run():
     github_restore_data()
+    paper_load_state()
     migrate_legacy_data_files()
     rebuild_auto_optimizer_profiles()
-    global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
+    global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state, TRADE_TRANSITION_PENDING
 
     print("BOT MULTI V6.5 ADAPTIVE INTELLIGENCE TREND SCORE")
     print("Long only | 15m | Une seule position à la fois")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
-    if not PRIVATE_KEY or not WALLET_ADDRESS:
-        print("[ERREUR] Variables manquantes: HL_API_SECRET ou HL_WALLET")
+    if not is_paper_mode() and (not PRIVATE_KEY or not WALLET_ADDRESS):
+        print("[ERREUR] Variables manquantes: HL_API_SECRET ou HL_WALLET (nécessaires en mode LIVE)")
         return
 
     META_BY_SYMBOL = get_meta_all()
@@ -6935,13 +7266,17 @@ def run():
 
     print("[INFO] META =", META_BY_SYMBOL)
     print("[INFO] SIZE_DECIMALS =", SIZE_DECIMALS_BY_SYMBOL)
-    print("Wallet:", WALLET_ADDRESS[:8] + "...")
+    if not is_paper_mode():
+        print("Wallet:", WALLET_ADDRESS[:8] + "...")
+    else:
+        print("[PAPER] TEST LIVE actif : aucun ordre réel ne sera envoyé.")
 
     start_balance = round(get_balance(), 2)
     print("Solde:", start_balance, "USDC")
     print("---")
     ensure_trades_csv()
     ensure_post_trade_files()
+    paper_load_state()
     save_bot_config(load_bot_config())
     start_dashboard_server()
     initialize_telegram_offset()
@@ -6961,6 +7296,7 @@ def run():
 
     while True:
         try:
+            cycle_mode = load_bot_config().get("trading_mode", "LIVE")
             check_telegram_commands()
             maybe_send_monthly_report()
             pos = get_open_position()
@@ -7000,6 +7336,11 @@ def run():
                     manage_mode_l_position(pos, df, current_price, confirmed_time)
                 else:
                     manage_open_position(pos, df, current_price, confirmed_time)
+                if cycle_mode == "PAPER":
+                    PAPER_STATE["trade_state"] = dict(trade_state)
+                    if PAPER_STATE.get("open_position"):
+                        PAPER_STATE["open_position"]["last_price"] = current_price
+                    paper_save_state()
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -7104,14 +7445,32 @@ def run():
             )
 
             entry_side = "SELL" if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" and details.get("mode_l", {}).get("side") == "SHORT" else "BUY"
-            if place_order_usd(symbol, entry_side, TRADE_SIZE_USD, current_price, reduce_only=False):
+            if place_order_usd(
+                symbol, entry_side, TRADE_SIZE_USD, current_price,
+                reduce_only=False, expected_mode=cycle_mode,
+                paper_metadata={
+                    "signal_mode": details.get("signal_mode"),
+                    "details": details,
+                    "score": round(best["score"], 4),
+                    "pattern_score": details.get("pattern_score"),
+                    "entry_atr": float(last["atr"]),
+                    "entry_candle_time": confirmed_time,
+                    "mode_l_side": details.get("mode_l", {}).get("side"),
+                    "mode_l_stop": details.get("mode_l", {}).get("stop"),
+                    "mode_l_target": details.get("mode_l", {}).get("target"),
+                    "mode_l_liquidity": details.get("mode_l", {}).get("level"),
+                },
+            ):
                 trades += 1
                 trade_state["in_position"] = True
                 trade_state["symbol"] = symbol
                 trade_state["entry_price"] = current_price
+                if cycle_mode == "PAPER" and PAPER_STATE.get("open_position"):
+                    trade_state["entry_price"] = float(PAPER_STATE["open_position"].get("entry", current_price))
+                trade_state["execution_mode"] = cycle_mode
                 trade_state["entry_atr"] = last["atr"]
                 trade_state["tp1_done"] = False
-                trade_state["highest_price"] = current_price
+                trade_state["highest_price"] = trade_state["entry_price"]
                 trade_state["trailing_stop"] = None
                 trade_state["cooldown_until_candle"] = None
                 trade_state["entry_candle_time"] = confirmed_time
@@ -7168,6 +7527,10 @@ def run():
                     trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
+                if cycle_mode == "PAPER":
+                    PAPER_STATE["trade_state"] = dict(trade_state)
+                    paper_save_state()
+                TRADE_TRANSITION_PENDING = False
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
 
             time.sleep(CHECK_INTERVAL)
