@@ -6587,14 +6587,20 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
             bias = "BAISSIER"
         else:
             bias = "NEUTRE / MIXTE"
+        def chart_safe_float(value):
+            try:
+                return round(float(value), 8) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
         active_trade = None
         if trade_state.get("in_position") and trade_state.get("symbol") == symbol:
             active_trade = {
                 "side": trade_state.get("mode_l_side") or "LONG",
-                "entry": safe_float(trade_state.get("entry_price")),
-                "stop": safe_float(trade_state.get("mode_l_stop") or trade_state.get("trailing_stop")),
-                "target": safe_float(trade_state.get("mode_l_target")),
-                "tp1": safe_float(trade_state.get("tp1_price")),
+                "entry": chart_safe_float(trade_state.get("entry_price")),
+                "stop": chart_safe_float(trade_state.get("mode_l_stop") or trade_state.get("trailing_stop")),
+                "target": chart_safe_float(trade_state.get("mode_l_target")),
+                "tp1": chart_safe_float(trade_state.get("tp1_price")),
                 "mode": trade_state.get("signal_mode"),
             }
         snapshot = {
