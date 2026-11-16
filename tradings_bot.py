@@ -651,7 +651,16 @@ def paper_manage_position(df,current_price,candle_time):
         if not p: return
         price=float(current_price); p["last_price"]=price
         side=p.get("side","LONG"); entry=float(p["entry_price"]); atr=float(p.get("entry_atr") or df.iloc[-1]["atr"])
-        if side=="LONG":
+        if p.get("mode")=="MODE_L_LIQUIDITY_SWEEP":
+            if side=="LONG":
+                if price<=float(p["stop"]): reason="PAPER_SWEEP_INVALIDATION"
+                elif price>=float(p["target"]): reason="PAPER_LIQUIDITY_TP"
+                else: save_paper_state(); return
+            else:
+                if price>=float(p["stop"]): reason="PAPER_SWEEP_INVALIDATION"
+                elif price<=float(p["target"]): reason="PAPER_LIQUIDITY_TP"
+                else: save_paper_state(); return
+        elif side=="LONG":
             p["highest_price"]=max(float(p.get("highest_price",entry)),price)
             if price<=float(p["stop"]): reason="PAPER_ATR_STOP"
             elif p.get("tp1") and not p.get("tp1_done") and price>=float(p["tp1"]):
@@ -667,10 +676,6 @@ def paper_manage_position(df,current_price,candle_time):
             else:
                 if p.get("tp1_done"): p["trailing_stop"]=max(float(p.get("trailing_stop",0)),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
                 save_paper_state(); return
-        else:
-            if price>=float(p["stop"]): reason="PAPER_SWEEP_INVALIDATION"
-            elif price<=float(p["target"]): reason="PAPER_LIQUIDITY_TP"
-            else: save_paper_state(); return
     paper_close_position(price,reason)
 
 def paper_process_cycle():
