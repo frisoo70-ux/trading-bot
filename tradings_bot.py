@@ -2784,6 +2784,18 @@ def append_trade_to_csv(symbol, exit_price, exit_reason, final_balance):
         writer = csv.writer(f)
         writer.writerow(row)
 
+    # Recalcule Auto Learning immédiatement après chaque trade clôturé.
+    # La sauvegarde adaptative planifie ensuite sa synchronisation GitHub.
+    try:
+        al = rebuild_auto_learning_from_history()
+        print(
+            f"[AUTO LEARNING UPDATE] trades={al.get('sample_size', 0)} "
+            f"recommendation={al.get('recommendation', 'N/A')} "
+            f"updated={al.get('last_updated', 'N/A')}"
+        )
+    except Exception as e:
+        print("[AUTO LEARNING UPDATE ERROR]", e)
+
     schedule_github_backup(delay_seconds=5)
     return row
 
@@ -5023,12 +5035,40 @@ def get_auto_learning_adjustment(mode=None, symbol=None, pattern=None):
         al = load_adaptive_config().get("auto_learning", {})
         if not al or not al.get("enabled", True) or not al.get("auto_apply", True):
             return {"multiplier": 1.0, "blocked": False, "reasons": []}
+
+        # Si une quarantaine a expiré, déclencher la transition vers le retest
+        # même si le dashboard n'a pas été consulté.
+        temporary = al.get("temporary_blocks", {}) if isinstance(al.get("temporary_blocks", {}), dict) else {}
+        now = datetime.now()
+        expired_block = False
+        for group in ("modes", "patterns", "tokens"):
+            states = temporary.get(group, {})
+            if not isinstance(states, dict):
+                continue
+            for state in states.values():
+                if not isinstance(state, dict) or state.get("status") != "blocked":
+                    continue
+                until = _al_parse_datetime(state.get("blocked_until"))
+                if until and now >= until:
+                    expired_block = True
+                    break
+            if expired_block:
+                break
+        if expired_block:
+            rebuild_auto_learning_from_history()
+            al = load_adaptive_config().get("auto_learning", {})
+
+        retesting_modes = set(al.get("retesting_modes", []) or [])
+        retesting_tokens = set(al.get("retesting_tokens", []) or [])
+        retesting_patterns = set(al.get("retesting_patterns", []) or [])
         mult = 1.0
         blocked = False
         reasons = []
         if mode:
             d = al.get("mode_multipliers", {}).get(mode)
-            if d:
+            if mode in retesting_modes:
+                reasons.append(f"mode_retest:{mode}:neutral")
+            elif d:
                 mult *= float(d.get("multiplier", 1.0))
                 reasons.append(f"mode:{mode}x{d.get('multiplier')}")
             if mode in al.get("blocked_modes", []):
@@ -5036,7 +5076,9 @@ def get_auto_learning_adjustment(mode=None, symbol=None, pattern=None):
                 reasons.append(f"mode_blocked:{mode}")
         if symbol:
             d = al.get("token_multipliers", {}).get(symbol)
-            if d:
+            if symbol in retesting_tokens:
+                reasons.append(f"token_retest:{symbol}:neutral")
+            elif d:
                 mult *= float(d.get("multiplier", 1.0))
                 reasons.append(f"token:{symbol}x{d.get('multiplier')}")
             if symbol in al.get("blocked_tokens", []):
@@ -5045,7 +5087,9 @@ def get_auto_learning_adjustment(mode=None, symbol=None, pattern=None):
         if pattern:
             p = str(pattern).split(",")[0]
             d = al.get("pattern_multipliers", {}).get(p)
-            if d:
+            if p in retesting_patterns:
+                reasons.append(f"pattern_retest:{p}:neutral")
+            elif d:
                 mult *= float(d.get("multiplier", 1.0))
                 reasons.append(f"pattern:{p}x{d.get('multiplier')}")
             if p in al.get("blocked_patterns", []):
