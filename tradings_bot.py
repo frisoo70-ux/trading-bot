@@ -2409,8 +2409,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     with TRADING_MODE_LOCK:
                         if ORDER_STATE.get("pending"):
                             return self._json({"ok": False, "error": "Un ordre est en cours ou en attente. Réessayez après sa résolution."}, 409)
-                        if PAPER_STATE.get("open_position"):
-                        return self._json({"ok": False, "error": "Fermez la position simulée avant de changer de mode."}, 409)
+                        if PAPER_STATE.get("open_position") or PAPER_STATE.get("last_closed_trade") or trade_state.get("in_position"):
+                            return self._json({"ok": False, "error": "Fermez la position en cours et terminez sa comptabilisation avant de changer de mode."}, 409)
                         if requested_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
                             return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible d’activer le mode LIVE."}, 409)
                         if not WALLET_ADDRESS:
@@ -4823,7 +4823,7 @@ def send_trade_summary(symbol, exit_price, exit_reason, final_balance):
     """
     Notification Telegram compacte à copier/coller dans ChatGPT après chaque trade complet.
     """
-    if is_paper_mode():
+    if trade_state.get("execution_mode") == "PAPER" or (not trade_state.get("execution_mode") and is_paper_mode()):
         closed = PAPER_STATE.get("last_closed_trade") or {}
         closed["mode"] = trade_state.get("signal_mode")
         closed["exit_reason"] = exit_reason
@@ -7224,7 +7224,7 @@ def run():
                     manage_mode_l_position(pos, df, current_price, confirmed_time)
                 else:
                     manage_open_position(pos, df, current_price, confirmed_time)
-                if is_paper_mode():
+                if cycle_mode == "PAPER":
                     PAPER_STATE["trade_state"] = dict(trade_state)
                     if PAPER_STATE.get("open_position"):
                         PAPER_STATE["open_position"]["last_price"] = current_price
@@ -7338,8 +7338,9 @@ def run():
                 trade_state["in_position"] = True
                 trade_state["symbol"] = symbol
                 trade_state["entry_price"] = current_price
-                if is_paper_mode() and PAPER_STATE.get("open_position"):
+                if cycle_mode == "PAPER" and PAPER_STATE.get("open_position"):
                     trade_state["entry_price"] = float(PAPER_STATE["open_position"].get("entry", current_price))
+                trade_state["execution_mode"] = cycle_mode
                 trade_state["entry_atr"] = last["atr"]
                 trade_state["tp1_done"] = False
                 trade_state["highest_price"] = trade_state["entry_price"]
@@ -7399,7 +7400,7 @@ def run():
                     trade_state["tp1_adaptive_sample"] = tp1_info["sample"]
                 trade_state["tp1_exec_price"] = None
                 trade_state["tp1_qty"] = None
-                if is_paper_mode():
+                if cycle_mode == "PAPER":
                     PAPER_STATE["trade_state"] = dict(trade_state)
                     paper_save_state()
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
