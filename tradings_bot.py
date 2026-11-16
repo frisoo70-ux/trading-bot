@@ -1601,6 +1601,24 @@ DASHBOARD_HTML = r"""<!doctype html>
     .detailItem{background:var(--card2);padding:10px;border-radius:12px;border:1px solid #2b3950}
     .aiBox{background:#071827;border:1px solid #164e63;border-radius:12px;padding:12px;white-space:pre-wrap;line-height:1.35}
     .liveGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.liveBox{background:var(--card2);border:1px solid #2b3950;border-radius:14px;padding:12px}.liveLabel{color:var(--muted);font-size:12px}.liveVal{font-size:18px;font-weight:800;margin-top:5px}.bar{height:10px;background:#334155;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--green));width:0%}.liveSub{font-size:12px;color:var(--muted);margin-top:8px}
+    .chartHeader{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .chartSelect{background:#172033;color:#e5e7eb;border:1px solid #334155;border-radius:9px;padding:10px;min-width:100px}
+    .chartSummary{margin:12px 0;padding:10px 12px;background:#0b1422;border:1px solid #263348;border-radius:10px;font-size:12px;line-height:1.5;color:#cbd5e1}
+    .chartToolbar{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:10px 0}
+    .chartTool{width:auto;min-height:34px;padding:7px 11px;border:1px solid #334155;border-radius:8px;background:#172033;color:#cbd5e1;font-size:12px;font-weight:700}
+    .chartTool.active{background:#075985;border-color:#0ea5e9;color:#e0f2fe}
+    .chartCanvas{width:100%;min-height:250px;overflow:hidden;background:#0b1422;border:1px solid #263348;border-radius:12px}
+    .chartCanvas svg{display:block;width:100%;height:auto}
+    .chartLegend{display:flex;gap:12px;flex-wrap:wrap;margin:10px 2px 4px;font-size:11px;color:#cbd5e1}
+    .chartLegend span{display:inline-flex;align-items:center;gap:5px}
+    .chartLegend i{display:inline-block;width:17px;height:3px;border-radius:2px}
+    .chartOrderbook{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+    .bookSide{background:#0b1422;border:1px solid #263348;border-radius:10px;padding:10px;min-width:0}
+    .bookTitle{font-size:12px;font-weight:800;margin-bottom:8px}
+    .bookRow{display:grid;grid-template-columns:72px 1fr 72px;align-items:center;gap:7px;font-size:10px;margin:6px 0;font-variant-numeric:tabular-nums}
+    .bookTrack{height:7px;background:#263348;border-radius:5px;overflow:hidden}
+    .bookFill{height:100%;border-radius:5px}
+    @media(max-width:520px){.chartOrderbook{grid-template-columns:1fr}.bookRow{grid-template-columns:64px 1fr 65px}.chartTool{min-height:32px;padding:6px 8px}}
 
     @media(max-width:700px){.liveGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:900px){.cards,.two{grid-template-columns:1fr}.wrap{padding:10px}.card{padding:13px;border-radius:15px}table{font-size:12px;min-width:720px}th,td{padding:9px 7px}.mobileHint{display:block}}
@@ -1644,15 +1662,26 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div class="card" id="liquidityChartPanel" style="margin-top:12px">
-    <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
-      <h3 style="margin:0">💧 Carte des liquidités · Poches estimées + carnet réel</h3>
-      <select id="chartSymbol" onchange="loadChart()" style="background:#172033;color:#e5e7eb;border:1px solid #334155;border-radius:9px;padding:9px">
+    <div class="chartHeader">
+      <div><h3 style="margin:0">💧 Graphique avancé · Prix, liquidité & carnet</h3><div class="muted">Analyse visuelle uniquement · aucune décision d'ordre déclenchée par le graphique</div></div>
+      <select id="chartSymbol" onchange="loadChart()" class="chartSelect">
         <option value="SOL">SOL</option><option value="XRP">XRP</option><option value="kSHIB">kSHIB</option>
       </select>
     </div>
-    <div id="chartSummary" class="muted" style="margin:10px 0">Chargement des données du moteur…</div>
-    <div id="liquidityChart" style="width:100%;overflow:hidden;min-height:190px"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
-    <div class="muted" style="margin-top:8px">Bougies clôturées · Poches estimées par pivots · ordres visibles du carnet Hyperliquid (bids/asks) · carnet mis en cache 60 secondes. Les stops cachés ne sont pas visibles. Lecture seule : aucun ordre déclenché.</div>
+    <div id="chartSummary" class="chartSummary">Chargement des données du moteur…</div>
+    <div class="chartToolbar">
+      <span class="muted">Historique affiché</span>
+      <button type="button" class="chartTool" onclick="setChartWindow(60)">60 bougies</button>
+      <button type="button" class="chartTool active" onclick="setChartWindow(120)">120 bougies</button>
+      <button type="button" class="chartTool" onclick="setChartWindow(180)">180 bougies</button>
+      <button type="button" class="chartTool" onclick="moveChartWindow(-1)">← Plus ancien</button>
+      <button type="button" class="chartTool" onclick="moveChartWindow(1)">Plus récent →</button>
+      <button type="button" class="chartTool" onclick="loadChart()">↻ Actualiser</button>
+    </div>
+    <div id="liquidityChart" class="chartCanvas"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
+    <div id="chartLegend" class="chartLegend"></div>
+    <div id="chartOrderbook" class="chartOrderbook"></div>
+    <div class="muted" style="margin-top:9px">EMA20 / EMA50 / VWAP · volumes · niveaux de liquidité estimés par pivots · sweeps détectés · carnet L2 réel (cache 60 s). Les ordres cachés ne sont pas visibles. Les niveaux affichés ne garantissent pas une exécution.</div>
   </div>
 
   <div class="grid two" style="margin-top:12px">
@@ -1971,6 +2000,100 @@ function renderLiveTradeV48(live){
 
 
 let chartBusy=false;
+let chartWindow=120;
+let chartOffset=0;
+function setChartWindow(n){
+ chartWindow=n;
+ chartOffset=0;
+ document.querySelectorAll('.chartTool').forEach(b=>{if((b.textContent||'').indexOf(String(n))>=0)b.classList.add('active');else if((b.textContent||'').indexOf('bougies')>=0)b.classList.remove('active')});
+ loadChart();
+}
+function moveChartWindow(direction){
+ const symbol=document.getElementById('chartSymbol').value;
+ const suffix=window.location.search?('&'+window.location.search.slice(1)):'';
+ fetch('/api/chart?symbol='+encodeURIComponent(symbol)+suffix).then(r=>r.json()).then(d=>{
+  const total=(d.candles||[]).length;
+  const maxOffset=Math.max(0,total-chartWindow);
+  chartOffset=Math.max(0,Math.min(maxOffset,chartOffset-direction*Math.max(10,Math.floor(chartWindow/2))));
+  loadChart();
+ }).catch(()=>{});
+}
+function chartLine(bars,key,color,width,dash){
+ const pts=bars.map((b,i)=>chartX(i,bars.length)+','+chartY(Number(b[key]))).join(' ');
+ return '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="'+width+'"'+(dash?' stroke-dasharray="'+dash+'"':'')+' opacity=".96"/>';
+}
+let chartScale={min:0,max:1,top:24,height:300,left:76,width:1000};
+function chartY(v){return chartScale.top+(chartScale.max-Number(v))/(chartScale.max-chartScale.min)*chartScale.height}
+function chartX(i,n){return chartScale.left+(i+.5)*chartScale.width/n}
+function renderChart(d){
+ const host=document.getElementById('liquidityChart');
+ const all=d.candles||[];
+ const end=Math.max(0,all.length-chartOffset);
+  const start=Math.max(0,end-chartWindow);
+  const bars=all.slice(start,end);
+ if(bars.length<5){host.textContent='Historique insuffisant';return}
+ const trade=d.trade||null,book=d.orderbook||{bids:[],asks:[]};
+ const levels=bars.map(b=>Number(b.low)).concat(bars.map(b=>Number(b.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number));
+ if(trade){['entry','stop','target','tp1'].forEach(k=>{if(trade[k]!=null)levels.push(Number(trade[k]))})}
+ let min=Math.min.apply(null,levels),max=Math.max.apply(null,levels);
+ const pad=(max-min)*.055||Math.abs(max)*.002||.000001;min-=pad;max+=pad;
+ const W=1120,H=500,L=82,R=18,T=24,priceH=320,volTop=380,volH=78,plotW=W-L-R;
+ chartScale={min:min,max:max,top:T,height:priceH,left:L,width:plotW};
+ const y=chartY,x=i=>chartX(i,bars.length),bodyW=Math.max(2,Math.min(9,plotW/bars.length*.58));
+ let svg='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Graphique avancé '+esc(d.symbol)+'" style="background:#0b1422;border-radius:11px">';
+ for(let i=0;i<=5;i++){
+  const val=max-(max-min)*i/5,yy=y(val);
+  svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#263348" stroke-width="1"/><text x="'+(L-9)+'" y="'+(yy+4)+'" fill="#9ca3af" font-size="11" text-anchor="end">'+fmt(val,6)+'</text>';
+ }
+ svg+='<line x1="'+L+'" y1="'+(volTop-12)+'" x2="'+(W-R)+'" y2="'+(volTop-12)+'" stroke="#334155"/>';
+ const maxVol=Math.max.apply(null,bars.map(b=>Number(b.volume||0)).concat([1]));
+ for(let i=0;i<bars.length;i++){
+  const b=bars[i],xx=x(i),up=Number(b.close)>=Number(b.open),col=up?'#22c55e':'#ef4444';
+  const yo=y(b.open),yc=y(b.close),yh=y(b.high),yl=y(b.low);
+  const tm=new Date(Number(b.time)).toLocaleString('fr-FR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  svg+='<g><title>'+esc(tm)+' · O '+fmt(b.open,6)+' · H '+fmt(b.high,6)+' · B '+fmt(b.low,6)+' · C '+fmt(b.close,6)+' · Vol '+fmt(b.volume,2)+'</title>';
+  svg+='<line x1="'+xx+'" y1="'+yh+'" x2="'+xx+'" y2="'+yl+'" stroke="'+col+'" stroke-width="1.5"/>';
+  svg+='<rect x="'+(xx-bodyW/2)+'" y="'+Math.min(yo,yc)+'" width="'+bodyW+'" height="'+Math.max(1,Math.abs(yo-yc))+'" fill="'+col+'" rx="1"/>';
+  const vh=Number(b.volume||0)/maxVol*volH;
+  svg+='<rect x="'+(xx-bodyW/2)+'" y="'+(volTop+volH-vh)+'" width="'+bodyW+'" height="'+Math.max(1,vh)+'" fill="'+(up?'#16a34a':'#b91c1c')+'" opacity=".62"/>';
+  svg+='</g>';
+ }
+ svg+=chartLine(bars,'ema20','#38bdf8',2,'')+chartLine(bars,'ema50','#c084fc',2,'')+chartLine(bars,'vwap','#facc15',1.8,'5 4');
+ const hline=(price,color,label,dash,width)=>{
+  if(price==null||!isFinite(Number(price))||Number(price)<min||Number(price)>max)return '';
+  const yy=y(price);
+  return '<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="'+color+'" stroke-width="'+width+'" stroke-dasharray="'+dash+'"/><rect x="'+(W-R-112)+'" y="'+(yy-10)+'" width="110" height="17" rx="4" fill="'+color+'" opacity=".92"/><text x="'+(W-R-7)+'" y="'+(yy+2)+'" fill="#07111f" font-size="10" font-weight="700" text-anchor="end">'+esc(label)+' '+fmt(price,6)+'</text>';
+ };
+ (d.pools_high||[]).forEach(p=>{svg+=hline(p,'#fb923c','LIQ. HAUTE','6 5',1.4)});
+ (d.pools_low||[]).forEach(p=>{svg+=hline(p,'#34d399','LIQ. BASSE','6 5',1.4)});
+ if(trade){
+  svg+=hline(trade.entry,'#facc15','ENTRÉE','',2);
+  svg+=hline(trade.stop,'#fb7185','STOP','4 3',2);
+  svg+=hline(trade.target,'#4ade80','CIBLE','4 3',2);
+  if(trade.tp1!=null&&trade.tp1!==trade.target)svg+=hline(trade.tp1,'#86efac','TP1','2 4',1.5);
+ }
+ const current=Number(d.current_price);
+ if(current>=min&&current<=max){
+  const yy=y(current);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#f8fafc" stroke-width="1.5" stroke-dasharray="3 3"/>';
+  svg+='<text x="'+(L+5)+'" y="'+(yy-6)+'" fill="#f8fafc" font-size="10">PRIX ACTUEL</text>';
+ }
+ for(let i=0;i<5;i++){
+  const idx=Math.min(bars.length-1,Math.round(i*(bars.length-1)/4)),b=bars[idx];
+  const label=new Date(Number(b.time)).toLocaleString('fr-FR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  svg+='<text x="'+x(idx)+'" y="475" fill="#9ca3af" font-size="10" text-anchor="middle">'+esc(label)+'</text>';
+ }
+ svg+='<text x="'+L+'" y="'+(volTop-18)+'" fill="#9ca3af" font-size="10">VOLUME</text></svg>';
+ host.innerHTML=svg;
+ const legend=[['#38bdf8','EMA20'],['#c084fc','EMA50'],['#facc15','VWAP'],['#fb923c','Liquidité haute'],['#34d399','Liquidité basse'],['#f8fafc','Prix actuel']];
+ if(trade){legend.push(['#facc15','Entrée'],['#fb7185','Stop'],['#4ade80','Cible / TP'])}
+ document.getElementById('chartLegend').innerHTML=legend.map(v=>'<span><i style="background:'+v[0]+'"></i>'+v[1]+'</span>').join('');
+ const renderBook=(name,rows,color)=>{
+  const maxUsd=Math.max.apply(null,rows.map(v=>Number(v.usd||0)).concat([1]));
+  if(!rows.length)return '<div class="bookSide"><div class="bookTitle">'+name+'</div><div class="muted">Carnet indisponible</div></div>';
+  return '<div class="bookSide"><div class="bookTitle" style="color:'+color+'">'+name+'</div>'+rows.slice(0,8).map(v=>'<div class="bookRow"><span>'+fmt(v.price,6)+'</span><div class="bookTrack"><div class="bookFill" style="width:'+Math.max(2,Number(v.usd||0)/maxUsd*100)+'%;background:'+color+'"></div></div><span style="text-align:right">'+fmt(v.usd,0)+' $</span></div>').join('')+'</div>';
+ };
+ document.getElementById('chartOrderbook').innerHTML=renderBook('ACHETEURS · BIDS',book.bids||[],'#22c55e')+renderBook('VENDEURS · ASKS',book.asks||[],'#f87171');
+}
 async function loadChart(){
  if(chartBusy)return;chartBusy=true;
  try{
@@ -1979,36 +2102,10 @@ async function loadChart(){
   const r=await fetch('/api/chart?symbol='+encodeURIComponent(symbol)+suffix);
   const d=await r.json();
   const summary=document.getElementById('chartSummary');
-  const host=document.getElementById('liquidityChart');
-  if(!d.ready){summary.textContent=d.message||'Données indisponibles';host.innerHTML='<div class="muted">En attente du prochain scan du bot.</div>';return}
-  summary.textContent=d.symbol+' · '+d.timeframe+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at;
-  const bars=d.candles||[];
-  if(bars.length<5){host.textContent='Historique insuffisant';return}
-  const book=d.orderbook||{bids:[],asks:[]};
-  const bookLevels=(book.bids||[]).concat(book.asks||[]);
-  const levels=bars.map(x=>Number(x.low)).concat(bars.map(x=>Number(x.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number),bookLevels.map(x=>Number(x.price)));
-  let min=Math.min.apply(null,levels),max=Math.max.apply(null,levels);if(!(max>min)){min*=.999;max*=1.001}
-  const W=900,H=300,L=65,R=12,T=12,B=24,plotW=W-L-R,plotH=H-T-B;
-  const y=v=>T+(max-Number(v))/(max-min)*plotH;
-  const x=i=>L+(i+.5)*plotW/bars.length;
-  const bodyW=Math.max(3,Math.min(11,plotW/bars.length*.55));
-  let svg='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Graphique de prix '+esc(d.symbol)+'" style="width:100%;height:auto;display:block;background:#0b1422;border-radius:10px">';
-  for(let i=0;i<=4;i++){const val=max-(max-min)*i/4,yy=y(val);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#263348" stroke-width="1"/><text x="'+(L-7)+'" y="'+(yy+4)+'" fill="#9ca3af" font-size="11" text-anchor="end">'+fmt(val,6)+'</text>'}
-  for(let i=0;i<bars.length;i++){const b=bars[i],xx=x(i),up=Number(b.close)>=Number(b.open),col=up?'#22c55e':'#ef4444';svg+='<line x1="'+xx+'" y1="'+y(b.high)+'" x2="'+xx+'" y2="'+y(b.low)+'" stroke="'+col+'" stroke-width="1.5"/><rect x="'+(xx-bodyW/2)+'" y="'+Math.min(y(b.open),y(b.close))+'" width="'+bodyW+'" height="'+Math.max(1,Math.abs(y(b.open)-y(b.close)))+'" fill="'+col+'" rx="1"/>'}
-  const line=(key,color)=>{const pts=bars.map((b,i)=>x(i)+','+y(b[key])).join(' ');return '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="2" opacity=".95"/>'};
-  svg+=line('ema20','#38bdf8')+line('ema50','#c084fc')+line('vwap','#facc15');
-  // Poches estimées par pivots : distinctes du carnet réel.
-  for(const p of d.pools_high||[]){const yy=y(p);if(yy>=T&&yy<=T+plotH)svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#fb923c" stroke-width="1.6" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#fdba74" font-size="10" text-anchor="end">POCHE ESTIMÉE ↑ '+fmt(p,6)+'</text>'}
-  for(const p of d.pools_low||[]){const yy=y(p);if(yy>=T&&yy<=T+plotH)svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#34d399" stroke-width="1.6" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#6ee7b7" font-size="10" text-anchor="end">POCHE ESTIMÉE ↓ '+fmt(p,6)+'</text>'}
-  // Ordres visibles du carnet : acheteurs en vert, vendeurs en rouge.
-  for(const side of ['asks','bids']){const arr=book[side]||[];for(const lv of arr){const yy=y(Number(lv.price));if(yy<T||yy>T+plotH)continue;const bid=side==='bids';const alpha=Math.max(.18,Math.min(.72,Number(lv.usd||0)/50000));svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="'+(bid?'#22c55e':'#f87171')+'" stroke-width="'+(1+alpha*3)+'" opacity="'+alpha+'" stroke-dasharray="2 3"/>';}}
-  const sw=d.sweep||{};
-  if(sw.valid&&sw.level!==null&&sw.level>=min&&sw.level<=max){const yy=y(sw.level);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#f8fafc" stroke-width="2" stroke-dasharray="3 4"/>'}
-  svg+='</svg>';
-  const largest=(book.bids||[]).concat(book.asks||[]).sort((a,b)=>Number(b.usd)-Number(a.usd)).slice(0,4);
-  const bookRows=largest.length?largest.map(v=>'<span style="display:inline-block;margin:4px 8px 0 0;padding:5px 7px;border-radius:6px;background:#172033;color:'+(Number(v.price)<=Number(d.current_price)?'#86efac':'#fca5a5')+'">'+fmt(v.price,6)+' · '+fmt(v.usd,0)+' $</span>').join(''):'Carnet non disponible';
-  host.innerHTML=svg+'<div style="margin-top:8px;padding:9px;background:#101a2b;border-radius:8px"><div style="font-weight:600">📚 Carnet réel Hyperliquid · '+(book.bids||[]).length+' niveaux acheteurs / '+(book.asks||[]).length+' niveaux vendeurs</div><div class="muted" style="font-size:11px;margin-top:3px">Vert = bids · Rouge = asks. Les stops cachés ne sont pas visibles.</div>'+bookRows+'</div>';
-  if(sw.valid){summary.textContent+=' · SWEEP '+sw.side+' confirmé · Niveau '+fmt(sw.level,6)+' · SL '+fmt(sw.stop,6)+' · TP '+fmt(sw.target,6)}
+  if(!d.ready){summary.textContent=d.message||'Données indisponibles';document.getElementById('liquidityChart').innerHTML='<div class="muted">En attente du prochain scan du bot.</div>';return}
+  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies'+(chartOffset?' · historique -'+chartOffset:' · récent')+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
+  renderChart(d);
+  if(d.sweep&&d.sweep.valid)summary.textContent+=' · SWEEP '+d.sweep.side+' confirmé · Niveau '+fmt(d.sweep.level,6)+' · SL '+fmt(d.sweep.stop,6)+' · TP '+fmt(d.sweep.target,6);
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
  finally{chartBusy=false}
 }
@@ -6476,22 +6573,40 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
     """Mémorise un mini-snapshot graphique à partir du dataframe déjà traité."""
     try:
         confirmed_time = int(confirmed_time)
+        def chart_safe_float(value):
+            try:
+                return round(float(value), 8) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        active_trade = None
+        if trade_state.get("in_position") and trade_state.get("symbol") == symbol:
+            active_trade = {
+                "side": trade_state.get("mode_l_side") or "LONG",
+                "entry": chart_safe_float(trade_state.get("entry_price")),
+                "stop": chart_safe_float(trade_state.get("mode_l_stop") or trade_state.get("trailing_stop")),
+                "target": chart_safe_float(trade_state.get("mode_l_target")),
+                "tp1": chart_safe_float(trade_state.get("tp1_price")),
+                "mode": trade_state.get("signal_mode"),
+            }
         with DASHBOARD_CHART_LOCK:
             existing = DASHBOARD_CHART_CACHE.get(symbol)
             if existing and existing.get("confirmed_time") == confirmed_time:
                 existing = dict(existing)
                 existing["current_price"] = round(float(current_price), 8)
+                existing["trade"] = active_trade
                 existing["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 DASHBOARD_CHART_CACHE[symbol] = existing
                 return
         rows = []
-        for _, r in df.tail(45).iterrows():
+        for _, r in df.tail(220).iterrows():
             rows.append({
                 "time": int(r["time"]),
                 "open": round(float(r["open"]), 8),
                 "high": round(float(r["high"]), 8),
                 "low": round(float(r["low"]), 8),
                 "close": round(float(r["close"]), 8),
+                "volume": round(float(r.get("volume", 0) or 0), 8),
                 "ema20": round(float(r["ema20"]), 8),
                 "ema50": round(float(r["ema50"]), 8),
                 "vwap": round(float(r["vwap"]), 8),
@@ -6510,6 +6625,7 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
             bias = "NEUTRE / MIXTE"
         snapshot = {
             "ready": True,
+            "trade": active_trade,
             "symbol": symbol,
             "timeframe": get_active_timeframe(),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
