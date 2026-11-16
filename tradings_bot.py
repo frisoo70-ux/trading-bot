@@ -1640,14 +1640,14 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div class="card" id="liquidityChartPanel" style="margin-top:12px">
     <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
-      <h3 style="margin:0">💧 Carte des liquidités · Analyse technique</h3>
+      <h3 style="margin:0">💧 Carte des liquidités · Poches estimées + carnet réel</h3>
       <select id="chartSymbol" onchange="loadChart()" style="background:#172033;color:#e5e7eb;border:1px solid #334155;border-radius:9px;padding:9px">
         <option value="SOL">SOL</option><option value="XRP">XRP</option><option value="kSHIB">kSHIB</option>
       </select>
     </div>
     <div id="chartSummary" class="muted" style="margin:10px 0">Chargement des données du moteur…</div>
     <div id="liquidityChart" style="width:100%;overflow:hidden;min-height:190px"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
-    <div class="muted" style="margin-top:8px">Bougies clôturées · EMA20 / EMA50 / VWAP · poches estimées par pivots · actualisation toutes les 60 secondes. Ce graphique est indicatif et ne déclenche aucun ordre.</div>
+    <div class="muted" style="margin-top:8px">Bougies clôturées · Poches estimées par pivots · ordres visibles du carnet Hyperliquid (bids/asks) · carnet mis en cache 60 secondes. Les stops cachés ne sont pas visibles. Lecture seule : aucun ordre déclenché.</div>
   </div>
 
   <div class="grid two" style="margin-top:12px">
@@ -1979,7 +1979,9 @@ async function loadChart(){
   summary.textContent=d.symbol+' · '+d.timeframe+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at;
   const bars=d.candles||[];
   if(bars.length<5){host.textContent='Historique insuffisant';return}
-  const levels=bars.map(x=>Number(x.low)).concat(bars.map(x=>Number(x.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number));
+  const book=d.orderbook||{bids:[],asks:[]};
+  const bookLevels=(book.bids||[]).concat(book.asks||[]);
+  const levels=bars.map(x=>Number(x.low)).concat(bars.map(x=>Number(x.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number),bookLevels.map(x=>Number(x.price)));
   let min=Math.min.apply(null,levels),max=Math.max.apply(null,levels);if(!(max>min)){min*=.999;max*=1.001}
   const W=900,H=300,L=65,R=12,T=12,B=24,plotW=W-L-R,plotH=H-T-B;
   const y=v=>T+(max-Number(v))/(max-min)*plotH;
@@ -1990,11 +1992,17 @@ async function loadChart(){
   for(let i=0;i<bars.length;i++){const b=bars[i],xx=x(i),up=Number(b.close)>=Number(b.open),col=up?'#22c55e':'#ef4444';svg+='<line x1="'+xx+'" y1="'+y(b.high)+'" x2="'+xx+'" y2="'+y(b.low)+'" stroke="'+col+'" stroke-width="1.5"/><rect x="'+(xx-bodyW/2)+'" y="'+Math.min(y(b.open),y(b.close))+'" width="'+bodyW+'" height="'+Math.max(1,Math.abs(y(b.open)-y(b.close)))+'" fill="'+col+'" rx="1"/>'}
   const line=(key,color)=>{const pts=bars.map((b,i)=>x(i)+','+y(b[key])).join(' ');return '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="2" opacity=".95"/>'};
   svg+=line('ema20','#38bdf8')+line('ema50','#c084fc')+line('vwap','#facc15');
-  for(const p of d.pools_high||[]){const yy=y(p);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#fb923c" stroke-width="1.4" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#fdba74" font-size="10" text-anchor="end">Liquidité haute '+fmt(p,6)+'</text>'}
-  for(const p of d.pools_low||[]){const yy=y(p);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#34d399" stroke-width="1.4" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#6ee7b7" font-size="10" text-anchor="end">Liquidité basse '+fmt(p,6)+'</text>'}
+  // Poches estimées par pivots : distinctes du carnet réel.
+  for(const p of d.pools_high||[]){const yy=y(p);if(yy>=T&&yy<=T+plotH)svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#fb923c" stroke-width="1.6" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#fdba74" font-size="10" text-anchor="end">POCHE ESTIMÉE ↑ '+fmt(p,6)+'</text>'}
+  for(const p of d.pools_low||[]){const yy=y(p);if(yy>=T&&yy<=T+plotH)svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#34d399" stroke-width="1.6" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#6ee7b7" font-size="10" text-anchor="end">POCHE ESTIMÉE ↓ '+fmt(p,6)+'</text>'}
+  // Ordres visibles du carnet : acheteurs en vert, vendeurs en rouge.
+  for(const side of ['asks','bids']){const arr=book[side]||[];for(const lv of arr){const yy=y(Number(lv.price));if(yy<T||yy>T+plotH)continue;const bid=side==='bids';const alpha=Math.max(.18,Math.min(.72,Number(lv.usd||0)/50000));svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="'+(bid?'#22c55e':'#f87171')+'" stroke-width="'+(1+alpha*3)+'" opacity="'+alpha+'" stroke-dasharray="2 3"/>';}}
   const sw=d.sweep||{};
   if(sw.valid&&sw.level!==null&&sw.level>=min&&sw.level<=max){const yy=y(sw.level);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#f8fafc" stroke-width="2" stroke-dasharray="3 4"/>'}
-  svg+='</svg>';host.innerHTML=svg;
+  svg+='</svg>';
+  const largest=(book.bids||[]).concat(book.asks||[]).sort((a,b)=>Number(b.usd)-Number(a.usd)).slice(0,4);
+  const bookRows=largest.length?largest.map(v=>'<span style="display:inline-block;margin:4px 8px 0 0;padding:5px 7px;border-radius:6px;background:#172033;color:'+(Number(v.price)<=Number(d.current_price)?'#86efac':'#fca5a5')+'">'+fmt(v.price,6)+' · '+fmt(v.usd,0)+' $</span>').join(''):'Carnet non disponible';
+  host.innerHTML=svg+'<div style="margin-top:8px;padding:9px;background:#101a2b;border-radius:8px"><div style="font-weight:600">📚 Carnet réel Hyperliquid · '+(book.bids||[]).length+' niveaux acheteurs / '+(book.asks||[]).length+' niveaux vendeurs</div><div class="muted" style="font-size:11px;margin-top:3px">Vert = bids · Rouge = asks. Les stops cachés ne sont pas visibles.</div>'+bookRows+'</div>';
   if(sw.valid){summary.textContent+=' · SWEEP '+sw.side+' confirmé · Niveau '+fmt(sw.level,6)+' · SL '+fmt(sw.stop,6)+' · TP '+fmt(sw.target,6)}
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
  finally{chartBusy=false}
@@ -2087,6 +2095,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     snapshot = dict(snapshot)
             if snapshot is None:
                 return self._json({"ready": False, "symbol": symbol, "message": "Données en attente du prochain scan."})
+            # Carnet réel Hyperliquid, chargé à la demande et mis en cache 60 s.
+            try:
+                book_raw = info_post(
+                    {"type": "l2Book", "coin": symbol},
+                    cache_key=f"dashboard_l2book:{symbol}",
+                    cache_ttl=60,
+                    max_retries=0,
+                )
+                raw_levels = book_raw.get("levels", []) if isinstance(book_raw, dict) else []
+                book = {"bids": [], "asks": []}
+                for side_index, side_name in ((0, "bids"), (1, "asks")):
+                    side_rows = raw_levels[side_index] if len(raw_levels) > side_index else []
+                    for level in side_rows[:8]:
+                        price = float(level.get("px", 0) or 0)
+                        size = float(level.get("sz", 0) or 0)
+                        if price > 0 and size > 0:
+                            book[side_name].append({"price": round(price, 8), "size": round(size, 8), "usd": round(price * size, 2)})
+                snapshot["orderbook"] = book
+            except Exception as book_error:
+                snapshot["orderbook"] = {"bids": [], "asks": []}
+                snapshot["orderbook_error"] = str(book_error)[:120]
             return self._json(snapshot)
 
         if parsed.path == "/api/config":
