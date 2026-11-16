@@ -2213,8 +2213,11 @@ function renderChart(d){
   const bars=all.slice(start,end);
  if(bars.length<5){host.textContent='Historique insuffisant';return}
  const trade=d.trade||null,book=d.orderbook||{bids:[],asks:[]};
- const zones=d.liquidity_zones||[];
- const levels=bars.map(b=>Number(b.low)).concat(bars.map(b=>Number(b.high)));
+ const candleLows=bars.map(b=>Number(b.low)),candleHighs=bars.map(b=>Number(b.high));
+ const candleMin=Math.min.apply(null,candleLows),candleMax=Math.max.apply(null,candleHighs);
+ const zoneViewPad=(candleMax-candleMin)*0.12;
+ const zones=(d.liquidity_zones||[]).filter(z=>Number(z.high)>=candleMin-zoneViewPad&&Number(z.low)<=candleMax+zoneViewPad);
+ const levels=candleLows.concat(candleHighs);
  zones.forEach(z=>{levels.push(Number(z.low),Number(z.high),Number(z.level))});
  if(trade){['entry','stop','target','tp1'].forEach(k=>{if(trade[k]!=null)levels.push(Number(trade[k]))})}
  let min=Math.min.apply(null,levels),max=Math.max.apply(null,levels);
