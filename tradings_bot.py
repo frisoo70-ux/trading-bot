@@ -542,6 +542,8 @@ def paper_load_state():
         if not PAPER_TRADES_CSV_PATH.exists():
             with open(PAPER_TRADES_CSV_PATH, "w", newline="", encoding="utf-8") as f:
                 csv.writer(f).writerow(["date","symbol","mode","side","entry","exit","qty","exit_reason","gross_pnl_usdc","fees_usdc","net_pnl_usdc","pnl_pct"])
+        if PAPER_STATE.get("last_closed_trade"):
+            paper_record_closed_trade()
         print("[PAPER] Solde simulé:", round(float(PAPER_STATE["balance"]), 4), "USDC")
     except Exception as e:
         print("[PAPER] Erreur chargement:", e)
@@ -1786,7 +1788,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card"><div class="muted">Winrate</div><div id="winrate" class="metric">-</div></div>
     <div class="card"><div class="muted">Trades</div><div id="trades" class="metric">-</div></div>
   </div>
-  <div class="card" style="margin-top:12px;border-color:#38bdf8"><h3>🧪 Mode TEST LIVE — Paper Trading</h3><div class="muted" id="paperWarning">Données de marché réelles, exécutions simulées, aucun ordre envoyé.</div><div class="grid cards" style="margin-top:10px"><div><div class="muted">Solde simulé</div><div class="metric" id="paperBalance">-</div></div><div><div class="muted">PnL simulé</div><div class="metric" id="paperPnl">-</div></div><div><div class="muted">Winrate simulé</div><div class="metric" id="paperWinrate">-</div></div><div><div class="muted">Trades simulés</div><div class="metric" id="paperTrades">-</div></div></div><pre id="paperPosition" style="margin-top:10px">Aucune position simulée</pre><div class="muted" id="paperRecent">Historique paper trading séparé du live.</div></div>
+  <div class="card" style="margin-top:12px;border-color:#38bdf8"><h3>🧪 Mode TEST LIVE — Paper Trading</h3><div class="muted" id="paperWarning">Données de marché réelles. Capital simulé : 1 000 USDC. Frais taker estimés : 0,035 % par exécution ; slippage simulé : 0,05 %.</div><div class="grid cards" style="margin-top:10px"><div><div class="muted">Solde simulé</div><div class="metric" id="paperBalance">-</div></div><div><div class="muted">PnL simulé</div><div class="metric" id="paperPnl">-</div></div><div><div class="muted">Winrate simulé</div><div class="metric" id="paperWinrate">-</div></div><div><div class="muted">Trades simulés</div><div class="metric" id="paperTrades">-</div></div></div><pre id="paperPosition" style="margin-top:10px">Aucune position simulée</pre><div class="muted" id="paperRecent">Historique paper trading séparé du live.</div></div>
   <div class="grid two" style="margin-top:12px">
     <div class="card">
       <h3>⚙️ Contrôle du bot</h3>
@@ -7302,9 +7304,11 @@ def run():
                 trade_state["in_position"] = True
                 trade_state["symbol"] = symbol
                 trade_state["entry_price"] = current_price
+                if is_paper_mode() and PAPER_STATE.get("open_position"):
+                    trade_state["entry_price"] = float(PAPER_STATE["open_position"].get("entry", current_price))
                 trade_state["entry_atr"] = last["atr"]
                 trade_state["tp1_done"] = False
-                trade_state["highest_price"] = current_price
+                trade_state["highest_price"] = trade_state["entry_price"]
                 trade_state["trailing_stop"] = None
                 trade_state["cooldown_until_candle"] = None
                 trade_state["entry_candle_time"] = confirmed_time
