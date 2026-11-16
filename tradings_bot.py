@@ -4670,7 +4670,7 @@ def _al_temporary_status(stats, previous_states, now=None):
                 state = {
                     "status": "blocked",
                     "blocked_at": now.isoformat(timespec="seconds"),
-                    "blocked_until": until.to_pydatetime().isoformat(timespec="seconds"),
+                    "blocked_until": until.isoformat(timespec="seconds"),
                     "last_seen_trades": trade_count,
                     "reason": "performance_insuffisante_apres_retest",
                 }
@@ -4685,7 +4685,7 @@ def _al_temporary_status(stats, previous_states, now=None):
             state = {
                 "status": "blocked",
                 "blocked_at": now.isoformat(timespec="seconds"),
-                "blocked_until": until.to_pydatetime().isoformat(timespec="seconds"),
+                "blocked_until": until.isoformat(timespec="seconds"),
                 "last_seen_trades": trade_count,
                 "reason": "performance_insuffisante",
             }
