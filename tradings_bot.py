@@ -1786,10 +1786,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card"><div class="muted">Winrate</div><div id="winrate" class="metric">-</div></div>
     <div class="card"><div class="muted">Trades</div><div id="trades" class="metric">-</div></div>
   </div>
+  <div class="card" style="margin-top:12px;border-color:#38bdf8"><h3>🧪 Mode TEST LIVE — Paper Trading</h3><div class="muted" id="paperWarning">Données de marché réelles, exécutions simulées, aucun ordre envoyé.</div><div class="grid cards" style="margin-top:10px"><div><div class="muted">Solde simulé</div><div class="metric" id="paperBalance">-</div></div><div><div class="muted">PnL simulé</div><div class="metric" id="paperPnl">-</div></div><div><div class="muted">Winrate simulé</div><div class="metric" id="paperWinrate">-</div></div><div><div class="muted">Trades simulés</div><div class="metric" id="paperTrades">-</div></div></div><pre id="paperPosition" style="margin-top:10px">Aucune position simulée</pre><div class="muted" id="paperRecent">Historique paper trading séparé du live.</div></div>
   <div class="grid two" style="margin-top:12px">
     <div class="card">
       <h3>⚙️ Contrôle du bot</h3>
-      <div class="muted" style="margin-bottom:8px">Modes</div><div id="modeToggles" class="toggles"></div>
+      <div class="muted" style="margin-bottom:8px">Mode d’exécution</div><select id="tradingMode" style="width:100%;padding:12px;border-radius:10px;background:#172033;color:#e5e7eb;border:1px solid #2b3950;margin-bottom:12px"><option value="LIVE">LIVE — ordres réels</option><option value="PAPER">TEST LIVE — simulation sans ordres</option></select><div class="muted" style="margin-bottom:8px">Modes de stratégie</div><div id="modeToggles" class="toggles"></div>
       <div class="muted" style="margin:14px 0 8px">Tokens</div><div id="symbolToggles" class="toggles"></div>
       <div class="muted" style="margin:14px 0 8px">Timeframe</div><div id="timeframeToggles" class="toggles"></div>
       <div class="muted" id="activeTimeframeLabel" style="margin-top:8px">Timeframe actif : -</div>
@@ -2111,9 +2112,10 @@ function renderToggles(cfg){
 
     document.getElementById('activeTimeframeLabel').textContent=
         'Timeframe actif : '+(cfg.timeframe||'15m');
+    document.getElementById('tradingMode').value=cfg.trading_mode||'LIVE';
 }
 
-async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
+async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}currentConfig.trading_mode=document.getElementById('tradingMode').value;const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});const j=await r.json();document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':('❌ '+(j.error||'Erreur sauvegarde'));setTimeout(()=>document.getElementById('saveStatus').textContent='',4500);load()}
 
 function renderLiveTradeV48(live){
  const empty=!live||!live.in_position;
@@ -2260,7 +2262,7 @@ async function loadChart(){
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
  finally{chartBusy=false}
 }
-async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
+async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();const paperMode=(d.config&&d.config.trading_mode==='PAPER');const p=d.paper||{};document.getElementById('balance').textContent=fmt(paperMode?p.balance:d.balance,2)+(paperMode?' USDC simulés':' USDC');document.getElementById('pnl').innerHTML=`<span class="${cls(paperMode?p.net_pnl:d.summary.pnl_total)}">${fmt(paperMode?p.net_pnl:d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(paperMode?p.winrate:d.summary.winrate,1)+'%';document.getElementById('trades').textContent=paperMode?(p.trades||0):d.summary.trades;document.getElementById('position').textContent=paperMode?(p.open_position?JSON.stringify(p.open_position,null,2):'Aucune position simulée'):(d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte');document.getElementById('paperBalance').textContent=fmt(p.balance,2)+' USDC';document.getElementById('paperPnl').textContent=fmt(p.net_pnl,4)+' USDC';document.getElementById('paperWinrate').textContent=fmt(p.winrate,1)+'%';document.getElementById('paperTrades').textContent=p.trades||0;document.getElementById('paperPosition').textContent=p.open_position?JSON.stringify(p.open_position,null,2):'Aucune position simulée';document.getElementById('paperRecent').textContent=(p.recent_trades||[]).slice().reverse().slice(0,5).map(t=>[t.date,t.symbol,t.mode,'PnL '+t.net_pnl_usdc+' USDC'].join(' | ')).join('\\n')||'Aucun trade simulé clôturé';document.getElementById('paperWarning').textContent=paperMode?'MODE TEST ACTIF : données réelles, ordres simulés uniquement. Aucun ordre réel envoyé.':'Mode LIVE actif. Les statistiques Paper restent séparées du trading réel.';renderToggles(d.config);renderLiveTradeV48(paperMode?{in_position:false}:d.live_trade);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
 lastTrades=(d.recent_trades||[]).slice().reverse();
@@ -2398,6 +2400,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     for k in base_cfg["symbols"].keys():
                         if k in cfg["symbols"]:
                             base_cfg["symbols"][k] = bool(cfg["symbols"][k])
+
+                requested_mode = "PAPER" if str(cfg.get("trading_mode", base_cfg.get("trading_mode", "LIVE"))).upper() == "PAPER" else "LIVE"
+                if requested_mode != base_cfg.get("trading_mode", "LIVE"):
+                    real_positions = get_positions()
+                    if real_positions or PAPER_STATE.get("open_position"):
+                        return self._json({"ok": False, "error": "Fermez toutes les positions réelles et simulées avant de changer de mode."}, 409)
+                    base_cfg["trading_mode"] = requested_mode
+                    for s in SYMBOLS:
+                        last_candle_times[s] = None
 
                 if cfg.get("timeframe") in TIMEFRAME_OPTIONS:
                     old_tf = base_cfg.get("timeframe", DEFAULT_TIMEFRAME)
