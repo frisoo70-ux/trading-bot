@@ -582,7 +582,7 @@ def paper_snapshot(current_price=None):
         price = float(current_price or p.get("last_price") or p["entry_price"])
         direction = 1 if p.get("side") == "LONG" else -1
         remaining = float(p.get("remaining_qty", p.get("qty", 0)))
-        unrealized = direction * (price - float(p["entry_price"])) * remaining
+        unrealized = (float(p.get("realized_partial_pnl", 0)) + direction * (price - float(p["entry_price"])) * remaining - float(p.get("entry_fee", 0)) - abs(remaining * price) * PAPER_FEE_RATE)
         position_view = dict(p)
         position_view["current_price"] = price
         position_view["unrealized_pnl"] = round(unrealized, 6)
@@ -1801,6 +1801,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="liveBox"><div class="liveLabel">Trades simulés</div><div class="liveVal" id="paperTrades">0</div></div>
     </div>
     <div class="muted" id="paperPosition" style="margin-top:10px">Aucune position simulée.</div>
+    <div class="scroll" style="margin-top:10px"><table id="paperTradesTable"></table></div>
     <div class="muted" id="executionModeLabel" style="margin-top:8px">Mode d’exécution : LIVE</div>
     <div style="margin-top:10px"><label class="toggle"><span>Exécution du bot<br><small style="color:#9ca3af;font-weight:500">LIVE = vrais ordres · PAPER = simulation sans ordre</small></span><select id="executionMode" class="chartSelect"><option value="LIVE">LIVE</option><option value="PAPER">PAPER TEST</option></select></label></div>
   </div>
@@ -2328,7 +2329,7 @@ table('postTrade',[
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
-async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const q=p.position;document.getElementById("paperPosition").textContent=q?`POSITION SIMULÉE ${q.side} · ${q.symbol} · ${q.mode} | Entrée ${fmt(q.entry_price,6)} | Prix ${fmt(q.current_price,6)} | PnL latent ${fmt(q.unrealized_pnl,4)} USDC | SL ${fmt(q.stop,6)} | TP ${fmt(q.tp1||q.target,6)}`:"Aucune position simulée."; }catch(e){}}
+async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const q=p.position;document.getElementById("paperPosition").textContent=q?`POSITION SIMULÉE ${q.side} · ${q.symbol} · ${q.mode} | Entrée ${fmt(q.entry_price,6)} | Prix ${fmt(q.current_price,6)} | PnL latent ${fmt(q.unrealized_pnl,4)} USDC | SL ${fmt(q.stop,6)} | TP ${fmt(q.tp1||q.target,6)}`:"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
 load();loadPaper();loadChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
@@ -2422,8 +2423,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if requested_execution_mode == "PAPER":
                         if not PRIVATE_KEY or not WALLET_ADDRESS:
                             return self._json({"ok": False, "error": "Impossible de vérifier la position réelle : identifiants Hyperliquid absents. Mode inchangé."}, 409)
-                        if get_open_position():
-                            return self._json({"ok": False, "error": "Ferme d’abord la position réelle avant de passer en Paper Trading."}, 409)
+                        live_state = info_post({"type": "clearinghouseState", "user": WALLET_ADDRESS}, cache_key="paper_mode_switch_check", cache_ttl=0, max_retries=0)
+                        if not isinstance(live_state, dict) or "assetPositions" not in live_state:
+                            return self._json({"ok": False, "error": "État Hyperliquid non vérifiable. Mode inchangé par sécurité."}, 409)
+                        live_positions = []
+                        for item in live_state.get("assetPositions", []):
+                            position = item.get("position", {})
+                            if position.get("coin") in SYMBOLS and float(position.get("szi", 0) or 0) != 0:
+                                live_positions.append(position.get("coin"))
+                        if live_positions:
+                            return self._json({"ok": False, "error": "Ferme d’abord toutes les positions réelles (longues ou short) avant de passer en Paper Trading : " + ", ".join(live_positions)}, 409)
                     elif PAPER_STATE.get("position"):
                         return self._json({"ok": False, "error": "Ferme d’abord la position simulée avant de revenir en Live."}, 409)
                     base_cfg["execution_mode"] = requested_execution_mode
