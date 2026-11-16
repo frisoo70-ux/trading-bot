@@ -1593,6 +1593,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     .detailItem{background:var(--card2);padding:10px;border-radius:12px;border:1px solid #2b3950}
     .aiBox{background:#071827;border:1px solid #164e63;border-radius:12px;padding:12px;white-space:pre-wrap;line-height:1.35}
     .liveGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.liveBox{background:var(--card2);border:1px solid #2b3950;border-radius:14px;padding:12px}.liveLabel{color:var(--muted);font-size:12px}.liveVal{font-size:18px;font-weight:800;margin-top:5px}.bar{height:10px;background:#334155;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--green));width:0%}.liveSub{font-size:12px;color:var(--muted);margin-top:8px}
+
+    .marketChart{margin-top:12px}
+    .chartHead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .chartSelect{background:#172033;color:#e5e7eb;border:1px solid #334155;border-radius:10px;padding:10px 12px;font-weight:700}
+    .chartWrap{width:100%;overflow:hidden;background:#07111f;border:1px solid #263348;border-radius:12px;margin-top:12px}
+    .chartSvg{display:block;width:100%;height:auto;min-height:250px}
+    .chartLegend{display:flex;gap:14px;flex-wrap:wrap;color:#9ca3af;font-size:12px;margin-top:9px}
+    .chartLegend span:before{content:"";display:inline-block;width:15px;height:3px;margin:0 6px 3px 0;background:currentColor}
+    .chartStats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}
+    .chartStat{background:#172033;border:1px solid #2b3950;border-radius:10px;padding:10px;min-width:0}
+    .chartStat small{display:block;color:#9ca3af;font-size:11px}
+    .chartStat strong{display:block;margin-top:4px;font-size:14px;overflow-wrap:anywhere}
+    .chartDecision{padding:12px;border-radius:11px;background:#102334;border:1px solid #28506a;margin-top:12px;font-weight:750}
+    .chartNote{color:#9ca3af;font-size:11px;line-height:1.4;margin-top:8px}
+    @media(max-width:650px){.chartStats{grid-template-columns:repeat(2,minmax(0,1fr))}.chartSvg{min-height:220px}}
+
     @media(max-width:700px){.liveGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:900px){.cards,.two{grid-template-columns:1fr}.wrap{padding:10px}.card{padding:13px;border-radius:15px}table{font-size:12px;min-width:720px}th,td{padding:9px 7px}.mobileHint{display:block}}
     @media(max-width:520px){h1{font-size:18px}h3{font-size:16px}.sub{font-size:11px}.cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{font-size:22px}.card{padding:12px}.toggles{grid-template-columns:1fr}.toggle{font-size:15px;padding:14px 13px}.scroll{max-height:360px}pre{max-height:300px;font-size:11px}}
@@ -1633,6 +1649,23 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="liveSub" id="liveProgressText">Progression entre Stop Loss et TP1 : -</div>
     </div>
   </div>
+
+  <div class="card marketChart">
+    <div class="chartHead">
+      <div><h3 style="margin-bottom:4px">🧠 Graphique intelligent · Liquidité</h3><div class="muted" id="chartSubtitle">Lecture seule · Chandeliers et zones détectées</div></div>
+      <select id="chartSymbol" class="chartSelect" onchange="loadMarketChart()">
+        <option value="SOL">SOL</option><option value="XRP">XRP</option><option value="kSHIB">kSHIB</option>
+      </select>
+    </div>
+    <div class="chartWrap"><svg id="marketChartSvg" class="chartSvg" viewBox="0 0 1100 460" role="img" aria-label="Graphique de chandeliers avec indicateurs et poches de liquidité"></svg></div>
+    <div class="chartLegend">
+      <span style="color:#38bdf8">EMA 20</span><span style="color:#f59e0b">EMA 50</span><span style="color:#a78bfa">VWAP</span><span style="color:#ef4444">Liquidité haute</span><span style="color:#22c55e">Liquidité basse</span>
+    </div>
+    <div class="chartStats" id="chartStats"></div>
+    <div class="chartDecision" id="chartDecision">Chargement de l'analyse…</div>
+    <div class="chartNote" id="chartNote">Les poches sont des niveaux estimés à partir des pivots et sommets/creux équivalents. Elles ne représentent pas des ordres stop-loss directement observés. Les scénarios sont informatifs et ne déclenchent aucun ordre.</div>
+  </div>
+
   <div class="grid two" style="margin-top:12px">
     <div class="card"><h3>📊 Par mode</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="byMode"></table></div></div>
     <div class="card"><h3>🪙 Par token</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="bySymbol"></table></div></div>
@@ -1947,6 +1980,48 @@ function renderLiveTradeV48(live){
  document.getElementById('liveProgressText').textContent=txt;
 }
 
+
+let chartRefreshTimer=null;
+function chartNum(v,d=5){const n=Number(v);return Number.isFinite(n)?n.toLocaleString('fr-FR',{maximumFractionDigits:d}):'-'}
+function renderMarketChart(d){
+ const svg=document.getElementById('marketChartSvg');
+ if(!d||d.error){svg.innerHTML='<text x="30" y="60" fill="#ef4444" font-size="20">'+(d&&d.error?String(d.error).replace(/[<>&]/g,' '):'Données indisponibles')+'</text>';document.getElementById('chartStats').innerHTML='';document.getElementById('chartDecision').textContent='Analyse indisponible';return}
+ const rows=d.candles||[];
+ if(rows.length<5){svg.innerHTML='<text x="30" y="60" fill="#9ca3af" font-size="20">Pas assez de chandeliers</text>';return}
+ const W=1100,H=460,L=24,R=92,T=24,B=34,plotW=W-L-R,plotH=H-T-B;
+ const levels=[...(d.pools_high||[]),...(d.pools_low||[])];
+ const vals=rows.flatMap(x=>[Number(x.high),Number(x.low)]).concat(levels.map(Number),[Number(d.price)]);
+ let lo=Math.min(...vals.filter(Number.isFinite)),hi=Math.max(...vals.filter(Number.isFinite));
+ if(!(hi>lo)){hi=lo*1.01;lo=lo*.99}
+ const pad=(hi-lo)*.08;lo-=pad;hi+=pad;
+ const x=i=>L+(i/(rows.length-1))*plotW;
+ const y=v=>T+((hi-Number(v))/(hi-lo))*plotH;
+ let out='';
+ for(let k=0;k<=5;k++){const yy=T+k*plotH/5;const vv=hi-k*(hi-lo)/5;out+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#263348" stroke-width="1"/><text x="'+(W-R+9)+'" y="'+(yy+4)+'" fill="#9ca3af" font-size="12">'+chartNum(vv,5)+'</text>'}
+ function line(key,color,width){const pts=rows.map((r,i)=>Number.isFinite(Number(r[key]))?x(i)+','+y(r[key]):null).filter(Boolean).join(' ');return pts?'<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="'+width+'" opacity=".95"/>':''}
+ const step=plotW/rows.length,cw=Math.max(3,Math.min(10,step*.62));
+ rows.forEach((r,i)=>{const xx=x(i),up=Number(r.close)>=Number(r.open),col=up?'#22c55e':'#ef4444';out+='<line x1="'+xx+'" y1="'+y(r.high)+'" x2="'+xx+'" y2="'+y(r.low)+'" stroke="'+col+'" stroke-width="1.5"/>';const top=y(Math.max(r.open,r.close)),bot=y(Math.min(r.open,r.close));out+='<rect x="'+(xx-cw/2)+'" y="'+top+'" width="'+cw+'" height="'+Math.max(1,bot-top)+'" fill="'+col+'" rx="1"/>'});
+ (d.pools_high||[]).forEach(v=>{if(v>=lo&&v<=hi)out+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+(W-R)+'" y2="'+y(v)+'" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="7 5" opacity=".8"/>'});
+ (d.pools_low||[]).forEach(v=>{if(v>=lo&&v<=hi)out+='<line x1="'+L+'" y1="'+y(v)+'" x2="'+(W-R)+'" y2="'+y(v)+'" stroke="#22c55e" stroke-width="1.5" stroke-dasharray="7 5" opacity=".8"/>'});
+ out+=line('ema20','#38bdf8',2.2)+line('ema50','#f59e0b',2.2)+line('vwap','#a78bfa',1.8);
+ if(Number.isFinite(Number(d.price))){const py=y(d.price);out+='<line x1="'+L+'" y1="'+py+'" x2="'+(W-R)+'" y2="'+py+'" stroke="#e5e7eb" stroke-dasharray="3 4" opacity=".7"/><text x="'+(W-R+7)+'" y="'+(py-7)+'" fill="#e5e7eb" font-size="12">Prix</text>'}
+ const sw=d.sweep||{};if(sw.valid&&Number.isFinite(Number(sw.level))){const sy=y(sw.level);out+='<circle cx="'+(W-R-8)+'" cy="'+sy+'" r="7" fill="'+(sw.side==='LONG'?'#22c55e':'#ef4444')+'"/><text x="'+(W-R-22)+'" y="'+(sy-13)+'" text-anchor="end" fill="#e5e7eb" font-size="13">SWEEP '+sw.side+'</text>'}
+ out+='<text x="'+L+'" y="'+(H-8)+'" fill="#9ca3af" font-size="12">'+rows[0].time+'</text><text x="'+(W-R)+'" y="'+(H-8)+'" text-anchor="end" fill="#9ca3af" font-size="12">'+rows[rows.length-1].time+'</text>';
+ svg.innerHTML=out;
+ const a=d.analysis||{};
+ document.getElementById('chartSubtitle').textContent=d.symbol+' · '+d.timeframe+' · '+rows.length+' bougies clôturées · Prix '+chartNum(d.price);
+ const stats=[['Biais',a.bias],['RSI',chartNum(a.rsi,1)],['ATR',chartNum(a.atr)],['OBV / MA5',a.obv_rising?'Acheteur':'Non confirmé'],['EMA 20',chartNum(a.ema20)],['EMA 50',chartNum(a.ema50)],['VWAP',chartNum(a.vwap)],['Mode L',a.mode_l_enabled?'Activé':'Désactivé']];
+ document.getElementById('chartStats').innerHTML=stats.map(v=>'<div class="chartStat"><small>'+v[0]+'</small><strong>'+v[1]+'</strong></div>').join('');
+ let decision=a.decision||'Aucune décision disponible';
+ if(sw.valid)decision+=' · Niveau sweep '+chartNum(sw.level)+' · SL '+chartNum(sw.stop)+' · TP '+chartNum(sw.target);
+ document.getElementById('chartDecision').textContent=decision;
+}
+async function loadMarketChart(){
+ const symbol=document.getElementById('chartSymbol').value;
+ try{const r=await fetch('/api/chart?symbol='+encodeURIComponent(symbol)+window.location.search.replace('?','&'));const d=await r.json();renderMarketChart(d)}
+ catch(e){renderMarketChart({error:'Erreur de chargement du graphique'})}
+}
+
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
@@ -1993,9 +2068,90 @@ table('postTrade',[
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
-load();setInterval(load,10000);
+load();loadMarketChart();setInterval(load,10000);setInterval(loadMarketChart,30000);
 </script>
 </body></html>"""
+
+
+def build_dashboard_chart(symbol):
+    """Données de visualisation en lecture seule, réutilisant le cache des chandeliers."""
+    if symbol not in SYMBOLS:
+        return {"error": "Actif non autorisé"}
+    try:
+        raw_df, candle_time, current_price = get_candles(symbol)
+        if raw_df is None or raw_df.empty or len(raw_df) < 60:
+            return {"symbol": symbol, "error": "Historique de chandeliers indisponible"}
+        df = add_indicators(raw_df).dropna(subset=["ema20", "ema50", "atr"]).copy()
+        if df.empty:
+            return {"symbol": symbol, "error": "Indicateurs indisponibles"}
+        sweep = detect_liquidity_sweep(df)
+        last = df.iloc[-1]
+        price = float(current_price if current_price is not None else last["close"])
+        ema20 = float(last["ema20"])
+        ema50 = float(last["ema50"])
+        vwap = float(last["vwap"])
+        rsi = float(last["rsi"])
+        atr = float(last["atr"])
+        obv_rising = bool(last["obv"] > last["obv_ma5"]) if pd.notna(last["obv_ma5"]) else False
+        bullish = ema20 > ema50 and price > ema20
+        bearish = ema20 < ema50 and price < ema20
+        mode_enabled = is_mode_enabled("MODE_L_LIQUIDITY_SWEEP")
+        if sweep.get("valid") and sweep.get("side") == "LONG" and mode_enabled:
+            decision = "ACHAT POTENTIEL — sweep haussier confirmé"
+        elif sweep.get("valid") and sweep.get("side") == "SHORT":
+            decision = "SIGNAL BAISSIER — observation uniquement (bot Long only)"
+        elif bullish:
+            decision = "BIAIS HAUSSIER — attendre un setup confirmé"
+        elif bearish:
+            decision = "BIAIS BAISSIER — pas d'achat privilégié"
+        else:
+            decision = "NEUTRE — attendre une confirmation"
+        rows = []
+        for _, row in df.tail(120).iterrows():
+            rows.append({
+                "time": int(row["time"]),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+                "ema20": float(row["ema20"]),
+                "ema50": float(row["ema50"]),
+                "vwap": float(row["vwap"]),
+            })
+        return {
+            "symbol": symbol,
+            "timeframe": get_active_timeframe(),
+            "price": price,
+            "candle_time": int(candle_time) if candle_time else None,
+            "candles": rows,
+            "pools_high": [float(x) for x in sweep.get("pools_high", [])],
+            "pools_low": [float(x) for x in sweep.get("pools_low", [])],
+            "sweep": {
+                "valid": bool(sweep.get("valid")),
+                "side": sweep.get("side"),
+                "level": sweep.get("level"),
+                "sweep_extreme": sweep.get("sweep_extreme"),
+                "stop": sweep.get("stop"),
+                "target": sweep.get("target"),
+                "reason": sweep.get("reason", "aucun sweep confirmé"),
+            },
+            "analysis": {
+                "bias": "HAUSSIER" if bullish else ("BAISSIER" if bearish else "NEUTRE"),
+                "ema20": ema20,
+                "ema50": ema50,
+                "vwap": vwap,
+                "rsi": rsi,
+                "atr": atr,
+                "obv_rising": obv_rising,
+                "mode_l_enabled": bool(mode_enabled),
+                "decision": decision,
+            },
+        }
+    except Exception as e:
+        print("[DASHBOARD CHART ERROR]", symbol, e)
+        return {"symbol": symbol, "error": str(e)}
+
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -2024,6 +2180,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/data":
             return self._json(compute_dashboard_stats())
+
+        if parsed.path == "/api/chart":
+            params = parse_qs(parsed.query)
+            symbol = str(params.get("symbol", ["SOL"])[0]).upper()
+            if symbol == "KSHIB":
+                symbol = "kSHIB"
+            return self._json(build_dashboard_chart(symbol))
 
         if parsed.path == "/api/config":
             return self._json(load_bot_config())
