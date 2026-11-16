@@ -659,7 +659,8 @@ def paper_snapshot(current_price=None):
         price = float(current_price or p.get("last_price") or p["entry_price"])
         direction = 1 if p.get("side") == "LONG" else -1
         remaining = float(p.get("remaining_qty", p.get("qty", 0)))
-        unrealized = (float(p.get("realized_partial_pnl", 0)) + direction * (price - float(p["entry_price"])) * remaining - float(p.get("entry_fee", 0)) - abs(remaining * price) * PAPER_FEE_RATE)
+        current_fee_rate = float(p.get("entry_fee_rate", paper_get_fee_config().get("rate", PAPER_FEE_RATE)))
+        unrealized = (float(p.get("realized_partial_pnl", 0)) + direction * (price - float(p["entry_price"])) * remaining - float(p.get("entry_fee", 0)) - abs(remaining * price) * current_fee_rate)
         position_view = dict(p)
         position_view["current_price"] = price
         position_view["unrealized_pnl"] = round(unrealized, 6)
