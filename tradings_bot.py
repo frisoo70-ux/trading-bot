@@ -335,6 +335,9 @@ API_STATS = {
     "last_request": None,
 }
 API_LOCK = threading.Lock()
+# Cache graphique borné : données déjà calculées par le moteur, sans appel API dédié.
+DASHBOARD_CHART_CACHE = {}
+DASHBOARD_CHART_LOCK = threading.Lock()
 ORDER_LOCK = threading.Lock()
 ORDER_STATE = {
     "pending": False,
@@ -1635,6 +1638,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <div class="card" id="liquidityChartPanel" style="margin-top:12px">
+    <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+      <h3 style="margin:0">💧 Carte des liquidités · Analyse technique</h3>
+      <select id="chartSymbol" onchange="loadChart()" style="background:#172033;color:#e5e7eb;border:1px solid #334155;border-radius:9px;padding:9px">
+        <option value="SOL">SOL</option><option value="XRP">XRP</option><option value="kSHIB">kSHIB</option>
+      </select>
+    </div>
+    <div id="chartSummary" class="muted" style="margin:10px 0">Chargement des données du moteur…</div>
+    <div id="liquidityChart" style="width:100%;overflow:hidden;min-height:190px"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
+    <div class="muted" style="margin-top:8px">Bougies clôturées · EMA20 / EMA50 / VWAP · poches estimées par pivots · actualisation toutes les 60 secondes. Ce graphique est indicatif et ne déclenche aucun ordre.</div>
+  </div>
+
   <div class="grid two" style="margin-top:12px">
     <div class="card"><h3>📊 Par mode</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="byMode"></table></div></div>
     <div class="card"><h3>🪙 Par token</h3><div class="mobileHint">Balaye le tableau vers la droite.</div><div class="scroll"><table id="bySymbol"></table></div></div>
@@ -1950,6 +1965,40 @@ function renderLiveTradeV48(live){
 }
 
 
+let chartBusy=false;
+async function loadChart(){
+ if(chartBusy)return;chartBusy=true;
+ try{
+  const symbol=document.getElementById('chartSymbol').value;
+  const suffix=window.location.search?('&'+window.location.search.slice(1)):'';
+  const r=await fetch('/api/chart?symbol='+encodeURIComponent(symbol)+suffix);
+  const d=await r.json();
+  const summary=document.getElementById('chartSummary');
+  const host=document.getElementById('liquidityChart');
+  if(!d.ready){summary.textContent=d.message||'Données indisponibles';host.innerHTML='<div class="muted">En attente du prochain scan du bot.</div>';return}
+  summary.textContent=d.symbol+' · '+d.timeframe+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at;
+  const bars=d.candles||[];
+  if(bars.length<5){host.textContent='Historique insuffisant';return}
+  const levels=bars.map(x=>Number(x.low)).concat(bars.map(x=>Number(x.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number));
+  let min=Math.min.apply(null,levels),max=Math.max.apply(null,levels);if(!(max>min)){min*=.999;max*=1.001}
+  const W=900,H=300,L=65,R=12,T=12,B=24,plotW=W-L-R,plotH=H-T-B;
+  const y=v=>T+(max-Number(v))/(max-min)*plotH;
+  const x=i=>L+(i+.5)*plotW/bars.length;
+  const bodyW=Math.max(3,Math.min(11,plotW/bars.length*.55));
+  let svg='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Graphique de prix '+esc(d.symbol)+'" style="width:100%;height:auto;display:block;background:#0b1422;border-radius:10px">';
+  for(let i=0;i<=4;i++){const val=max-(max-min)*i/4,yy=y(val);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#263348" stroke-width="1"/><text x="'+(L-7)+'" y="'+(yy+4)+'" fill="#9ca3af" font-size="11" text-anchor="end">'+fmt(val,6)+'</text>'}
+  for(let i=0;i<bars.length;i++){const b=bars[i],xx=x(i),up=Number(b.close)>=Number(b.open),col=up?'#22c55e':'#ef4444';svg+='<line x1="'+xx+'" y1="'+y(b.high)+'" x2="'+xx+'" y2="'+y(b.low)+'" stroke="'+col+'" stroke-width="1.5"/><rect x="'+(xx-bodyW/2)+'" y="'+Math.min(y(b.open),y(b.close))+'" width="'+bodyW+'" height="'+Math.max(1,Math.abs(y(b.open)-y(b.close)))+'" fill="'+col+'" rx="1"/>'}
+  const line=(key,color)=>{const pts=bars.map((b,i)=>x(i)+','+y(b[key])).join(' ');return '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="2" opacity=".95"/>'};
+  svg+=line('ema20','#38bdf8')+line('ema50','#c084fc')+line('vwap','#facc15');
+  for(const p of d.pools_high||[]){const yy=y(p);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#fb923c" stroke-width="1.4" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#fdba74" font-size="10" text-anchor="end">Liquidité haute '+fmt(p,6)+'</text>'}
+  for(const p of d.pools_low||[]){const yy=y(p);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#34d399" stroke-width="1.4" stroke-dasharray="6 5"/><text x="'+(W-R-3)+'" y="'+(yy-3)+'" fill="#6ee7b7" font-size="10" text-anchor="end">Liquidité basse '+fmt(p,6)+'</text>'}
+  const sw=d.sweep||{};
+  if(sw.valid&&sw.level!==null&&sw.level>=min&&sw.level<=max){const yy=y(sw.level);svg+='<line x1="'+L+'" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#f8fafc" stroke-width="2" stroke-dasharray="3 4"/>'}
+  svg+='</svg>';host.innerHTML=svg;
+  if(sw.valid){summary.textContent+=' · SWEEP '+sw.side+' confirmé · Niveau '+fmt(sw.level,6)+' · SL '+fmt(sw.stop,6)+' · TP '+fmt(sw.target,6)}
+ }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
+ finally{chartBusy=false}
+}
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
 table('analysis',[{label:'Heure',key:'time'},{label:'Coin',key:'symbol'},{label:'Sig',key:'signal'},{label:'Mode',get:r=>shortMode(r.mode)},{label:'Close',get:r=>fmt(r.close,5)},{label:'RSI',get:r=>fmt(r.rsi,1)},{label:'Score',get:r=>fmt(r.score,2)},{label:'A/B/C/D/E/F',get:r=>`${r.mode_a}/${r.mode_b}/${r.mode_c}/${r.mode_d}/${r.mode_e}/${r.mode_f}`},{label:'Pattern F',get:r=>r.mode_f_pattern||'-'}],(d.analysis_history||[]).slice(-40).reverse());
@@ -1996,7 +2045,7 @@ table('postTrade',[
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
-load();setInterval(load,10000);
+load();loadChart();setInterval(load,10000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
 
@@ -2027,6 +2076,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/data":
             return self._json(compute_dashboard_stats())
+
+        if parsed.path == "/api/chart":
+            params = parse_qs(parsed.query)
+            symbol = str((params.get("symbol") or [""])[0]).upper()
+            with DASHBOARD_CHART_LOCK:
+                snapshot = DASHBOARD_CHART_CACHE.get(symbol)
+                if snapshot is not None:
+                    snapshot = dict(snapshot)
+            if snapshot is None:
+                return self._json({"ready": False, "symbol": symbol, "message": "Données en attente du prochain scan."})
+            return self._json(snapshot)
 
         if parsed.path == "/api/config":
             return self._json(load_bot_config())
@@ -6378,6 +6438,61 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
 
+def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
+    """Mémorise un mini-snapshot graphique à partir du dataframe déjà traité."""
+    try:
+        rows = []
+        for _, r in df.tail(45).iterrows():
+            rows.append({
+                "time": int(r["time"]),
+                "open": round(float(r["open"]), 8),
+                "high": round(float(r["high"]), 8),
+                "low": round(float(r["low"]), 8),
+                "close": round(float(r["close"]), 8),
+                "ema20": round(float(r["ema20"]), 8),
+                "ema50": round(float(r["ema50"]), 8),
+                "vwap": round(float(r["vwap"]), 8),
+            })
+        last = df.iloc[-1]
+        sweep = detect_liquidity_sweep(df)
+        close = float(last["close"])
+        ema20 = float(last["ema20"])
+        ema50 = float(last["ema50"])
+        vwap = float(last["vwap"])
+        if close > ema20 and ema20 > ema50 and close > vwap:
+            bias = "HAUSSIER"
+        elif close < ema20 and ema20 < ema50 and close < vwap:
+            bias = "BAISSIER"
+        else:
+            bias = "NEUTRE / MIXTE"
+        snapshot = {
+            "ready": True,
+            "symbol": symbol,
+            "timeframe": get_active_timeframe(),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "confirmed_time": int(confirmed_time),
+            "current_price": round(float(current_price), 8),
+            "bias": bias,
+            "rsi": round(float(last["rsi"]), 2),
+            "atr": round(float(last["atr"]), 8),
+            "candles": rows,
+            "pools_high": [round(float(x), 8) for x in sweep.get("pools_high", [])[:8]],
+            "pools_low": [round(float(x), 8) for x in sweep.get("pools_low", [])[:8]],
+            "sweep": {
+                "valid": bool(sweep.get("valid")),
+                "side": sweep.get("side"),
+                "level": round(float(sweep["level"]), 8) if sweep.get("level") is not None else None,
+                "stop": round(float(sweep["stop"]), 8) if sweep.get("stop") is not None else None,
+                "target": round(float(sweep["target"]), 8) if sweep.get("target") is not None else None,
+                "reason": sweep.get("reason", ""),
+            },
+        }
+        with DASHBOARD_CHART_LOCK:
+            DASHBOARD_CHART_CACHE[symbol] = snapshot
+    except Exception as e:
+        print("[DASHBOARD CHART CACHE ERROR]", symbol, e)
+
+
 def prepare_df_for_symbol(symbol):
     df, confirmed_time, current_price = get_candles(symbol)
     if df.empty or confirmed_time is None or current_price is None:
@@ -6388,6 +6503,7 @@ def prepare_df_for_symbol(symbol):
     df = df.dropna().copy()
     if len(df) < 60:
         return None, None, None
+    update_dashboard_chart_cache(symbol, df, current_price, confirmed_time)
     return df, confirmed_time, current_price
 
 
