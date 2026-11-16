@@ -6442,6 +6442,15 @@ def manage_open_position(pos, df, current_price, candle_time):
 def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
     """Mémorise un mini-snapshot graphique à partir du dataframe déjà traité."""
     try:
+        confirmed_time = int(confirmed_time)
+        with DASHBOARD_CHART_LOCK:
+            existing = DASHBOARD_CHART_CACHE.get(symbol)
+            if existing and existing.get("confirmed_time") == confirmed_time:
+                existing = dict(existing)
+                existing["current_price"] = round(float(current_price), 8)
+                existing["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                DASHBOARD_CHART_CACHE[symbol] = existing
+                return
         rows = []
         for _, r in df.tail(45).iterrows():
             rows.append({
