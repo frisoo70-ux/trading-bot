@@ -677,7 +677,7 @@ def paper_place_order_qty(symbol, side, qty, price, reduce_only=False):
                         "exit_reason": LAST_SELL_REASON or "PAPER_EXIT"
                     }
                     PAPER_STATE["open_position"] = None
-        paper_save_state()
+        paper_save_state(force_github=(not reduce_only or PAPER_STATE.get("open_position") is not None))
         print(f"[PAPER] {side} {symbol} @ {fill:.8f} qty={qty:.8f} reduce_only={reduce_only}")
         return True
     except Exception as e:
