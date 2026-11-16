@@ -130,7 +130,7 @@ GITHUB_SYNC_STATE = {
 
 
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
-DASHBOARD_PORT = int(os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000")))
+DASHBOARD_PORT = int(os.environ.get("SERVER_PORT", os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000"))))
 
 TIMEFRAME_OPTIONS = ["1m", "3m", "5m", "15m"]
 DEFAULT_TIMEFRAME = "15m"
