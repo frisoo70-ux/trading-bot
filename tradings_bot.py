@@ -628,7 +628,7 @@ def paper_load_state():
         print("[PAPER] Erreur chargement:", e)
 
 
-def paper_place_order_qty(symbol, side, qty, price, reduce_only=False):
+def paper_place_order_qty(symbol, side, qty, price, reduce_only=False, metadata=None):
     """Exécution simulée centralisée : aucun client Exchange n'est instancié."""
     try:
         qty, price = abs(float(qty)), float(price)
@@ -643,11 +643,26 @@ def paper_place_order_qty(symbol, side, qty, price, reduce_only=False):
                     return False
                 signed_qty = qty if side == "BUY" else -qty
                 PAPER_STATE["balance"] = float(PAPER_STATE.get("balance", PAPER_START_BALANCE)) - fee
+                metadata = metadata if isinstance(metadata, dict) else {}
                 PAPER_STATE["open_position"] = {
                     "symbol": symbol, "size": signed_qty, "entry": fill,
                     "initial_qty": qty, "side": "LONG" if signed_qty > 0 else "SHORT",
                     "fees": fee, "gross_pnl": 0.0, "last_price": fill,
+                    "metadata": metadata,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                PAPER_STATE["trade_state"] = {
+                    "in_position": True, "symbol": symbol, "entry_price": fill,
+                    "entry_atr": metadata.get("entry_atr"), "tp1_done": False,
+                    "highest_price": fill, "trailing_stop": None,
+                    "entry_candle_time": metadata.get("entry_candle_time"),
+                    "signal_mode": metadata.get("signal_mode"),
+                    "execution_mode": "PAPER", "score": metadata.get("score"),
+                    "pattern_score": metadata.get("pattern_score"),
+                    "mode_l_side": metadata.get("mode_l_side"),
+                    "mode_l_stop": metadata.get("mode_l_stop"),
+                    "mode_l_target": metadata.get("mode_l_target"),
+                    "mode_l_liquidity": metadata.get("mode_l_liquidity")
                 }
             else:
                 if not pos or pos.get("symbol") != symbol:
@@ -3931,10 +3946,10 @@ def get_order_state_for_dashboard():
         return {"pending": False}
 
 
-def place_order_qty(symbol, side, qty, price, reduce_only=False):
+def place_order_qty(symbol, side, qty, price, reduce_only=False, paper_metadata=None):
     global LAST_ENTRY_PRICE_BY_SYMBOL, LAST_SELL_REASON
     if is_paper_mode():
-        return paper_place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
+        return paper_place_order_qty(symbol, side, qty, price, reduce_only=reduce_only, metadata=paper_metadata)
     try:
         if is_order_blocked(symbol, side):
             print(f"[ORDER BLOCKED] ordre déjà en attente {ORDER_STATE.get('side')} {ORDER_STATE.get('symbol')} retry={get_order_state_for_dashboard().get('retry_in_seconds')}s")
@@ -4046,7 +4061,7 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
         return False
 
 
-def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_mode=None):
+def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_mode=None, paper_metadata=None):
     global TRADE_TRANSITION_PENDING
     qty = round(size_usd / price, get_size_decimals(symbol))
     if expected_mode is not None:
@@ -4055,11 +4070,11 @@ def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_m
             if current_mode != expected_mode:
                 print("[MODE] Entrée annulée : le mode a changé pendant l'analyse.")
                 return False
-            ok = place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
+            ok = place_order_qty(symbol, side, qty, price, reduce_only=reduce_only, paper_metadata=paper_metadata)
             if ok:
                 TRADE_TRANSITION_PENDING = True
             return ok
-    return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
+    return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only, paper_metadata=paper_metadata)
 
 
 # Hyperliquid refuse les ordres dont la valeur notionnelle est < 10 USDC.
@@ -7428,7 +7443,21 @@ def run():
             )
 
             entry_side = "SELL" if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" and details.get("mode_l", {}).get("side") == "SHORT" else "BUY"
-            if place_order_usd(symbol, entry_side, TRADE_SIZE_USD, current_price, reduce_only=False, expected_mode=cycle_mode):
+            if place_order_usd(
+                symbol, entry_side, TRADE_SIZE_USD, current_price,
+                reduce_only=False, expected_mode=cycle_mode,
+                paper_metadata={
+                    "signal_mode": details.get("signal_mode"),
+                    "score": round(best["score"], 4),
+                    "pattern_score": details.get("pattern_score"),
+                    "entry_atr": float(last["atr"]),
+                    "entry_candle_time": confirmed_time,
+                    "mode_l_side": details.get("mode_l", {}).get("side"),
+                    "mode_l_stop": details.get("mode_l", {}).get("stop"),
+                    "mode_l_target": details.get("mode_l", {}).get("target"),
+                    "mode_l_liquidity": details.get("mode_l", {}).get("level"),
+                },
+            ):
                 trades += 1
                 trade_state["in_position"] = True
                 trade_state["symbol"] = symbol
