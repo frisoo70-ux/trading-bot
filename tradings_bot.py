@@ -575,7 +575,7 @@ def paper_save_state(force_github=False):
             GITHUB_SYNC_STATE["last_error"] = str(e)[:220]
             print("[PAPER] Échec sauvegarde GitHub directe:", e)
 
-    if local_ok and not github_ok:
+    if local_ok and (not GITHUB_BACKUP_ENABLED or (should_sync and not github_ok)):
         schedule_github_backup()
     return local_ok or github_ok
 
