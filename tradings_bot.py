@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime
 import os
 import csv
+import io
 import shutil
 import base64
 from pathlib import Path
@@ -64,7 +65,8 @@ PAPER_SLIPPAGE_RATE = 0.0005
 PAPER_LOCK = threading.RLock()
 TRADING_MODE_LOCK = threading.RLock()
 TRADE_TRANSITION_PENDING = False
-PAPER_STATE = {"balance": PAPER_START_BALANCE, "open_position": None, "last_closed_trade": None, "trade_state": None}
+PAPER_LAST_GITHUB_SYNC = 0
+PAPER_STATE = {"balance": PAPER_START_BALANCE, "open_position": None, "last_closed_trade": None, "trade_state": None, "trades": []}
 POST_TRADE_CSV_PATH = DATA_DIR / "post_trade_analysis.csv"
 POST_TRADE_PENDING_PATH = DATA_DIR / "post_trade_pending.json"
 LAST_MONTHLY_REPORT_FILE = DATA_DIR / "last_monthly_report.txt"
@@ -513,40 +515,115 @@ def is_paper_mode():
         return False
 
 
-def paper_save_state():
+def _paper_github_upload_text(filename, content):
+    if not GITHUB_BACKUP_ENABLED:
+        return False
+    remote = _github_get_remote_file(filename)
+    payload = {
+        "message": f"Paper trading backup: {filename}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": GITHUB_BACKUP_BRANCH,
+    }
+    if remote and remote.get("sha"):
+        payload["sha"] = remote["sha"]
+    response = requests.put(_github_api_url(filename), headers=_github_headers(), json=payload, timeout=25)
+    response.raise_for_status()
+    return True
+
+
+def _paper_csv_text():
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["date","symbol","mode","side","entry","exit","qty","exit_reason","gross_pnl_usdc","fees_usdc","net_pnl_usdc","pnl_pct"])
+    for item in PAPER_STATE.get("trades", []):
+        writer.writerow([
+            item.get("date"), item.get("symbol"), item.get("mode"), item.get("side"),
+            item.get("entry"), item.get("exit"), item.get("qty"), item.get("exit_reason"),
+            item.get("gross_pnl_usdc"), item.get("fees_usdc"), item.get("net_pnl_usdc"), item.get("pnl_pct")
+        ])
+    return buffer.getvalue()
+
+
+def paper_save_state(force_github=False):
+    global PAPER_LAST_GITHUB_SYNC
+    payload = dict(PAPER_STATE)
+    payload["saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    serialized = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    local_ok = False
     try:
         with PAPER_LOCK:
-            payload = dict(PAPER_STATE)
-            payload["saved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with open(PAPER_STATE_PATH, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
-        schedule_github_backup()
-        return True
+            PAPER_STATE_PATH.write_text(serialized, encoding="utf-8")
+            PAPER_TRADES_CSV_PATH.write_text(_paper_csv_text(), encoding="utf-8")
+        local_ok = True
     except Exception as e:
-        print("[PAPER] Erreur sauvegarde état:", e)
-        return False
+        print("[PAPER] Stockage local indisponible, tentative GitHub directe:", str(e)[:160])
+
+    github_ok = False
+    should_sync = GITHUB_BACKUP_ENABLED and (force_github or time.time() - PAPER_LAST_GITHUB_SYNC >= 300)
+    if should_sync:
+        try:
+            with GITHUB_SYNC_LOCK:
+                _paper_github_upload_text("paper_state.json", serialized)
+                _paper_github_upload_text("paper_trades.csv", _paper_csv_text())
+            PAPER_LAST_GITHUB_SYNC = time.time()
+            github_ok = True
+            GITHUB_SYNC_STATE["last_backup"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            GITHUB_SYNC_STATE["last_status"] = "PAPER_BACKUP_OK"
+            GITHUB_SYNC_STATE["last_error"] = ""
+        except Exception as e:
+            GITHUB_SYNC_STATE["last_status"] = "PAPER_BACKUP_ERROR"
+            GITHUB_SYNC_STATE["last_error"] = str(e)[:220]
+            print("[PAPER] Échec sauvegarde GitHub directe:", e)
+
+    if local_ok and not github_ok:
+        schedule_github_backup()
+    return local_ok or github_ok
 
 
 def paper_load_state():
     global PAPER_STATE, trade_state
     try:
-        if PAPER_STATE_PATH.exists():
+        saved = None
+        if GITHUB_BACKUP_ENABLED:
+            try:
+                remote = _github_get_remote_file("paper_state.json")
+                if remote and remote.get("content"):
+                    saved = json.loads(remote["content"].decode("utf-8"))
+            except Exception as remote_error:
+                print("[PAPER] Lecture GitHub directe impossible:", str(remote_error)[:160])
+        if not isinstance(saved, dict) and PAPER_STATE_PATH.exists():
             with open(PAPER_STATE_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            if isinstance(saved, dict):
-                PAPER_STATE.update(saved)
+        if isinstance(saved, dict):
+            PAPER_STATE.update(saved)
         PAPER_STATE.setdefault("balance", PAPER_START_BALANCE)
         PAPER_STATE.setdefault("open_position", None)
         PAPER_STATE.setdefault("last_closed_trade", None)
+        PAPER_STATE.setdefault("trades", [])
+        if not PAPER_STATE.get("trades") and GITHUB_BACKUP_ENABLED:
+            try:
+                remote_csv = _github_get_remote_file("paper_trades.csv")
+                if remote_csv and remote_csv.get("content"):
+                    rows = pd.read_csv(io.BytesIO(remote_csv["content"])).fillna("").to_dict(orient="records")
+                    PAPER_STATE["trades"] = rows
+            except Exception as csv_error:
+                print("[PAPER] Lecture historique GitHub impossible:", str(csv_error)[:160])
+        if not PAPER_STATE.get("trades") and PAPER_TRADES_CSV_PATH.exists():
+            try:
+                PAPER_STATE["trades"] = pd.read_csv(PAPER_TRADES_CSV_PATH).fillna("").to_dict(orient="records")
+            except Exception:
+                pass
         saved_state = PAPER_STATE.get("trade_state")
         if isinstance(saved_state, dict):
             trade_state.update(saved_state)
-        if not PAPER_TRADES_CSV_PATH.exists():
-            with open(PAPER_TRADES_CSV_PATH, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow(["date","symbol","mode","side","entry","exit","qty","exit_reason","gross_pnl_usdc","fees_usdc","net_pnl_usdc","pnl_pct"])
+        try:
+            PAPER_TRADES_CSV_PATH.write_text(_paper_csv_text(), encoding="utf-8")
+            PAPER_STATE_PATH.write_text(json.dumps(PAPER_STATE, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        except Exception:
+            pass
         if PAPER_STATE.get("last_closed_trade"):
             paper_record_closed_trade()
-        print("[PAPER] Solde simulé:", round(float(PAPER_STATE["balance"]), 4), "USDC")
+        print("[PAPER] Solde simulé:", round(float(PAPER_STATE["balance"]), 4), "USDC | trades:", len(PAPER_STATE.get("trades", [])))
     except Exception as e:
         print("[PAPER] Erreur chargement:", e)
 
@@ -616,18 +693,24 @@ def paper_record_closed_trade():
         entry = float(closed.get("entry", 0) or 0)
         exit_price = float(closed.get("exit", 0) or 0)
         pnl_pct = ((exit_price-entry)/entry*100*(1 if closed.get("side")=="LONG" else -1)) if entry else 0
-        with open(PAPER_TRADES_CSV_PATH, "a", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([closed.get("date"),closed.get("symbol"),closed.get("mode"),closed.get("side"),entry,exit_price,closed.get("qty"),closed.get("exit_reason"),closed.get("gross_pnl_usdc"),closed.get("fees_usdc"),closed.get("net_pnl_usdc"),round(pnl_pct,5)])
+        closed["pnl_pct"] = round(pnl_pct, 5)
+        PAPER_STATE.setdefault("trades", []).append(dict(closed))
         PAPER_STATE["last_closed_trade"] = None
         PAPER_STATE["trade_state"] = None
-        paper_save_state()
+        try:
+            PAPER_TRADES_CSV_PATH.write_text(_paper_csv_text(), encoding="utf-8")
+        except Exception as local_error:
+            print("[PAPER] CSV local indisponible:", str(local_error)[:120])
+        paper_save_state(force_github=True)
     except Exception as e:
         print("[PAPER] Erreur journal:", e)
 
 
 def paper_dashboard_stats():
     try:
-        df = pd.read_csv(PAPER_TRADES_CSV_PATH) if PAPER_TRADES_CSV_PATH.exists() else pd.DataFrame()
+        df = pd.DataFrame(PAPER_STATE.get("trades", []))
+        if df.empty and PAPER_TRADES_CSV_PATH.exists():
+            df = pd.read_csv(PAPER_TRADES_CSV_PATH)
         if df.empty:
             trades, wins, losses, pnl, winrate, recent = 0, 0, 0, 0.0, 0.0, []
         else:
