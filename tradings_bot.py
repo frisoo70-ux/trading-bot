@@ -2079,7 +2079,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/chart":
             params = parse_qs(parsed.query)
-            symbol = str((params.get("symbol") or [""])[0]).upper()
+            requested_symbol = str((params.get("symbol") or [""])[0]).strip()
+            symbol = next((s for s in SYMBOLS if s.lower() == requested_symbol.lower()), requested_symbol)
             with DASHBOARD_CHART_LOCK:
                 snapshot = DASHBOARD_CHART_CACHE.get(symbol)
                 if snapshot is not None:
