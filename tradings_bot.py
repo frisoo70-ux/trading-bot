@@ -651,7 +651,9 @@ def paper_place_order_qty(symbol, side, qty, price, reduce_only=False, metadata=
                     "metadata": metadata,
                     "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
+                saved_details = metadata.get("details") if isinstance(metadata.get("details"), dict) else {}
                 PAPER_STATE["trade_state"] = {
+                    **saved_details,
                     "in_position": True, "symbol": symbol, "entry_price": fill,
                     "entry_atr": metadata.get("entry_atr"), "tp1_done": False,
                     "highest_price": fill, "trailing_stop": None,
@@ -7448,6 +7450,7 @@ def run():
                 reduce_only=False, expected_mode=cycle_mode,
                 paper_metadata={
                     "signal_mode": details.get("signal_mode"),
+                    "details": details,
                     "score": round(best["score"], 4),
                     "pattern_score": details.get("pattern_score"),
                     "entry_atr": float(last["atr"]),
