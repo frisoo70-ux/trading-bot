@@ -76,11 +76,10 @@ AUTO_OPTIMIZER_MAX_PATIENCE = 2
 
 # ============================================================
 # V7 STABILISATION / PROTECTION
-# Basée sur l'analyse des 241 trades fournis.
-# - désactive les deux systèmes adaptatifs qui apprenaient trop tôt
-# - supprime la sortie mécanique EMA20 après 2 clôtures
-# - remet MODE D/E dans la gestion standard quand Smart Exit n'est pas actif
-# - utilise un ATR de référence robuste pour éviter les stops trop serrés
+# - Auto Learning et blocage adaptatif activés avec seuils minimums prudents.
+# - Auto Optimizer maintenu désactivé : pas de modification automatique des profils.
+# - conserve la protection de sortie EMA20 et les stops ATR stabilisés.
+# - V7 reste actif pour les protections qui ne sont pas explicitement réactivées.
 # ============================================================
 V7_STABILIZATION_ENABLED = True
 V7_DISABLE_AUTO_OPTIMIZER = True
