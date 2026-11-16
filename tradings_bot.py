@@ -2405,9 +2405,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 requested_mode = "PAPER" if str(cfg.get("trading_mode", base_cfg.get("trading_mode", "LIVE"))).upper() == "PAPER" else "LIVE"
                 if requested_mode != base_cfg.get("trading_mode", "LIVE"):
-                    real_positions = get_positions()
-                    if real_positions or PAPER_STATE.get("open_position"):
-                        return self._json({"ok": False, "error": "Fermez toutes les positions réelles et simulées avant de changer de mode."}, 409)
+                    if PAPER_STATE.get("open_position"):
+                        return self._json({"ok": False, "error": "Fermez la position simulée avant de changer de mode."}, 409)
+                    if requested_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
+                        return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible d’activer le mode LIVE."}, 409)
+                    if not WALLET_ADDRESS:
+                        return self._json({"ok": False, "error": "Adresse wallet indisponible : impossible de vérifier les positions réelles."}, 409)
+                    try:
+                        wallet_state = info_post(
+                            {"type": "clearinghouseState", "user": WALLET_ADDRESS},
+                            cache_key="mode_switch_safety_check",
+                            cache_ttl=0,
+                            max_retries=0,
+                        )
+                        if not isinstance(wallet_state, dict):
+                            return self._json({"ok": False, "error": "Impossible de vérifier le compte Hyperliquid. Aucun changement de mode effectué."}, 503)
+                        real_positions = []
+                        for item in wallet_state.get("assetPositions", []):
+                            position = item.get("position", {})
+                            if position.get("coin") in SYMBOLS and float(position.get("szi", 0) or 0) != 0:
+                                real_positions.append(position)
+                        if real_positions:
+                            return self._json({"ok": False, "error": "Fermez toutes les positions réelles avant de changer de mode."}, 409)
+                    except Exception as check_error:
+                        return self._json({"ok": False, "error": "Vérification Hyperliquid impossible : " + str(check_error)[:160]}, 503)
                     base_cfg["trading_mode"] = requested_mode
                     for s in SYMBOLS:
                         last_candle_times[s] = None
