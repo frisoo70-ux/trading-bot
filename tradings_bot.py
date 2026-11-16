@@ -1669,6 +1669,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button type="button" class="chartTool" onclick="setChartWindow(60)">60 bougies</button>
       <button type="button" class="chartTool active" onclick="setChartWindow(120)">120 bougies</button>
       <button type="button" class="chartTool" onclick="setChartWindow(180)">180 bougies</button>
+      <button type="button" class="chartTool" onclick="moveChartWindow(-1)">← Plus ancien</button>
+      <button type="button" class="chartTool" onclick="moveChartWindow(1)">Plus récent →</button>
       <button type="button" class="chartTool" onclick="loadChart()">↻ Actualiser</button>
     </div>
     <div id="liquidityChart" class="chartCanvas"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
@@ -1994,10 +1996,22 @@ function renderLiveTradeV48(live){
 
 let chartBusy=false;
 let chartWindow=120;
+let chartOffset=0;
 function setChartWindow(n){
  chartWindow=n;
+ chartOffset=0;
  document.querySelectorAll('.chartTool').forEach(b=>{if((b.textContent||'').indexOf(String(n))>=0)b.classList.add('active');else if((b.textContent||'').indexOf('bougies')>=0)b.classList.remove('active')});
  loadChart();
+}
+function moveChartWindow(direction){
+ const symbol=document.getElementById('chartSymbol').value;
+ const suffix=window.location.search?('&'+window.location.search.slice(1)):'';
+ fetch('/api/chart?symbol='+encodeURIComponent(symbol)+suffix).then(r=>r.json()).then(d=>{
+  const total=(d.candles||[]).length;
+  const maxOffset=Math.max(0,total-chartWindow);
+  chartOffset=Math.max(0,Math.min(maxOffset,chartOffset+direction*Math.max(10,Math.floor(chartWindow/2))));
+  loadChart();
+ }).catch(()=>{});
 }
 function chartLine(bars,key,color,width,dash){
  const pts=bars.map((b,i)=>chartX(i,bars.length)+','+chartY(Number(b[key]))).join(' ');
@@ -2009,7 +2023,7 @@ function chartX(i,n){return chartScale.left+(i+.5)*chartScale.width/n}
 function renderChart(d){
  const host=document.getElementById('liquidityChart');
  const all=d.candles||[];
- const bars=all.slice(-chartWindow);
+ const end=Math.max(0,all.length-chartOffset);\n const start=Math.max(0,end-chartWindow);\n const bars=all.slice(start,end);
  if(bars.length<5){host.textContent='Historique insuffisant';return}
  const trade=d.trade||null,book=d.orderbook||{bids:[],asks:[]};
  const levels=bars.map(b=>Number(b.low)).concat(bars.map(b=>Number(b.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number));
@@ -2082,7 +2096,7 @@ async function loadChart(){
   const d=await r.json();
   const summary=document.getElementById('chartSummary');
   if(!d.ready){summary.textContent=d.message||'Données indisponibles';document.getElementById('liquidityChart').innerHTML='<div class="muted">En attente du prochain scan du bot.</div>';return}
-  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
+  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies'+(chartOffset?' · historique -'+chartOffset:' · récent')+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
   renderChart(d);
   if(d.sweep&&d.sweep.valid)summary.textContent+=' · SWEEP '+d.sweep.side+' confirmé · Niveau '+fmt(d.sweep.level,6)+' · SL '+fmt(d.sweep.stop,6)+' · TP '+fmt(d.sweep.target,6);
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
@@ -6579,7 +6593,7 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
                 DASHBOARD_CHART_CACHE[symbol] = existing
                 return
         rows = []
-        for _, r in df.tail(180).iterrows():
+        for _, r in df.tail(220).iterrows():
             rows.append({
                 "time": int(r["time"]),
                 "open": round(float(r["open"]), 8),
