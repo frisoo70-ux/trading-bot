@@ -538,11 +538,88 @@ def get_enabled_symbols():
 # PAPER TRADING — données marché réelles, aucun ordre envoyé
 # Résultats isolés des trades réels et de l'Auto Learning.
 # ============================================================
-PAPER_FEE_RATE = 0.00035
+# Secours uniquement : tarif taker standard Hyperliquid, utilisé si userFees est indisponible.
+PAPER_FEE_RATE = 0.00045
 PAPER_SLIPPAGE_RATE = 0.00020
 PAPER_INITIAL_BALANCE = 1000.0
 PAPER_LOCK = threading.RLock()
 PAPER_STATE = {"initial_balance": PAPER_INITIAL_BALANCE, "realized_pnl": 0.0, "position": None, "trades": [], "updated_at": None}
+PAPER_FEE_CACHE = {"rate": None, "source": "UNAVAILABLE", "updated_at": None}
+PAPER_FEE_CACHE_LOCK = threading.Lock()
+
+def paper_get_fee_config(force=False):
+    """Récupère le taux taker personnel depuis l'endpoint public userFees."""
+    now = time.time()
+    with PAPER_FEE_CACHE_LOCK:
+        if not force and PAPER_FEE_CACHE.get("rate") is not None and now - float(PAPER_FEE_CACHE.get("timestamp", 0)) < 3600:
+            return dict(PAPER_FEE_CACHE)
+    if not WALLET_ADDRESS:
+        result = {"rate": PAPER_FEE_RATE, "source": "FALLBACK_BASE_TAKER_NO_WALLET", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now}
+    else:
+        try:
+            data = info_post({"type": "userFees", "user": WALLET_ADDRESS}, cache_key="paper_user_fees", cache_ttl=3600, max_retries=1)
+            rate = float(data.get("userCrossRate")) if data and data.get("userCrossRate") is not None else None
+            if rate is None or rate < 0 or rate > 0.01:
+                raise ValueError("userCrossRate absent ou invalide")
+            result = {"rate": rate, "source": "HYPERLIQUID_USER_FEES_TAKER", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now}
+        except Exception as e:
+            print("[PAPER FEES] userFees indisponible:", e)
+            result = {"rate": PAPER_FEE_RATE, "source": "FALLBACK_BASE_TAKER_API_ERROR", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now}
+    with PAPER_FEE_CACHE_LOCK:
+        PAPER_FEE_CACHE.update(result)
+    return dict(PAPER_FEE_CACHE)
+
+def paper_estimate_execution(symbol, side, notional, reference_price):
+    """Estime le VWAP consommant le carnet L2 pour la taille simulée."""
+    fee_cfg = paper_get_fee_config()
+    fee_rate = float(fee_cfg.get("rate", PAPER_FEE_RATE))
+    reference_price = float(reference_price)
+    notional = max(0.0, float(notional))
+    fallback = {"fill_price": reference_price * (1 + PAPER_SLIPPAGE_RATE if side == "BUY" else 1 - PAPER_SLIPPAGE_RATE),
+        "fee_rate": fee_rate, "fee_source": fee_cfg.get("source", "FALLBACK"),
+        "slippage_rate": PAPER_SLIPPAGE_RATE, "slippage_source": "FALLBACK_FIXED",
+        "book_status": "UNAVAILABLE"}
+    if reference_price <= 0 or notional <= 0:
+        return fallback
+    try:
+        book = info_post({"type": "l2Book", "coin": symbol}, cache_key=f"paper_l2_{symbol}", cache_ttl=1, max_retries=1)
+        levels = (book or {}).get("levels") or []
+        book_side = levels[1] if str(side).upper() == "BUY" and len(levels) > 1 else (levels[0] if levels else [])
+        if not book_side:
+            return fallback
+        remaining_qty = notional / reference_price
+        total_qty = 0.0
+        total_value = 0.0
+        last_price = None
+        for level in book_side:
+            px = float(level.get("px", 0))
+            sz = float(level.get("sz", 0))
+            if px <= 0 or sz <= 0:
+                continue
+            take = min(remaining_qty, sz)
+            total_qty += take
+            total_value += take * px
+            remaining_qty -= take
+            last_price = px
+            if remaining_qty <= 1e-12:
+                break
+        if total_qty <= 0 or last_price is None:
+            return fallback
+        # Si la profondeur visible ne couvre pas toute la taille, extrapolation au dernier niveau connu signalée explicitement.
+        if remaining_qty > 1e-12:
+            total_qty += remaining_qty
+            total_value += remaining_qty * last_price
+            book_status = "DEPTH_INSUFFICIENT_ESTIMATED"
+        else:
+            book_status = "OK"
+        fill_price = total_value / total_qty
+        slippage = abs(fill_price / reference_price - 1)
+        return {"fill_price": fill_price, "fee_rate": fee_rate, "fee_source": fee_cfg.get("source", "FALLBACK"),
+            "slippage_rate": slippage, "slippage_source": "L2_ORDERBOOK_VWAP",
+            "book_status": book_status}
+    except Exception as e:
+        print(f"[PAPER SLIPPAGE] {symbol} carnet indisponible:", e)
+        return fallback
 
 def load_paper_state():
     global PAPER_STATE
@@ -597,7 +674,9 @@ def paper_snapshot(current_price=None):
         "trades":len(trades),"wins":wins,"losses":losses,
         "winrate":round(wins/len(trades)*100,2) if trades else 0,
         "position":position_view,"recent_trades":list(reversed(trades[-30:])),
-        "updated_at":PAPER_STATE.get("updated_at"),"fee_rate":PAPER_FEE_RATE,"slippage_rate":PAPER_SLIPPAGE_RATE}
+        "updated_at":PAPER_STATE.get("updated_at"),"fee_rate":paper_get_fee_config().get("rate", PAPER_FEE_RATE),
+        "fee_source":paper_get_fee_config().get("source"),"fee_updated_at":paper_get_fee_config().get("updated_at"),
+        "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE}
 
 def paper_open_position(candidate):
     with PAPER_LOCK:
@@ -606,8 +685,9 @@ def paper_open_position(candidate):
         raw_price=float(candidate["current_price"])
         side="SHORT" if details.get("signal_mode")=="MODE_L_LIQUIDITY_SWEEP" and (details.get("mode_l") or {}).get("side")=="SHORT" else "LONG"
         direction=1 if side=="LONG" else -1
-        fill=raw_price*(1+PAPER_SLIPPAGE_RATE*direction)
-        notional=float(TRADE_SIZE_USD); qty=notional/fill; fee=notional*PAPER_FEE_RATE
+        notional=float(TRADE_SIZE_USD)
+        execution=paper_estimate_execution(symbol, "BUY" if side=="LONG" else "SELL", notional, raw_price)
+        fill=float(execution["fill_price"]); qty=notional/fill; fee=notional*float(execution["fee_rate"])
         atr=float(last["atr"]); mode=details.get("signal_mode") or "UNKNOWN"
         if mode=="MODE_L_LIQUIDITY_SWEEP":
             ml=details.get("mode_l") or {}; stop=float(ml.get("stop") or (fill-direction*MODE_L_ATR_STOP_MULT*atr))
@@ -617,11 +697,13 @@ def paper_open_position(candidate):
             tp1=calculate_adaptive_tp1(entry=fill,atr_value=atr,mode=mode,symbol=symbol)["price"]; target=None
         PAPER_STATE["position"]={"symbol":symbol,"mode":mode,"side":side,"score":round(float(candidate.get("score",0)),4),
             "entry_time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"entry_price":round(fill,10),"market_entry_price":raw_price,
-            "qty":qty,"remaining_qty":qty,"notional":notional,"entry_fee":fee,"fees_paid":fee,
+            "qty":qty,"remaining_qty":qty,"notional":notional,"entry_fee":fee,"entry_fee_rate":float(execution["fee_rate"]),
+            "fees_paid":fee,"fee_source":execution.get("fee_source"),"entry_slippage_rate":float(execution["slippage_rate"]),
+            "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
             "tp1_done":False,"highest_price":fill,"last_price":raw_price}
         save_paper_state()
-    notify_telegram(f"🧪 <b>PAPER ENTRY {side}</b>\n{symbol} · {mode}\nPrix simulé: {fill:.6f}\nTaille: {notional:.2f} USDC\nAucun ordre réel envoyé.")
+    notify_telegram(f"🧪 <b>PAPER ENTRY {side}</b>\n{symbol} · {mode}\nPrix simulé VWAP: {fill:.6f}\nTaille: {notional:.2f} USDC\nFrais taker: {float(execution['fee_rate'])*100:.4f}% ({execution.get('fee_source')})\nSlippage estimé: {float(execution['slippage_rate'])*100:.4f}% ({execution.get('slippage_source')}; {execution.get('book_status')})\nAucun ordre réel envoyé.")
     return True
 
 def paper_close_position(price, reason):
@@ -629,16 +711,21 @@ def paper_close_position(price, reason):
         p=PAPER_STATE.get("position")
         if not p: return False
         direction=1 if p.get("side")=="LONG" else -1
-        fill=float(price)*(1-PAPER_SLIPPAGE_RATE*direction)
         qty=float(p.get("remaining_qty",p.get("qty",0)))
+        exit_notional=abs(qty*float(price))
+        execution=paper_estimate_execution(p["symbol"], "SELL" if direction==1 else "BUY", exit_notional, float(price))
+        fill=float(execution["fill_price"])
         gross=direction*(fill-float(p["entry_price"]))*qty
-        exit_fee=abs(qty*fill)*PAPER_FEE_RATE
+        exit_fee=abs(qty*fill)*float(execution["fee_rate"])
         net=float(p.get("realized_partial_pnl",0))+gross-exit_fee-float(p.get("entry_fee",0))
         trade={"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
             "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"exit_reason":reason,
             "gross_pnl":round(float(p.get("realized_partial_pnl",0))+gross,6),
-            "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"net_pnl":round(net,6),
-            "pnl_pct":round(net/float(p["notional"])*100,4)}
+            "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"entry_fee_rate":p.get("entry_fee_rate"),
+            "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
+            "entry_slippage_rate":p.get("entry_slippage_rate"),"exit_slippage_rate":float(execution["slippage_rate"]),
+            "exit_slippage_source":execution.get("slippage_source"),"exit_book_status":execution.get("book_status"),
+            "net_pnl":round(net,6),"pnl_pct":round(net/float(p["notional"])*100,4)}
         PAPER_STATE.setdefault("trades",[]).append(trade); PAPER_STATE["trades"]=PAPER_STATE["trades"][-2000:]
         PAPER_STATE["realized_pnl"]=float(PAPER_STATE.get("realized_pnl",0))+net
         PAPER_STATE["position"]=None; save_paper_state()
@@ -664,8 +751,10 @@ def paper_manage_position(df,current_price,candle_time):
             p["highest_price"]=max(float(p.get("highest_price",entry)),price)
             if price<=float(p["stop"]): reason="PAPER_ATR_STOP"
             elif p.get("tp1") and not p.get("tp1_done") and price>=float(p["tp1"]):
-                partial_qty=float(p["qty"])*0.5; fill=price*(1-PAPER_SLIPPAGE_RATE)
-                gross=(fill-entry)*partial_qty; fee=abs(fill*partial_qty)*PAPER_FEE_RATE
+                partial_qty=float(p["qty"])*0.5
+                partial_execution=paper_estimate_execution(p["symbol"], "SELL", abs(partial_qty*price), price)
+                fill=float(partial_execution["fill_price"])
+                gross=(fill-entry)*partial_qty; fee=abs(fill*partial_qty)*float(partial_execution["fee_rate"])
                 p["realized_partial_pnl"]=float(p.get("realized_partial_pnl",0))+gross-fee
                 p["fees_paid"]=float(p.get("fees_paid",0))+fee; p["remaining_qty"]=float(p["qty"])-partial_qty
                 p["tp1_done"]=True; p["trailing_stop"]=max(float(p["stop"]),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
@@ -1806,7 +1895,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="liveBox"><div class="liveLabel">Winrate</div><div class="liveVal" id="paperWinrate">0%</div></div>
       <div class="liveBox"><div class="liveLabel">Trades simulés</div><div class="liveVal" id="paperTrades">0</div></div>
     </div>
-    <div class="muted" id="paperPosition" style="margin-top:10px">Aucune position simulée.</div>
+    <div class="muted" id="paperCosts" style="margin-top:10px">Frais : chargement… · Slippage : estimation carnet L2</div>
+    <div class="muted" id="paperPosition" style="margin-top:6px">Aucune position simulée.</div>
     <div class="scroll" style="margin-top:10px"><table id="paperTradesTable"></table></div>
     <div class="muted" id="executionModeLabel" style="margin-top:8px">Mode d’exécution : LIVE</div>
     <div style="margin-top:10px"><label class="toggle"><span>Exécution du bot<br><small style="color:#9ca3af;font-weight:500">LIVE = vrais ordres · PAPER = simulation sans ordre</small></span><select id="executionMode" class="chartSelect"><option value="LIVE">LIVE</option><option value="PAPER">PAPER TEST</option></select></label></div>
@@ -2371,7 +2461,7 @@ table('postTrade',[
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
-async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const q=p.position;document.getElementById("paperPosition").textContent=q?`POSITION SIMULÉE ${q.side} · ${q.symbol} · ${q.mode} | Entrée ${fmt(q.entry_price,6)} | Prix ${fmt(q.current_price,6)} | PnL latent ${fmt(q.unrealized_pnl,4)} USDC | SL ${fmt(q.stop,6)} | TP ${fmt(q.tp1||q.target,6)}`:"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
+async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : calcul carnet L2 à chaque exécution (secours si carnet indisponible)`;const q=p.position;document.getElementById("paperPosition").textContent=q?`POSITION SIMULÉE ${q.side} · ${q.symbol} · ${q.mode} | Entrée ${fmt(q.entry_price,6)} | Prix ${fmt(q.current_price,6)} | PnL latent ${fmt(q.unrealized_pnl,4)} USDC | SL ${fmt(q.stop,6)} | TP ${fmt(q.tp1||q.target,6)}`:"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
 load();loadPaper();loadChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
