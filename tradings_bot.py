@@ -2023,7 +2023,9 @@ function chartX(i,n){return chartScale.left+(i+.5)*chartScale.width/n}
 function renderChart(d){
  const host=document.getElementById('liquidityChart');
  const all=d.candles||[];
- const end=Math.max(0,all.length-chartOffset);\n const start=Math.max(0,end-chartWindow);\n const bars=all.slice(start,end);
+ const end=Math.max(0,all.length-chartOffset);
+  const start=Math.max(0,end-chartWindow);
+  const bars=all.slice(start,end);
  if(bars.length<5){host.textContent='Historique insuffisant';return}
  const trade=d.trade||null,book=d.orderbook||{bids:[],asks:[]};
  const levels=bars.map(b=>Number(b.low)).concat(bars.map(b=>Number(b.high)),(d.pools_high||[]).map(Number),(d.pools_low||[]).map(Number));
