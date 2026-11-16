@@ -692,7 +692,8 @@ def paper_record_closed_trade():
             return
         entry = float(closed.get("entry", 0) or 0)
         exit_price = float(closed.get("exit", 0) or 0)
-        pnl_pct = ((exit_price-entry)/entry*100*(1 if closed.get("side")=="LONG" else -1)) if entry else 0
+        initial_notional = entry * float(closed.get("qty", 0) or 0)
+        pnl_pct = (float(closed.get("net_pnl_usdc", 0) or 0) / initial_notional * 100) if initial_notional else 0
         closed["pnl_pct"] = round(pnl_pct, 5)
         PAPER_STATE.setdefault("trades", []).append(dict(closed))
         PAPER_STATE["last_closed_trade"] = None
@@ -723,7 +724,12 @@ def paper_dashboard_stats():
         open_pnl = 0.0
         if pos:
             px = float(pos.get("last_price") or pos.get("entry") or 0)
-            open_pnl = (px-float(pos["entry"]))*abs(float(pos["size"]))*(1 if float(pos["size"])>0 else -1)
+            remaining_qty = abs(float(pos.get("size", 0) or 0))
+            direction = 1 if float(pos.get("size", 0) or 0) > 0 else -1
+            entry_price = float(pos.get("entry", 0) or 0)
+            gross_open = float(pos.get("gross_pnl", 0) or 0) + (px-entry_price)*remaining_qty*direction
+            estimated_close_fee = remaining_qty*px*PAPER_TAKER_FEE_RATE
+            open_pnl = gross_open-float(pos.get("fees", 0) or 0)-estimated_close_fee
         return {"balance":round(float(PAPER_STATE.get("balance",PAPER_START_BALANCE)),5),"starting_balance":PAPER_START_BALANCE,"trades":trades,"wins":wins,"losses":losses,"winrate":winrate,"realized_pnl":pnl,"open_pnl_est":round(open_pnl,5),"net_pnl":round(pnl+open_pnl,5),"open_position":pos,"recent_trades":recent,"fee_rate_pct":PAPER_TAKER_FEE_RATE*100,"slippage_pct":PAPER_SLIPPAGE_RATE*100,"github_backup_enabled":GITHUB_BACKUP_ENABLED}
     except Exception as e:
         return {"error":str(e),"balance":round(float(PAPER_STATE.get("balance",PAPER_START_BALANCE)),5)}
