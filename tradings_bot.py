@@ -1857,7 +1857,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div id="liquidityChart" class="chartCanvas"><div class="muted">Le graphique apparaîtra après le prochain scan du bot.</div></div>
     <div id="chartLegend" class="chartLegend"></div>
     <div id="chartOrderbook" class="chartOrderbook"></div>
-    <div class="muted" style="margin-top:9px">EMA20 / EMA50 / VWAP · volumes · zones de liquidité dynamiques (pivots regroupés, force, ancienneté, invalidation et sweeps) · carnet L2 réel (cache 60 s). Les ordres cachés ne sont pas visibles. Les zones sont indicatives et ne déclenchent aucun ordre.</div>
+    <div class="muted" style="margin-top:9px">EMA20 / EMA50 / VWAP · volumes · zones de liquidité multi-timeframe 15m/1h/4h (force, ancienneté, invalidation et sweeps) · carnet L2 réel (cache 60 s). Les ordres cachés ne sont pas visibles. Les zones sont indicatives et ne déclenchent aucun ordre.</div>
   </div>
 
   <div class="grid two" style="margin-top:12px">
@@ -2248,7 +2248,7 @@ function renderChart(d){
   const swept=z.status==='swept',highSide=z.side==='high';
   const col=swept?'#9aa7b8':(highSide?'#ed6677':'#27c995');
   const opacity=swept?0.12:Math.max(0.055,Math.min(0.28,Number(z.opacity)||0.12));
-  const label=(highSide?'BUY-SIDE':'SELL-SIDE')+' · '+z.touches+' touches · '+z.strength+'/100';
+  const label=z.timeframe+' '+(highSide?'BUY-SIDE':'SELL-SIDE')+' · '+z.touches+' touches · '+z.strength+'/100';
   svg+='<g><title>'+esc(label)+' · '+esc(z.status)+' · '+z.age_bars+' bougies · '+fmt(zLow,6)+' - '+fmt(zHigh,6)+'</title>';
   svg+='<rect x="'+x1+'" y="'+yy+'" width="'+Math.max(8,x2-x1)+'" height="'+hh+'" rx="4" fill="'+col+'" fill-opacity="'+opacity+'" stroke="'+col+'" stroke-opacity="'+(swept?'.5':'.85')+'" stroke-width="1"'+(swept?' stroke-dasharray="4 4"':'')+'/>';
   svg+='<line x1="'+x1+'" y1="'+y(level)+'" x2="'+x2+'" y2="'+y(level)+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="3 5" opacity="'+(swept?'.45':'.8')+'"/>';
@@ -2315,8 +2315,8 @@ async function loadChart(){
   const d=await r.json();
   const summary=document.getElementById('chartSummary');
   if(!d.ready){summary.textContent=d.message||'Données indisponibles';document.getElementById('liquidityChart').innerHTML='<div class="muted">En attente du prochain scan du bot.</div>';return}
-  const zoneList=d.liquidity_zones||[];const activeZones=zoneList.filter(z=>z.status==='active'||z.status==='weakened').length;const sweptZones=zoneList.filter(z=>z.status==='swept').length;
-  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies'+(chartOffset?' · historique -'+chartOffset:' · récent')+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · Zones '+activeZones+' actives / '+sweptZones+' balayées · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
+  const zoneList=d.liquidity_zones||[];const activeZones=zoneList.filter(z=>z.status==='active'||z.status==='weakened').length;const sweptZones=zoneList.filter(z=>z.status==='swept').length;const tfCounts=['15m','1h','4h'].map(tf=>tf+': '+zoneList.filter(z=>z.timeframe===tf).length).join(' / ');
+  summary.textContent=d.symbol+' · '+d.timeframe+' · '+chartWindow+' bougies'+(chartOffset?' · historique -'+chartOffset:' · récent')+' · Prix '+fmt(d.current_price,6)+' · Biais '+d.bias+' · Zones '+activeZones+' actives / '+sweptZones+' balayées ('+tfCounts+') · RSI '+fmt(d.rsi,1)+' · ATR '+fmt(d.atr,6)+' · Mis à jour '+d.updated_at+(d.trade?' · POSITION '+(d.trade.side||'LONG'):'');
   renderChart(d);
   if(d.sweep&&d.sweep.valid)summary.textContent+=' · SWEEP '+d.sweep.side+' confirmé · Niveau '+fmt(d.sweep.level,6)+' · SL '+fmt(d.sweep.stop,6)+' · TP '+fmt(d.sweep.target,6);
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
@@ -6858,13 +6858,13 @@ def manage_open_position(pos, df, current_price, candle_time):
         return
 
 
-def compute_dashboard_liquidity_zones(df):
+def compute_dashboard_liquidity_zones(df, timeframe=None):
     """Zones visuelles dynamiques issues des pivots; aucune influence sur les ordres."""
     try:
         if df is None or len(df) < MODE_L_LOOKBACK + 5:
             return []
-        tf = get_active_timeframe()
-        max_age = {"1m": 180, "3m": 140, "5m": 120, "15m": 96}.get(tf, 96)
+        tf = timeframe or get_active_timeframe()
+        max_age = {"1m": 180, "3m": 140, "5m": 120, "15m": 96, "1h": 72, "4h": 42}.get(tf, 96)
         atr = float(df.iloc[-1].get("atr", 0) or 0)
         if atr <= 0:
             return []
@@ -6941,6 +6941,42 @@ def compute_dashboard_liquidity_zones(df):
         return []
 
 
+def get_dashboard_mtf_liquidity_zones(symbol, active_df):
+    """Calcule les poches 15m/1h/4h; appels API mis en cache pour limiter la charge."""
+    result = []
+    active_tf = get_active_timeframe()
+    for tf in ("15m", "1h", "4h"):
+        try:
+            tf_df = active_df if tf == active_tf else None
+            if tf_df is None:
+                now_ms = int(time.time() * 1000)
+                minutes = {"15m": 15, "1h": 60, "4h": 240}[tf]
+                raw = info_post(
+                    {"type": "candleSnapshot", "req": {
+                        "coin": symbol, "interval": tf,
+                        "startTime": now_ms - 220 * minutes * 60 * 1000,
+                        "endTime": now_ms,
+                    }},
+                    cache_key=f"dashboard_liquidity_candles:{symbol}:{tf}",
+                    cache_ttl=300,
+                    max_retries=0,
+                )
+                if not isinstance(raw, list) or len(raw) < 80:
+                    continue
+                rows = [{
+                    "time": int(c["t"]), "open": float(c["o"]), "high": float(c["h"]),
+                    "low": float(c["l"]), "close": float(c["c"]), "volume": float(c["v"])
+                } for c in raw[:-1]]
+                tf_df = add_indicators(pd.DataFrame(rows)).dropna().copy()
+            if tf_df is None or len(tf_df) < MODE_L_LOOKBACK + 5:
+                continue
+            result.extend(compute_dashboard_liquidity_zones(tf_df, tf)[:6])
+        except Exception as e:
+            print("[DASHBOARD MTF LIQUIDITY ERROR]", symbol, tf, e)
+    result.sort(key=lambda z: (z["status"] == "swept", z["distance_pct"], -z["strength"]))
+    return result[:18]
+
+
 def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
     """Mémorise un mini-snapshot graphique à partir du dataframe déjà traité."""
     try:
@@ -7007,7 +7043,7 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
             "rsi": round(float(last["rsi"]), 2),
             "atr": round(float(last["atr"]), 8),
             "candles": rows,
-            "liquidity_zones": compute_dashboard_liquidity_zones(df),
+            "liquidity_zones": get_dashboard_mtf_liquidity_zones(symbol, df),
             "pools_high": [round(float(x), 8) for x in sweep.get("pools_high", [])[:8]],
             "pools_low": [round(float(x), 8) for x in sweep.get("pools_low", [])[:8]],
             "sweep": {
