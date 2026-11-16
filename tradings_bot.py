@@ -76,16 +76,15 @@ AUTO_OPTIMIZER_MAX_PATIENCE = 2
 
 # ============================================================
 # V7 STABILISATION / PROTECTION
-# Basée sur l'analyse des 241 trades fournis.
-# - désactive les deux systèmes adaptatifs qui apprenaient trop tôt
-# - supprime la sortie mécanique EMA20 après 2 clôtures
-# - remet MODE D/E dans la gestion standard quand Smart Exit n'est pas actif
-# - utilise un ATR de référence robuste pour éviter les stops trop serrés
+# - Auto Learning et blocage adaptatif activés avec seuils minimums prudents.
+# - Auto Optimizer maintenu désactivé : pas de modification automatique des profils.
+# - conserve la protection de sortie EMA20 et les stops ATR stabilisés.
+# - V7 reste actif pour les protections qui ne sont pas explicitement réactivées.
 # ============================================================
 V7_STABILIZATION_ENABLED = True
 V7_DISABLE_AUTO_OPTIMIZER = True
-V7_DISABLE_AUTO_LEARNING = True
-V7_DISABLE_ADAPTIVE_BLOCKING = True
+V7_DISABLE_AUTO_LEARNING = False
+V7_DISABLE_ADAPTIVE_BLOCKING = False
 V7_EMA20_EXIT_ENABLED = False
 V7_DYNAMIC_ATR_STOP_ENABLED = True
 V7_ATR_STOP_MULT = 2.8
@@ -259,17 +258,17 @@ SMART_EXIT_ADAPTIVE_TIGHTEN_STEP = 0.50
 
 # ADAPTIVE INTELLIGENCE V4.8
 ADAPTIVE_ENABLED_DEFAULT = True
-ADAPTIVE_MIN_TRADES_MODE = 3
-ADAPTIVE_MIN_TRADES_PATTERN = 2
-ADAPTIVE_MIN_TRADES_TOKEN = 3
+ADAPTIVE_MIN_TRADES_MODE = 8
+ADAPTIVE_MIN_TRADES_PATTERN = 5
+ADAPTIVE_MIN_TRADES_TOKEN = 6
 ADAPTIVE_MIN_MULT = 0.70
 ADAPTIVE_MAX_MULT = 1.30
-ADAPTIVE_HARD_BLOCK_MULT = 0.65
+ADAPTIVE_HARD_BLOCK_MULT = 0.75
 ADAPTIVE_RECENT_TRADES_WINDOW = 50
 
 # AUTO LEARNING V6
-AUTO_LEARNING_ENABLED_DEFAULT = False
-AUTO_LEARNING_AUTO_APPLY_DEFAULT = False
+AUTO_LEARNING_ENABLED_DEFAULT = True
+AUTO_LEARNING_AUTO_APPLY_DEFAULT = True
 AUTO_LEARNING_WINDOW = 80
 AUTO_LEARNING_MIN_TRADES_MODE = 8
 AUTO_LEARNING_MIN_TRADES_PATTERN = 5
