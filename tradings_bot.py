@@ -4012,7 +4012,7 @@ def close_position_full(pos, price):
 
 
 def reset_trade_state_after_sell(candle_time):
-    global trade_state
+    global trade_state, TRADE_TRANSITION_PENDING
     global REENTRY_RESCAN_PENDING, LAST_EXIT_SYMBOL, LAST_EXIT_REASON
     global LAST_EXIT_MODE, LAST_EXIT_CANDLE_TIME, LAST_EXIT_WALL_TIME
 
@@ -4022,6 +4022,7 @@ def reset_trade_state_after_sell(candle_time):
     LAST_EXIT_CANDLE_TIME = candle_time
     LAST_EXIT_WALL_TIME = time.time()
     REENTRY_RESCAN_PENDING = True
+    TRADE_TRANSITION_PENDING = False
 
     trade_state = {
         "in_position": False,
@@ -7140,7 +7141,7 @@ def run():
     paper_load_state()
     migrate_legacy_data_files()
     rebuild_auto_optimizer_profiles()
-    global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
+    global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state, TRADE_TRANSITION_PENDING
 
     print("BOT MULTI V6.5 ADAPTIVE INTELLIGENCE TREND SCORE")
     print("Long only | 15m | Une seule position à la fois")
