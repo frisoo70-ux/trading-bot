@@ -2433,6 +2433,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 live_positions.append(position.get("coin"))
                         if live_positions:
                             return self._json({"ok": False, "error": "Ferme d’abord toutes les positions réelles (longues ou short) avant de passer en Paper Trading : " + ", ".join(live_positions)}, 409)
+                    elif not PRIVATE_KEY or not WALLET_ADDRESS:
+                        return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible de réactiver le Live."}, 409)
                     elif PAPER_STATE.get("position"):
                         return self._json({"ok": False, "error": "Ferme d’abord la position simulée avant de revenir en Live."}, 409)
                     base_cfg["execution_mode"] = requested_execution_mode
@@ -3849,6 +3851,10 @@ def get_order_state_for_dashboard():
 def place_order_qty(symbol, side, qty, price, reduce_only=False):
     global LAST_ENTRY_PRICE_BY_SYMBOL, LAST_SELL_REASON
     try:
+        # Barrière de sécurité centrale : aucun appel Exchange en mode PAPER.
+        if load_bot_config().get("execution_mode", "LIVE") == "PAPER":
+            print(f"[PAPER SAFETY] Ordre réel bloqué : {side} {symbol} qty={qty}")
+            return False
         if is_order_blocked(symbol, side):
             print(f"[ORDER BLOCKED] ordre déjà en attente {ORDER_STATE.get('side')} {ORDER_STATE.get('symbol')} retry={get_order_state_for_dashboard().get('retry_in_seconds')}s")
             return False
