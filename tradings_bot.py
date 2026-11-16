@@ -551,20 +551,20 @@ def paper_get_fee_config(force=False):
     """Récupère le taux taker personnel depuis l'endpoint public userFees."""
     now = time.time()
     with PAPER_FEE_CACHE_LOCK:
-        if not force and PAPER_FEE_CACHE.get("rate") is not None and now - float(PAPER_FEE_CACHE.get("timestamp", 0)) < 3600:
+        if not force and PAPER_FEE_CACHE.get("rate") is not None and now < float(PAPER_FEE_CACHE.get("expires_at", 0)):
             return dict(PAPER_FEE_CACHE)
     if not WALLET_ADDRESS:
-        result = {"rate": PAPER_FEE_RATE, "source": "FALLBACK_BASE_TAKER_NO_WALLET", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now}
+        result = {"rate": PAPER_FEE_RATE, "source": "FALLBACK_BASE_TAKER_NO_WALLET", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now, "expires_at": now + 60}
     else:
         try:
             data = info_post({"type": "userFees", "user": WALLET_ADDRESS}, cache_key="paper_user_fees", cache_ttl=3600, max_retries=1)
             rate = float(data.get("userCrossRate")) if data and data.get("userCrossRate") is not None else None
             if rate is None or rate < 0 or rate > 0.01:
                 raise ValueError("userCrossRate absent ou invalide")
-            result = {"rate": rate, "source": "HYPERLIQUID_USER_FEES_TAKER", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now}
+            result = {"rate": rate, "source": "HYPERLIQUID_USER_FEES_TAKER", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now, "expires_at": now + 3600}
         except Exception as e:
             print("[PAPER FEES] userFees indisponible:", e)
-            result = {"rate": PAPER_FEE_RATE, "source": "FALLBACK_BASE_TAKER_API_ERROR", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now}
+            result = {"rate": PAPER_FEE_RATE, "source": "FALLBACK_BASE_TAKER_API_ERROR", "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "timestamp": now, "expires_at": now + 60}
     with PAPER_FEE_CACHE_LOCK:
         PAPER_FEE_CACHE.update(result)
     return dict(PAPER_FEE_CACHE)
@@ -688,7 +688,7 @@ def paper_open_position(candidate):
         direction=1 if side=="LONG" else -1
         notional=float(TRADE_SIZE_USD)
         execution=paper_estimate_execution(symbol, "BUY" if side=="LONG" else "SELL", notional, raw_price)
-        fill=float(execution["fill_price"]); qty=notional/fill; fee=notional*float(execution["fee_rate"])
+        fill=float(execution["fill_price"]); qty=notional/fill; fee=abs(qty*fill)*float(execution["fee_rate"])
         atr=float(last["atr"]); mode=details.get("signal_mode") or "UNKNOWN"
         if mode=="MODE_L_LIQUIDITY_SWEEP":
             ml=details.get("mode_l") or {}; stop=float(ml.get("stop") or (fill-direction*MODE_L_ATR_STOP_MULT*atr))
