@@ -2009,7 +2009,7 @@ function moveChartWindow(direction){
  fetch('/api/chart?symbol='+encodeURIComponent(symbol)+suffix).then(r=>r.json()).then(d=>{
   const total=(d.candles||[]).length;
   const maxOffset=Math.max(0,total-chartWindow);
-  chartOffset=Math.max(0,Math.min(maxOffset,chartOffset+direction*Math.max(10,Math.floor(chartWindow/2))));
+  chartOffset=Math.max(0,Math.min(maxOffset,chartOffset-direction*Math.max(10,Math.floor(chartWindow/2))));
   loadChart();
  }).catch(()=>{});
 }
