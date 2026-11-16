@@ -436,6 +436,7 @@ DEFAULT_BOT_CONFIG = {
         "MODE_D_EMA_PULLBACK": True,
         "MODE_E_EARLY_MOMENTUM": True,
         "MODE_F_CANDLE_REVERSAL": True,
+        "MODE_L_LIQUIDITY_SWEEP": True,
     },
     "symbols": {
         "SOL": True,
@@ -1855,7 +1856,61 @@ function openTradeModal(i){const r=lastTrades[i];if(!r)return;const html=`<div c
 <div class="aiBox">${esc(r._mode_f_pattern_details||'Aucun pattern Mode F enregistré pour ce trade.')}</div>
 <h3 style="margin-top:16px">🧠 Analyse IA</h3>
 <div class="aiBox">${esc(r._ai_comment||'-')}</div>`;document.getElementById('tradeDetailContent').innerHTML=html;document.getElementById('tradeModal').style.display='block'}
-function renderToggles(cfg){currentConfig=cfg;const modeLabels={MODE_A_CLASSIQUE:'Mode A',MODE_B_PATTERN:'Mode B',MODE_C_CAPITULATION:'Mode C',MODE_D_EMA_PULLBACK:'Mode D',MODE_E_EARLY_MOMENTUM:'Mode E',MODE_F_CANDLE_REVERSAL:'Mode F'};const modeDesc={MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',MODE_B_PATTERN:'Triangle / compression / patterns forts.',MODE_C_CAPITULATION:'Rebond après forte baisse.',MODE_D_EMA_PULLBACK:'Pullback EMA confirmé : D1 désactivé, D2 attend une bougie de confirmation.',MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.'};document.getElementById('modeToggles').innerHTML=Object.keys(cfg.modes).map(k=>`<label class="toggle"><span>${modeLabels[k]||k}<br><small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span><input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}></label>`).join('');document.getElementById('symbolToggles').innerHTML=Object.keys(cfg.symbols).map(k=>`<label class="toggle"><span>${k}</span><input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}></label>`).join('');const opts=['1m','3m','5m','15m'];document.getElementById('timeframeToggles').innerHTML=opts.map(tf=>`<label class="toggle"><span>${tf}</span><input type="radio" name="timeframe" data-timeframe="${tf}" ${cfg.timeframe===tf?'checked':''}></label>`).join('');document.getElementById('activeTimeframeLabel').textContent='Timeframe actif : '+(cfg.timeframe||'15m')}
+
+function renderToggles(cfg){
+    currentConfig=cfg;
+
+    const modeLabels={
+        MODE_A_CLASSIQUE:'Mode A',
+        MODE_B_PATTERN:'Mode B',
+        MODE_C_CAPITULATION:'Mode C',
+        MODE_D_EMA_PULLBACK:'Mode D',
+        MODE_E_EARLY_MOMENTUM:'Mode E',
+        MODE_F_CANDLE_REVERSAL:'Mode F',
+        MODE_L_LIQUIDITY_SWEEP:'Mode L - Liquidity Sweep'
+    };
+
+    const modeDesc={
+        MODE_A_CLASSIQUE:'Breakout classique tendance confirmée.',
+        MODE_B_PATTERN:'Triangle / compression / patterns forts.',
+        MODE_C_CAPITULATION:'Rebond après forte baisse.',
+        MODE_D_EMA_PULLBACK:'Pullback EMA confirmé : D1 désactivé, D2 attend une bougie de confirmation.',
+        MODE_E_EARLY_MOMENTUM:'Impulsion volume + OBV. Peut acheter intrabar avant clôture 15m. Sortie 2 clôtures sous EMA20.',
+        MODE_F_CANDLE_REVERSAL:'Patterns bougies haussiers : marteau, englobante, morning star, tweezer, inside breakout.',
+        MODE_L_LIQUIDITY_SWEEP:'Détection des poches de liquidité, sweeps et réintégrations.'
+    };
+
+    document.getElementById('modeToggles').innerHTML=
+        Object.keys(cfg.modes).map(k=>
+            `<label class="toggle">
+                <span>${modeLabels[k]||k}<br>
+                <small style="color:#9ca3af;font-weight:500">${modeDesc[k]||''}</small></span>
+                <input type="checkbox" data-section="modes" data-key="${k}" ${cfg.modes[k]?'checked':''}>
+            </label>`
+        ).join('');
+
+    document.getElementById('symbolToggles').innerHTML=
+        Object.keys(cfg.symbols).map(k=>
+            `<label class="toggle">
+                <span>${k}</span>
+                <input type="checkbox" data-section="symbols" data-key="${k}" ${cfg.symbols[k]?'checked':''}>
+            </label>`
+        ).join('');
+
+    const opts=['1m','3m','5m','15m'];
+
+    document.getElementById('timeframeToggles').innerHTML=
+        opts.map(tf=>
+            `<label class="toggle">
+                <span>${tf}</span>
+                <input type="radio" name="timeframe" data-timeframe="${tf}" ${cfg.timeframe===tf?'checked':''}>
+            </label>`
+        ).join('');
+
+    document.getElementById('activeTimeframeLabel').textContent=
+        'Timeframe actif : '+(cfg.timeframe||'15m');
+}
+
 async function saveConfig(){document.querySelectorAll('input[type=checkbox]').forEach(i=>{currentConfig[i.dataset.section][i.dataset.key]=i.checked});const tf=document.querySelector('input[name=timeframe]:checked');if(tf){currentConfig.timeframe=tf.dataset.timeframe}const r=await fetch('/api/config'+window.location.search,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(currentConfig)});document.getElementById('saveStatus').textContent=r.ok?'✅ Configuration sauvegardée':'❌ Erreur sauvegarde';setTimeout(()=>document.getElementById('saveStatus').textContent='',2500);load()}
 
 function renderLiveTradeV48(live){
