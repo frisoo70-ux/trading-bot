@@ -1184,11 +1184,14 @@ def rebuild_adaptive_config_from_trades():
                 token_stats[str(symbol)] = {"trades":count,"wins":wins,"winrate":winrate,"pnl":round(total,4),"avg":round(avg,4),"multiplier":mult}
 
         pattern_rows=[]
-        if "mode_f_pattern" in df.columns:
-            for _, r in df.iterrows():
+        # Les colonnes de pattern peuvent être renseignées sur d'autres modes :
+        # seules les positions réellement ouvertes par le Mode F alimentent ces stats.
+        if "mode_f_pattern" in df.columns and "mode" in df.columns:
+            mode_f_rows = df[df["mode"].astype(str) == "MODE_F_CANDLE_REVERSAL"]
+            for _, r in mode_f_rows.iterrows():
                 for p in str(r.get("mode_f_pattern","") or "").split(","):
                     p=p.strip()
-                    if p:
+                    if p and p.lower() not in ("nan", "none"):
                         pattern_rows.append({"pattern":p,"pnl":float(r.get("real_pnl_usdc",0) or 0)})
         pattern_mult, pattern_stats = {}, {}
         if pattern_rows:
@@ -1222,8 +1225,10 @@ def get_adaptive_multiplier(symbol, mode, details=None):
         mode_mult=float(cfg.get("mode_multipliers",{}).get(str(mode),1.0))
         token_mult=float(cfg.get("token_multipliers",{}).get(str(symbol),1.0))
         pattern_mult=1.0
-        if details:
-            pats=[p for p in str(details.get("mode_f_pattern","") or "").split(",") if p]
+        # Les patterns de retournement ne concernent que les trades réellement
+        # déclenchés par le Mode F. Ne jamais appliquer ce multiplicateur à A-E ou L.
+        if details and str(mode) == "MODE_F_CANDLE_REVERSAL":
+            pats=[p.strip() for p in str(details.get("mode_f_pattern","") or "").split(",") if p.strip()]
             vals=[float(cfg.get("pattern_multipliers",{}).get(p,1.0)) for p in pats]
             if vals: pattern_mult=min(vals)
         final=clamp_adaptive(mode_mult*token_mult*pattern_mult)
@@ -4414,13 +4419,8 @@ def buy_signal(df):
     elif mode_f_ok:
         signal_mode = "MODE_F_CANDLE_REVERSAL"
 
-    auto_learning = get_auto_learning_adjustment(
-        mode=signal_mode,
-        pattern=",".join(mode_f_details.get("patterns", [])) if signal_mode == "MODE_F_CANDLE_REVERSAL" else None,
-    )
-    if signal_mode and auto_learning.get("blocked"):
-        mode_a_ok = mode_b_ok = mode_c_ok = mode_d_ok = mode_e_ok = mode_f_ok = False
-        signal_mode = None
+    # Auto Learning est appliqué une seule fois dans le scan, avec le symbole connu.
+    # Cela permet de combiner mode + token + pattern sans double pénalisation.
 
     score = (
         breakout_strength * 100
@@ -4442,9 +4442,6 @@ def buy_signal(df):
         score += 2.5 + min(volume_ratio, 5.0) + min(body_ratio * 2, 2.0)
     if mode_f_ok:
         score += 1.0 + mode_f_score + min(mode_f_filter_details.get("confirmation_count", 0) * 0.35, 2.5)
-
-    if signal_mode and auto_learning.get("multiplier", 1.0) != 1.0:
-        score = score * float(auto_learning.get("multiplier", 1.0))
 
     ok = mode_l_ok or mode_a_ok or mode_b_ok or mode_c_ok or mode_d_ok or mode_e_ok or mode_f_ok
 
@@ -4491,9 +4488,9 @@ def buy_signal(df):
         "mode_f_blocking_reasons": ",".join(mode_f_filter_details.get("blocking_reasons", [])),
         "mode_f_ema20_slope_pct": mode_f_filter_details.get("ema20_slope_pct"),
         "mode_f_distance_below_ema20_pct": mode_f_filter_details.get("distance_below_ema20_pct"),
-        "auto_learning_multiplier": auto_learning.get("multiplier"),
-        "auto_learning_blocked": auto_learning.get("blocked"),
-        "auto_learning_reasons": ",".join(auto_learning.get("reasons", [])),
+        "auto_learning_multiplier": 1.0,
+        "auto_learning_blocked": False,
+        "auto_learning_reasons": "applied_once_in_symbol_scan",
         "pattern_score": patt_details["pattern_score"],
         "bull_flag": patt_details["bull_flag"],
         "ascending_triangle": patt_details["ascending_triangle"],
@@ -4821,8 +4818,15 @@ def rebuild_auto_learning_from_history():
 
         work = df.tail(AUTO_LEARNING_WINDOW).copy()
         work["real_pnl_usdc"] = pd.to_numeric(work.get("real_pnl_usdc"), errors="coerce").fillna(0)
-        if "mode_f_pattern" in work.columns:
-            work["auto_pattern"] = work["mode_f_pattern"].astype(str).str.split(",").str[0].replace("nan", "")
+        # L'apprentissage des patterns est limité aux trades du Mode F.
+        # Les autres modes ne doivent pas contaminer les statistiques de patterns.
+        if "mode_f_pattern" in work.columns and "mode" in work.columns:
+            is_mode_f = work["mode"].astype(str).eq("MODE_F_CANDLE_REVERSAL")
+            work["auto_pattern"] = ""
+            work.loc[is_mode_f, "auto_pattern"] = (
+                work.loc[is_mode_f, "mode_f_pattern"].fillna("").astype(str).str.split(",").str[0]
+            )
+            work.loc[work["auto_pattern"].str.lower().isin(["nan", "none"]), "auto_pattern"] = ""
         else:
             work["auto_pattern"] = ""
 
