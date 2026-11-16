@@ -63,6 +63,7 @@ PAPER_TAKER_FEE_RATE = 0.00035
 PAPER_SLIPPAGE_RATE = 0.0005
 PAPER_LOCK = threading.RLock()
 TRADING_MODE_LOCK = threading.RLock()
+TRADE_TRANSITION_PENDING = False
 PAPER_STATE = {"balance": PAPER_START_BALANCE, "open_position": None, "last_closed_trade": None, "trade_state": None}
 POST_TRADE_CSV_PATH = DATA_DIR / "post_trade_analysis.csv"
 POST_TRADE_PENDING_PATH = DATA_DIR / "post_trade_pending.json"
@@ -2407,8 +2408,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 requested_mode = "PAPER" if str(cfg.get("trading_mode", base_cfg.get("trading_mode", "LIVE"))).upper() == "PAPER" else "LIVE"
                 if requested_mode != base_cfg.get("trading_mode", "LIVE"):
                     with TRADING_MODE_LOCK:
-                        if ORDER_STATE.get("pending"):
-                            return self._json({"ok": False, "error": "Un ordre est en cours ou en attente. Réessayez après sa résolution."}, 409)
+                        if ORDER_STATE.get("pending") or TRADE_TRANSITION_PENDING:
+                            return self._json({"ok": False, "error": "Un ordre ou une entrée est en cours de validation. Réessayez dans quelques secondes."}, 409)
                         if PAPER_STATE.get("open_position") or PAPER_STATE.get("last_closed_trade") or trade_state.get("in_position"):
                             return self._json({"ok": False, "error": "Fermez la position en cours et terminez sa comptabilisation avant de changer de mode."}, 409)
                         if requested_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
@@ -3957,6 +3958,7 @@ def place_order_qty(symbol, side, qty, price, reduce_only=False):
 
 
 def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_mode=None):
+    global TRADE_TRANSITION_PENDING
     qty = round(size_usd / price, get_size_decimals(symbol))
     if expected_mode is not None:
         with TRADING_MODE_LOCK:
@@ -3964,7 +3966,10 @@ def place_order_usd(symbol, side, size_usd, price, reduce_only=False, expected_m
             if current_mode != expected_mode:
                 print("[MODE] Entrée annulée : le mode a changé pendant l'analyse.")
                 return False
-            return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
+            ok = place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
+            if ok:
+                TRADE_TRANSITION_PENDING = True
+            return ok
     return place_order_qty(symbol, side, qty, price, reduce_only=reduce_only)
 
 
@@ -7403,6 +7408,7 @@ def run():
                 if cycle_mode == "PAPER":
                     PAPER_STATE["trade_state"] = dict(trade_state)
                     paper_save_state()
+                TRADE_TRANSITION_PENDING = False
                 print("Trade #", trades, "|", symbol, "| Solde:", round(get_balance(), 2), "USDC")
 
             time.sleep(CHECK_INTERVAL)
