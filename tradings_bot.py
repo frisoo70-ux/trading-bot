@@ -1029,6 +1029,7 @@ def paper_open_position(candidate, btc_context=None):
             "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
             "entry_diagnostics":entry_diagnostics,
+            "market_microstructure_captured_at_ms":int(time.time() * 1000),
             "entry_candle_time":json_safe(candidate.get("confirmed_time")),
             "favorable_extreme_price":fill,"adverse_extreme_price":fill,
             "mfe_pct":0.0,"mae_pct":0.0,"mfe_usd":0.0,"mae_usd":0.0,
@@ -1084,8 +1085,7 @@ def paper_close_position(symbol, price, reason):
 
 def paper_manage_position(symbol, df, current_price, candle_time, btc_context=None):
     reason = None
-    # Instantané optionnel hors verrou; son échec ne doit pas bloquer l'état partagé.
-    market_microstructure = paper_derivatives_snapshot(symbol)
+    market_microstructure_due = False
     with PAPER_LOCK:
         p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
         if not p:
@@ -1121,7 +1121,8 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         p["mfe_usd"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) * original_qty)
         p["mae_usd"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) * original_qty)
         p["last_market_snapshot"] = paper_position_market_snapshot(df, price, candle_time, btc_context)
-        p["last_market_snapshot"]["market_microstructure"] = market_microstructure
+        last_microstructure_ms = int(p.get("market_microstructure_captured_at_ms", 0) or 0)
+        market_microstructure_due = (int(time.time() * 1000) - last_microstructure_ms) >= 300000
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
@@ -1156,6 +1157,15 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         save_paper_state()
     if reason:
         paper_close_position(symbol, price, reason)
+    elif market_microstructure_due:
+        # Rafraîchissement après la gestion du stop/TP et hors verrou d'état.
+        market_microstructure = paper_derivatives_snapshot(symbol)
+        with PAPER_LOCK:
+            p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
+            if p and p.get("last_market_snapshot") is not None:
+                p["last_market_snapshot"]["market_microstructure"] = market_microstructure
+                p["market_microstructure_captured_at_ms"] = int(time.time() * 1000)
+                save_paper_state()
 
 
 def paper_process_cycle():
