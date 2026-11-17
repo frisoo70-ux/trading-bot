@@ -709,7 +709,238 @@ def paper_snapshot(current_price=None):
         "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE,"funding_simulated":False}
 
 
-def paper_open_position(candidate):
+def paper_safe_structure(value):
+    """Convertit récursivement les structures de diagnostics en types JSON sûrs."""
+    if isinstance(value, dict):
+        return {str(key): paper_safe_structure(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [paper_safe_structure(item) for item in value]
+    return json_safe(value)
+
+
+def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, details, status, reasons=None, score=None):
+    """
+    Historique PAPER des signaux évalués, y compris ceux rejetés par les filtres.
+    Informatif uniquement : ne modifie jamais la décision de trading.
+    """
+    try:
+        if load_bot_config().get("execution_mode", "LIVE") != "PAPER":
+            return
+        details = details or {}
+        flags = (
+            "trend_ok", "trend_score", "trend_missing", "rsi_ok", "vwap_ok",
+            "obv_rising", "breakout_ok", "green_candle", "mode_a_ok",
+            "mode_b_ok", "mode_c_ok", "mode_d_ok", "mode_e_ok",
+            "mode_f_ok", "mode_l_ok", "pattern_score", "mode_e_volume_ratio",
+            "mode_e_body_ratio", "mode_e_intrabar", "mode_c_drop_pct",
+            "mode_c_volume_ok", "mode_c_wick_ok", "adaptive_multiplier",
+            "adaptive_info", "auto_learning_multiplier", "auto_learning_reasons", "mode_l",
+        )
+        indicators = {}
+        if last is not None:
+            for key in ("open", "high", "low", "close", "volume", "ema20", "ema50",
+                        "rsi", "atr", "vwap", "obv", "obv_ma5"):
+                if key in last.index:
+                    indicators[key] = json_safe(last.get(key))
+        row = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp_ms": int(time.time() * 1000),
+            "symbol": symbol,
+            "candle_time": json_safe(confirmed_time),
+            "current_price": json_safe(current_price),
+            "status": str(status),
+            "mode": details.get("signal_mode"),
+            "score": json_safe(score if score is not None else details.get("score")),
+            "flags": {key: paper_safe_structure(details.get(key)) for key in flags if key in details},
+            "indicators": indicators,
+            "rejection_reasons": list(reasons or []),
+            "mode_details": {
+                key: paper_safe_structure(details.get(key))
+                for key in ("mode_c_reversal", "mode_c_drop_pct", "mode_d_type",
+                            "mode_e_intrabar_move_pct", "mode_e_intrabar_distance_ema20_pct",
+                            "mode_f_pattern", "mode_f_score", "mode_l")
+                if key in details
+            },
+            "market_microstructure": paper_derivatives_snapshot(symbol),
+        }
+        with PAPER_LOCK:
+            history = PAPER_STATE.setdefault("signal_diagnostics", [])
+            history.append(row)
+            PAPER_STATE["signal_diagnostics"] = history[-2000:]
+            save_paper_state()
+    except Exception as e:
+        print("[PAPER SIGNAL DIAGNOSTICS] Enregistrement impossible:", str(e)[:180])
+
+
+def paper_cache_age_seconds(key):
+    try:
+        item = API_CACHE.get(key)
+        return round(max(0.0, time.time() - float(item[0])), 2) if item else None
+    except Exception:
+        return None
+
+
+def paper_derivatives_snapshot(symbol):
+    """
+    Instantané informatif du funding, de l'open interest et du carnet L2.
+    Requêtes publiques Hyperliquid avec cache; aucun effet sur les signaux.
+    """
+    snapshot = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "PARTIAL",
+    }
+    try:
+        data = info_post(
+            {"type": "metaAndAssetCtxs"},
+            cache_key="paper_meta_asset_contexts",
+            cache_ttl=300,
+            max_retries=0,
+        )
+        snapshot["derivatives_data_age_seconds"] = paper_cache_age_seconds("paper_meta_asset_contexts")
+        if isinstance(data, list) and len(data) >= 2:
+            universe = (data[0] or {}).get("universe", [])
+            contexts = data[1] or []
+            for asset, ctx in zip(universe, contexts):
+                if isinstance(asset, dict) and isinstance(ctx, dict) and asset.get("name") == symbol:
+                    snapshot["derivatives"] = {
+                        key: json_safe(ctx.get(key))
+                        for key in ("funding", "openInterest", "dayNtlVlm", "prevDayPx",
+                                    "markPx", "oraclePx", "midPx", "premium")
+                        if ctx.get(key) is not None
+                    }
+                    snapshot["derivatives_status"] = "OK"
+                    break
+        if "derivatives" not in snapshot:
+            snapshot["derivatives_status"] = "UNAVAILABLE"
+    except Exception as e:
+        snapshot["derivatives_status"] = "ERROR"
+        snapshot["derivatives_error"] = str(e)[:140]
+
+    try:
+        book = info_post(
+            {"type": "l2Book", "coin": symbol},
+            cache_key=f"paper_diagnostics_l2_{symbol}",
+            cache_ttl=300,
+            max_retries=0,
+        )
+        snapshot["order_book_data_age_seconds"] = paper_cache_age_seconds(f"paper_diagnostics_l2_{symbol}")
+        levels = (book or {}).get("levels") or []
+        bids = levels[0] if len(levels) > 0 else []
+        asks = levels[1] if len(levels) > 1 else []
+        bid_qty = sum(float(x.get("sz", 0) or 0) for x in bids[:5])
+        ask_qty = sum(float(x.get("sz", 0) or 0) for x in asks[:5])
+        bid_notional = sum(float(x.get("px", 0) or 0) * float(x.get("sz", 0) or 0) for x in bids[:5])
+        ask_notional = sum(float(x.get("px", 0) or 0) * float(x.get("sz", 0) or 0) for x in asks[:5])
+        best_bid = float(bids[0].get("px", 0)) if bids else 0.0
+        best_ask = float(asks[0].get("px", 0)) if asks else 0.0
+        mid = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
+        snapshot["order_book"] = {
+            "status": "OK" if mid > 0 else "UNAVAILABLE",
+            "best_bid": best_bid or None,
+            "best_ask": best_ask or None,
+            "spread_pct": ((best_ask - best_bid) / mid * 100) if mid > 0 else None,
+            "bid_depth_top5_qty": bid_qty,
+            "ask_depth_top5_qty": ask_qty,
+            "bid_depth_top5_usd": bid_notional,
+            "ask_depth_top5_usd": ask_notional,
+            "imbalance_top5": ((bid_qty - ask_qty) / (bid_qty + ask_qty)) if bid_qty + ask_qty > 0 else None,
+        }
+    except Exception as e:
+        snapshot["order_book"] = {"status": "ERROR", "error": str(e)[:140]}
+    return snapshot
+
+
+def paper_context_snapshot(symbol="BTC"):
+    """
+    Capture le contexte BTC en 15m/1h/4h au moment d'une entrée/sortie PAPER.
+    Les snapshots sont informatifs uniquement et ne modifient aucun signal.
+    """
+    context = {}
+    interval_minutes = {"15m": 15, "1h": 60, "4h": 240}
+    for interval, minutes in interval_minutes.items():
+        try:
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - (120 * minutes * 60 * 1000)
+            payload = {
+                "type": "candleSnapshot",
+                "req": {"coin": symbol, "interval": interval, "startTime": start_ms, "endTime": end_ms},
+            }
+            data = info_post(
+                payload,
+                cache_key=f"paper_context:{symbol}:{interval}",
+                cache_ttl=60,
+                max_retries=1,
+            )
+            if not isinstance(data, list) or len(data) < 60:
+                context[interval] = {"status": "DATA_UNAVAILABLE"}
+                continue
+            rows = [{
+                "time": int(c["t"]), "open": float(c["o"]), "high": float(c["h"]),
+                "low": float(c["l"]), "close": float(c["c"]), "volume": float(c["v"]),
+            } for c in data]
+            frame = add_indicators(pd.DataFrame(rows)).dropna()
+            if frame.empty:
+                context[interval] = {"status": "INDICATORS_UNAVAILABLE"}
+                continue
+            last = frame.iloc[-1]
+            close = float(last["close"])
+            ema20 = float(last["ema20"])
+            ema50 = float(last["ema50"])
+            trend = "BULLISH" if close > ema20 > ema50 else ("BEARISH" if close < ema20 < ema50 else "MIXED")
+            context[interval] = {
+                "status": "OK", "candle_time": int(last["time"]), "close": close,
+                "ema20": ema20, "ema50": ema50, "rsi": float(last["rsi"]),
+                "atr": float(last["atr"]), "vwap": float(last["vwap"]),
+                "obv": float(last["obv"]), "trend": trend,
+            }
+        except Exception as e:
+            context[interval] = {"status": "ERROR", "error": str(e)[:160]}
+    return context
+
+
+def paper_market_regime_snapshot(df):
+    """Caractéristiques brutes du régime de marché, sans seuil de décision."""
+    try:
+        if df is None or len(df) < 4:
+            return {"status": "DATA_UNAVAILABLE"}
+        last = df.iloc[-1]
+        previous = df.iloc[-4]
+        close = float(last["close"])
+        ema20 = float(last["ema20"])
+        ema50 = float(last["ema50"])
+        prior_ema20 = float(previous["ema20"])
+        atr = float(last["atr"])
+        trend = "BULLISH" if close > ema20 > ema50 else (
+            "BEARISH" if close < ema20 < ema50 else "MIXED"
+        )
+        return {
+            "status": "OK",
+            "trend_alignment": trend,
+            "ema20_slope_3_candles_pct": ((ema20 / prior_ema20) - 1) * 100 if prior_ema20 else None,
+            "ema20_ema50_spread_pct": ((ema20 - ema50) / close) * 100 if close else None,
+            "atr_pct_of_price": (atr / close) * 100 if close else None,
+            "price_vs_vwap_pct": ((close / float(last["vwap"])) - 1) * 100 if float(last["vwap"]) else None,
+        }
+    except Exception as e:
+        return {"status": "ERROR", "error": str(e)[:140]}
+
+
+def paper_position_market_snapshot(df, current_price, candle_time, btc_context=None):
+    last = df.iloc[-1]
+    keys = ("open", "high", "low", "close", "volume", "ema20", "ema50", "rsi", "atr", "vwap", "obv", "obv_ma5")
+    return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "candle_time": json_safe(candle_time),
+        "current_price": float(current_price),
+        "indicators": {key: json_safe(last.get(key)) for key in keys if key in last.index},
+        "market_regime": paper_market_regime_snapshot(df),
+        "btc_context": btc_context or {},
+    }
+
+
+def paper_open_position(candidate, btc_context=None):
+    # Appels réseau hors verrou pour ne pas bloquer les lectures/écritures d'état PAPER.
+    market_microstructure = paper_derivatives_snapshot(candidate["symbol"])
     with PAPER_LOCK:
         positions = PAPER_STATE.setdefault("positions", [])
         symbol = candidate["symbol"]
@@ -730,12 +961,57 @@ def paper_open_position(candidate):
         fill = float(execution["fill_price"])
         qty = notional / fill
         fee = abs(qty * fill) * float(execution["fee_rate"])
-        free_equity = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0)) - open_notional
+        # Marque les positions ouvertes au marché avant de réserver la marge.
+        # L'ancien calcul ne retranchait que le notionnel et ignorait les pertes latentes.
+        cash_balance = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0))
+        unrealized_net = 0.0
+        reserved_margin = 0.0
+        for open_position in positions:
+            open_entry = float(open_position.get("entry_price", 0) or 0)
+            open_mark = float(open_position.get("last_price") or open_entry)
+            open_qty = float(open_position.get("remaining_qty", open_position.get("qty", 0)) or 0)
+            open_direction = 1 if open_position.get("side", "LONG") == "LONG" else -1
+            open_fee_rate = float(open_position.get("entry_fee_rate", PAPER_FEE_RATE) or PAPER_FEE_RATE)
+            unrealized_net += (
+                float(open_position.get("realized_partial_pnl", 0) or 0)
+                + open_direction * (open_mark - open_entry) * open_qty
+                - float(open_position.get("entry_fee", 0) or 0)
+                - abs(open_qty * open_mark) * open_fee_rate
+            )
+            reserved_margin += float(open_position.get("margin", open_position.get("notional", 0)) or 0)
+        marked_equity = cash_balance + unrealized_net
+        free_equity = marked_equity - reserved_margin
         if free_equity + 1e-9 < notional + fee:
-            print(f"[PAPER] Capital disponible insuffisant pour {symbol}: {free_equity:.4f} USDC")
+            print(f"[PAPER] Capital disponible insuffisant pour {symbol}: {free_equity:.4f} USDC (equity marquée: {marked_equity:.4f})")
             return False
         atr = float(last["atr"])
         mode = details.get("signal_mode") or "UNKNOWN"
+        diagnostic_keys = (
+            "trend_score", "trend_ok", "trend_missing", "rsi_ok", "vwap_ok",
+            "obv_rising", "breakout_ok", "green_candle", "pattern_score",
+            "mode_a_ok", "mode_b_ok", "mode_c_ok", "mode_d_ok", "mode_e_ok",
+            "mode_e_intrabar", "mode_e_intrabar_move_pct", "mode_e_volume_ratio",
+            "mode_e_body_ratio", "mode_e_intrabar_distance_ema20_pct",
+            "mode_c_drop_pct", "mode_c_volume_ok", "mode_c_wick_ok",
+            "adaptive_multiplier", "score_before_adaptive",
+            "auto_learning_multiplier", "auto_learning_reasons", "mode_l",
+        )
+        entry_diagnostics = {
+            key: paper_safe_structure(details.get(key))
+            for key in diagnostic_keys
+            if key in details
+        }
+        entry_diagnostics["candle"] = {
+            key: json_safe(last.get(key))
+            for key in ("close", "open", "high", "low", "volume", "ema20", "ema50", "rsi", "atr", "vwap", "obv", "obv_ma5")
+            if key in last.index
+        }
+        entry_diagnostics["market_regime"] = paper_market_regime_snapshot(candidate.get("df"))
+        entry_diagnostics["signal_mode"] = mode
+        entry_diagnostics["final_score"] = round(float(candidate.get("score", 0) or 0), 4)
+        entry_diagnostics["btc_context"] = btc_context or {}
+        entry_diagnostics["market_microstructure"] = market_microstructure
+        entry_diagnostics["entry_candle_time"] = json_safe(candidate.get("confirmed_time"))
         if mode == "MODE_L_LIQUIDITY_SWEEP":
             ml = details.get("mode_l") or {}
             stop = float(ml.get("stop") or (fill - direction * MODE_L_ATR_STOP_MULT * atr))
@@ -752,6 +1028,13 @@ def paper_open_position(candidate):
             "fees_paid":fee,"fee_source":execution.get("fee_source"),"entry_slippage_rate":float(execution["slippage_rate"]),
             "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
+            "entry_diagnostics":entry_diagnostics,
+            "market_microstructure_captured_at_ms":int(time.time() * 1000),
+            "market_microstructure_history":[{"timestamp_ms":int(time.time() * 1000), "snapshot":market_microstructure}],
+            "entry_candle_time":json_safe(candidate.get("confirmed_time")),
+            "favorable_extreme_price":fill,"adverse_extreme_price":fill,
+            "mfe_pct":0.0,"mae_pct":0.0,"mfe_usd":0.0,"mae_usd":0.0,
+            "last_market_snapshot":None,
             "tp1_done":False,"highest_price":fill,"last_price":raw_price}
         positions.append(position)
         PAPER_STATE["position"] = positions[0]
@@ -776,6 +1059,16 @@ def paper_close_position(symbol, price, reason):
         net = float(p.get("realized_partial_pnl", 0)) + gross - exit_fee - float(p.get("entry_fee", 0))
         trade = {"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
             "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"notional":p.get("notional"),"leverage":p.get("leverage",PAPER_LEVERAGE),"exit_reason":reason,
+            "entry_diagnostics":p.get("entry_diagnostics", {}),
+            "exit_diagnostics":p.get("last_market_snapshot", {}),
+            "market_microstructure_history":p.get("market_microstructure_history", []),
+            "mfe_pct":round(float(p.get("mfe_pct", 0) or 0), 4),
+            "mae_pct":round(float(p.get("mae_pct", 0) or 0), 4),
+            "mfe_usd":round(float(p.get("mfe_usd", 0) or 0), 6),
+            "mae_usd":round(float(p.get("mae_usd", 0) or 0), 6),
+            "favorable_extreme_price":p.get("favorable_extreme_price"),
+            "adverse_extreme_price":p.get("adverse_extreme_price"),
+            "duration_minutes":round(max(0, (datetime.now() - datetime.strptime(p.get("entry_time"), "%Y-%m-%d %H:%M:%S")).total_seconds()/60), 2) if p.get("entry_time") else None,
             "gross_pnl":round(float(p.get("realized_partial_pnl",0))+gross,6),
             "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"entry_fee_rate":p.get("entry_fee_rate"),
             "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
@@ -792,8 +1085,9 @@ def paper_close_position(symbol, price, reason):
     return True
 
 
-def paper_manage_position(symbol, df, current_price, candle_time):
+def paper_manage_position(symbol, df, current_price, candle_time, btc_context=None):
     reason = None
+    market_microstructure_due = False
     with PAPER_LOCK:
         p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
         if not p:
@@ -801,6 +1095,39 @@ def paper_manage_position(symbol, df, current_price, candle_time):
         price = float(current_price)
         p["last_price"] = price
         side = p.get("side", "LONG")
+        entry_for_excursion = float(p["entry_price"])
+        direction_for_excursion = 1 if side == "LONG" else -1
+        observed_high = price
+        observed_low = price
+        try:
+            entry_candle_ms = int(p.get("entry_candle_time") or 0)
+            last_observed_ms = int(p.get("last_excursion_candle_time") or entry_candle_ms)
+            new_rows = df[df["time"].astype("int64") > max(entry_candle_ms, last_observed_ms)]
+            for _, candle in new_rows.iterrows():
+                observed_high = max(observed_high, float(candle["high"]))
+                observed_low = min(observed_low, float(candle["low"]))
+            if candle_time is not None:
+                p["last_excursion_candle_time"] = max(last_observed_ms, int(candle_time))
+        except Exception:
+            # Le prix courant reste une observation valide si les timestamps sont incomplets.
+            pass
+        favorable_observation = observed_high if side == "LONG" else observed_low
+        adverse_observation = observed_low if side == "LONG" else observed_high
+        previous_favorable = float(p.get("favorable_extreme_price") or entry_for_excursion)
+        previous_adverse = float(p.get("adverse_extreme_price") or entry_for_excursion)
+        p["favorable_extreme_price"] = max(previous_favorable, favorable_observation) if side == "LONG" else min(previous_favorable, favorable_observation)
+        p["adverse_extreme_price"] = min(previous_adverse, adverse_observation) if side == "LONG" else max(previous_adverse, adverse_observation)
+        p["mfe_pct"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) / entry_for_excursion * 100)
+        p["mae_pct"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) / entry_for_excursion * 100)
+        original_qty = float(p.get("qty", 0) or 0)
+        p["mfe_usd"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) * original_qty)
+        p["mae_usd"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) * original_qty)
+        previous_microstructure = (p.get("last_market_snapshot") or {}).get("market_microstructure")
+        p["last_market_snapshot"] = paper_position_market_snapshot(df, price, candle_time, btc_context)
+        if previous_microstructure:
+            p["last_market_snapshot"]["market_microstructure"] = previous_microstructure
+        last_microstructure_ms = int(p.get("market_microstructure_captured_at_ms", 0) or 0)
+        market_microstructure_due = (int(time.time() * 1000) - last_microstructure_ms) >= 300000
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
@@ -835,17 +1162,31 @@ def paper_manage_position(symbol, df, current_price, candle_time):
         save_paper_state()
     if reason:
         paper_close_position(symbol, price, reason)
+    elif market_microstructure_due:
+        # Rafraîchissement après la gestion du stop/TP et hors verrou d'état.
+        market_microstructure = paper_derivatives_snapshot(symbol)
+        with PAPER_LOCK:
+            p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
+            if p and p.get("last_market_snapshot") is not None:
+                captured_ms = int(time.time() * 1000)
+                p["last_market_snapshot"]["market_microstructure"] = market_microstructure
+                p["market_microstructure_captured_at_ms"] = captured_ms
+                history = p.setdefault("market_microstructure_history", [])
+                history.append({"timestamp_ms": captured_ms, "snapshot": market_microstructure})
+                p["market_microstructure_history"] = history[-144:]
+                save_paper_state()
 
 
 def paper_process_cycle():
     load_paper_state()
+    btc_context = paper_context_snapshot("BTC") if PAPER_STATE.get("positions") else None
     for position in list(PAPER_STATE.get("positions", [])):
         symbol = position.get("symbol")
         if not symbol:
             continue
         df, candle_time, price = prepare_df_for_symbol(symbol)
         if df is not None:
-            paper_manage_position(symbol, df, price, candle_time)
+            paper_manage_position(symbol, df, price, candle_time, btc_context=btc_context)
     if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
         return
     held_symbols = {p.get("symbol") for p in PAPER_STATE.get("positions", [])}
@@ -854,10 +1195,12 @@ def paper_process_cycle():
         exclude_symbols=held_symbols,
         return_all=True,
     )
+    if candidates and btc_context is None:
+        btc_context = paper_context_snapshot("BTC")
     for candidate in candidates or []:
         if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
             break
-        paper_open_position(candidate)
+        paper_open_position(candidate, btc_context=btc_context)
 
 
 
@@ -7330,6 +7673,16 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
         signal_text = "BUY" if ok else "HOLD"
         add_analysis_entry(symbol, last, current_price, details, signal_text)
 
+        if not ok:
+            rejection_reasons = ["BASE_SIGNAL_NOT_VALIDATED"]
+            for flag in ("trend_ok", "rsi_ok", "vwap_ok", "obv_rising", "breakout_ok", "green_candle"):
+                if details.get(flag) is False:
+                    rejection_reasons.append(flag.upper() + "_FALSE")
+            paper_record_signal_diagnostic(
+                symbol, confirmed_time, current_price, last, details,
+                "REJECTED_BASE_SIGNAL", rejection_reasons, score,
+            )
+
         add_log_line(
             f"[CANDLE CLOSE] {now} {symbol} Close={last['close']:.5f} Current={current_price:.5f} "
             f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} RSI={last['rsi']:.2f} "
@@ -7356,6 +7709,10 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
             if adaptive_block:
                 ok = False
                 print(f"[ADAPTIVE BLOCK] {symbol} {details.get('signal_mode')} mult={adaptive_mult} score_before={score_before_adaptive}")
+                paper_record_signal_diagnostic(
+                    symbol, confirmed_time, current_price, last, details,
+                    "REJECTED_ADAPTIVE", [str(adaptive_info or "ADAPTIVE_BLOCK")], score,
+                )
 
 
         if ok:
@@ -7365,7 +7722,14 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 pattern=details.get("mode_f_pattern") if details.get("signal_mode") == "MODE_F_CANDLE_REVERSAL" else None,
             )
             if symbol_auto_learning.get("blocked"):
-                print(f"[AUTO LEARNING BLOCK] {symbol} {details.get('signal_mode')} reasons={symbol_auto_learning.get('reasons')}")
+                learning_reasons = symbol_auto_learning.get("reasons", [])
+                details["auto_learning_reasons"] = ",".join(learning_reasons)
+                details["auto_learning_multiplier"] = symbol_auto_learning.get("multiplier")
+                print(f"[AUTO LEARNING BLOCK] {symbol} {details.get('signal_mode')} reasons={learning_reasons}")
+                paper_record_signal_diagnostic(
+                    symbol, confirmed_time, current_price, last, details,
+                    "REJECTED_AUTO_LEARNING", learning_reasons, score,
+                )
                 continue
             if symbol_auto_learning.get("multiplier", 1.0) != 1.0:
                 score = score * float(symbol_auto_learning.get("multiplier", 1.0))
@@ -7373,6 +7737,10 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 details["auto_learning_multiplier"] = symbol_auto_learning.get("multiplier")
                 details["auto_learning_reasons"] = ",".join(symbol_auto_learning.get("reasons", []))
 
+            paper_record_signal_diagnostic(
+                symbol, confirmed_time, current_price, last, details,
+                "ACCEPTED_CANDIDATE", [], score,
+            )
             candidates.append({
                 "symbol": symbol,
                 "df": df,
