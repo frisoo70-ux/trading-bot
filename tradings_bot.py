@@ -706,7 +706,7 @@ def paper_snapshot(current_price=None):
         "recent_trades":list(reversed(trades[-30:])),
         "updated_at":PAPER_STATE.get("updated_at"),"fee_rate":paper_get_fee_config().get("rate", PAPER_FEE_RATE),
         "fee_source":paper_get_fee_config().get("source"),"fee_updated_at":paper_get_fee_config().get("updated_at"),
-        "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE}
+        "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE,"funding_simulated":False}
 
 
 def paper_open_position(candidate):
@@ -2544,7 +2544,7 @@ table('postTrade',[
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
-async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : calcul carnet L2 à chaque exécution (secours si carnet indisponible)`;const positions=p.positions||[];document.getElementById("paperPosition").textContent=positions.length?("PAPER · "+positions.length+"/"+p.max_positions+" positions · exposition "+fmt(p.open_notional,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.mode+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.tp1||q.target,6)).join("\n")):"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
+async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : carnet L2 (secours si indisponible) · Funding perp non simulé`;const positions=p.positions||[];document.getElementById("paperPosition").textContent=positions.length?("PAPER · "+positions.length+"/"+p.max_positions+" positions · exposition "+fmt(p.open_notional,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.mode+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.tp1||q.target,6)).join("\n")):"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
 load();loadPaper();loadChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
@@ -7467,7 +7467,7 @@ def run():
     print("BOT MULTI V6.5 ADAPTIVE INTELLIGENCE TREND SCORE")
     print("Long / short Mode L | 15m | LIVE: une position · PAPER: jusqu’à 5 positions à levier 1×")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
-    print("Taille fixe:", TRADE_SIZE_USD, "USDC")
+    print("Taille LIVE:", TRADE_SIZE_USD, "USDC | Taille PAPER:", PAPER_TRADE_SIZE_USD, "USDC | Levier PAPER:", PAPER_LEVERAGE, "x")
 
     execution_mode = load_bot_config().get("execution_mode", "LIVE")
     if execution_mode == "LIVE" and (not PRIVATE_KEY or not WALLET_ADDRESS):
