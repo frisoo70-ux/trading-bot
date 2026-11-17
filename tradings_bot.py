@@ -709,7 +709,67 @@ def paper_snapshot(current_price=None):
         "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE,"funding_simulated":False}
 
 
-def paper_open_position(candidate):
+def paper_context_snapshot(symbol="BTC"):
+    """
+    Capture le contexte BTC en 15m/1h/4h au moment d'une entrée/sortie PAPER.
+    Les snapshots sont informatifs uniquement et ne modifient aucun signal.
+    """
+    context = {}
+    interval_minutes = {"15m": 15, "1h": 60, "4h": 240}
+    for interval, minutes in interval_minutes.items():
+        try:
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - (120 * minutes * 60 * 1000)
+            payload = {
+                "type": "candleSnapshot",
+                "req": {"coin": symbol, "interval": interval, "startTime": start_ms, "endTime": end_ms},
+            }
+            data = info_post(
+                payload,
+                cache_key=f"paper_context:{symbol}:{interval}",
+                cache_ttl=60,
+                max_retries=1,
+            )
+            if not isinstance(data, list) or len(data) < 60:
+                context[interval] = {"status": "DATA_UNAVAILABLE"}
+                continue
+            rows = [{
+                "time": int(c["t"]), "open": float(c["o"]), "high": float(c["h"]),
+                "low": float(c["l"]), "close": float(c["c"]), "volume": float(c["v"]),
+            } for c in data]
+            frame = add_indicators(pd.DataFrame(rows)).dropna()
+            if frame.empty:
+                context[interval] = {"status": "INDICATORS_UNAVAILABLE"}
+                continue
+            last = frame.iloc[-1]
+            close = float(last["close"])
+            ema20 = float(last["ema20"])
+            ema50 = float(last["ema50"])
+            trend = "BULLISH" if close > ema20 > ema50 else ("BEARISH" if close < ema20 < ema50 else "MIXED")
+            context[interval] = {
+                "status": "OK", "candle_time": int(last["time"]), "close": close,
+                "ema20": ema20, "ema50": ema50, "rsi": float(last["rsi"]),
+                "atr": float(last["atr"]), "vwap": float(last["vwap"]),
+                "obv": float(last["obv"]), "trend": trend,
+            }
+        except Exception as e:
+            context[interval] = {"status": "ERROR", "error": str(e)[:160]}
+    return context
+
+
+def paper_position_market_snapshot(df, current_price, candle_time, btc_context=None):
+    last = df.iloc[-1]
+    keys = ("open", "high", "low", "close", "volume", "ema20", "ema50", "rsi", "atr", "vwap", "obv", "obv_ma5")
+    return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "candle_time": json_safe(candle_time),
+        "current_price": float(current_price),
+        "indicators": {key: json_safe(last.get(key)) for key in keys if key in last.index},
+        "btc_context": btc_context or {},
+    }
+
+
+def paper_open_position(candidate, btc_context=None):
     with PAPER_LOCK:
         positions = PAPER_STATE.setdefault("positions", [])
         symbol = candidate["symbol"]
@@ -777,6 +837,8 @@ def paper_open_position(candidate):
         }
         entry_diagnostics["signal_mode"] = mode
         entry_diagnostics["final_score"] = round(float(candidate.get("score", 0) or 0), 4)
+        entry_diagnostics["btc_context"] = btc_context or {}
+        entry_diagnostics["entry_candle_time"] = json_safe(candidate.get("confirmed_time"))
         if mode == "MODE_L_LIQUIDITY_SWEEP":
             ml = details.get("mode_l") or {}
             stop = float(ml.get("stop") or (fill - direction * MODE_L_ATR_STOP_MULT * atr))
@@ -794,6 +856,10 @@ def paper_open_position(candidate):
             "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
             "entry_diagnostics":entry_diagnostics,
+            "entry_candle_time":json_safe(candidate.get("confirmed_time")),
+            "favorable_extreme_price":fill,"adverse_extreme_price":fill,
+            "mfe_pct":0.0,"mae_pct":0.0,"mfe_usd":0.0,"mae_usd":0.0,
+            "last_market_snapshot":None,
             "tp1_done":False,"highest_price":fill,"last_price":raw_price}
         positions.append(position)
         PAPER_STATE["position"] = positions[0]
@@ -819,6 +885,14 @@ def paper_close_position(symbol, price, reason):
         trade = {"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
             "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"notional":p.get("notional"),"leverage":p.get("leverage",PAPER_LEVERAGE),"exit_reason":reason,
             "entry_diagnostics":p.get("entry_diagnostics", {}),
+            "exit_diagnostics":p.get("last_market_snapshot", {}),
+            "mfe_pct":round(float(p.get("mfe_pct", 0) or 0), 4),
+            "mae_pct":round(float(p.get("mae_pct", 0) or 0), 4),
+            "mfe_usd":round(float(p.get("mfe_usd", 0) or 0), 6),
+            "mae_usd":round(float(p.get("mae_usd", 0) or 0), 6),
+            "favorable_extreme_price":p.get("favorable_extreme_price"),
+            "adverse_extreme_price":p.get("adverse_extreme_price"),
+            "duration_minutes":round(max(0, (datetime.now() - datetime.strptime(p.get("entry_time"), "%Y-%m-%d %H:%M:%S")).total_seconds()/60), 2) if p.get("entry_time") else None,
             "gross_pnl":round(float(p.get("realized_partial_pnl",0))+gross,6),
             "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"entry_fee_rate":p.get("entry_fee_rate"),
             "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
@@ -835,7 +909,7 @@ def paper_close_position(symbol, price, reason):
     return True
 
 
-def paper_manage_position(symbol, df, current_price, candle_time):
+def paper_manage_position(symbol, df, current_price, candle_time, btc_context=None):
     reason = None
     with PAPER_LOCK:
         p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
@@ -844,6 +918,28 @@ def paper_manage_position(symbol, df, current_price, candle_time):
         price = float(current_price)
         p["last_price"] = price
         side = p.get("side", "LONG")
+        entry_for_excursion = float(p["entry_price"])
+        direction_for_excursion = 1 if side == "LONG" else -1
+        observed_high = price
+        observed_low = price
+        try:
+            if candle_time is not None and int(candle_time) > int(p.get("entry_candle_time") or 0):
+                observed_high = max(observed_high, float(df.iloc[-1]["high"]))
+                observed_low = min(observed_low, float(df.iloc[-1]["low"]))
+        except Exception:
+            pass
+        favorable_observation = observed_high if side == "LONG" else observed_low
+        adverse_observation = observed_low if side == "LONG" else observed_high
+        previous_favorable = float(p.get("favorable_extreme_price") or entry_for_excursion)
+        previous_adverse = float(p.get("adverse_extreme_price") or entry_for_excursion)
+        p["favorable_extreme_price"] = max(previous_favorable, favorable_observation) if side == "LONG" else min(previous_favorable, favorable_observation)
+        p["adverse_extreme_price"] = min(previous_adverse, adverse_observation) if side == "LONG" else max(previous_adverse, adverse_observation)
+        p["mfe_pct"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) / entry_for_excursion * 100)
+        p["mae_pct"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) / entry_for_excursion * 100)
+        original_qty = float(p.get("qty", 0) or 0)
+        p["mfe_usd"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) * original_qty)
+        p["mae_usd"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) * original_qty)
+        p["last_market_snapshot"] = paper_position_market_snapshot(df, price, candle_time, btc_context)
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
@@ -882,13 +978,14 @@ def paper_manage_position(symbol, df, current_price, candle_time):
 
 def paper_process_cycle():
     load_paper_state()
+    btc_context = paper_context_snapshot("BTC") if PAPER_STATE.get("positions") else None
     for position in list(PAPER_STATE.get("positions", [])):
         symbol = position.get("symbol")
         if not symbol:
             continue
         df, candle_time, price = prepare_df_for_symbol(symbol)
         if df is not None:
-            paper_manage_position(symbol, df, price, candle_time)
+            paper_manage_position(symbol, df, price, candle_time, btc_context=btc_context)
     if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
         return
     held_symbols = {p.get("symbol") for p in PAPER_STATE.get("positions", [])}
@@ -897,10 +994,12 @@ def paper_process_cycle():
         exclude_symbols=held_symbols,
         return_all=True,
     )
+    if candidates and btc_context is None:
+        btc_context = paper_context_snapshot("BTC")
     for candidate in candidates or []:
         if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
             break
-        paper_open_position(candidate)
+        paper_open_position(candidate, btc_context=btc_context)
 
 
 
