@@ -3999,15 +3999,16 @@ def get_candles(symbol, include_current_data=False):
             if include_current_data:
                 current_volume = float(df.iloc[-1]["volume"])
                 current_candle_time = int(df.iloc[-1]["time"])
-                return confirmed_df, confirmed_time, current_price, current_volume, current_candle_time
+                current_candle_open = float(df.iloc[-1]["open"])
+                return confirmed_df, confirmed_time, current_price, current_volume, current_candle_time, current_candle_open
             return confirmed_df, confirmed_time, current_price
         if include_current_data:
-            return pd.DataFrame(), None, None, None, None
+            return pd.DataFrame(), None, None, None, None, None
         return pd.DataFrame(), None, None
     except Exception as e:
         print(f"[ERREUR] Candles {symbol}:", e)
         if include_current_data:
-            return pd.DataFrame(), None, None, None, None
+            return pd.DataFrame(), None, None, None, None, None
         return pd.DataFrame(), None, None
 
 
@@ -4604,7 +4605,7 @@ def candle_reversal_patterns(df):
         print("[ERREUR MODE F CANDLE]", e)
         return 0, {"patterns": [], "score": 0}
 
-def mode_e_intrabar_signal(df, current_price, current_volume=None, current_candle_time=None):
+def mode_e_intrabar_signal(df, current_price, current_volume=None, current_candle_time=None, current_candle_open=None):
     """
     MODE E INTRABAR :
     Achat précoce sur impulsion en cours, sans attendre la clôture 15m.
@@ -4621,7 +4622,7 @@ def mode_e_intrabar_signal(df, current_price, current_volume=None, current_candl
     last = df.iloc[-1]
 
     try:
-        candle_open = float(last["open"])
+        candle_open = float(current_candle_open) if current_candle_open is not None else float(last["open"])
         ema20 = float(last["ema20"])
         atr = float(last["atr"])
         rsi = float(last["rsi"])
@@ -7300,10 +7301,10 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
 def prepare_df_for_symbol(symbol, include_current_data=False):
     candle_data = get_candles(symbol, include_current_data=include_current_data)
     if include_current_data:
-        df, confirmed_time, current_price, current_volume, current_candle_time = candle_data
+        df, confirmed_time, current_price, current_volume, current_candle_time, current_candle_open = candle_data
     else:
         df, confirmed_time, current_price = candle_data
-    empty_result = (None, None, None, None, None) if include_current_data else (None, None, None)
+    empty_result = (None, None, None, None, None, None) if include_current_data else (None, None, None)
     if df.empty or confirmed_time is None or current_price is None:
         return empty_result
     if len(df) < 80:
@@ -7314,7 +7315,7 @@ def prepare_df_for_symbol(symbol, include_current_data=False):
         return empty_result
     update_dashboard_chart_cache(symbol, df, current_price, confirmed_time)
     if include_current_data:
-        return df, confirmed_time, current_price, current_volume, current_candle_time
+        return df, confirmed_time, current_price, current_volume, current_candle_time, current_candle_open
     return df, confirmed_time, current_price
 
 
@@ -7329,13 +7330,14 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
         if symbol in excluded:
             continue
         if allow_intrabar_rescan:
-            df, confirmed_time, current_price, current_volume, current_candle_time = prepare_df_for_symbol(
+            df, confirmed_time, current_price, current_volume, current_candle_time, current_candle_open = prepare_df_for_symbol(
                 symbol, include_current_data=True
             )
         else:
             df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
             current_volume = None
             current_candle_time = None
+            current_candle_open = None
         if df is None:
             continue
 
@@ -7354,7 +7356,7 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
         # cumulatif de la bougie en formation, et non le volume précédent clôturé.
         if not ok and is_mode_enabled("MODE_E_EARLY_MOMENTUM"):
             intra_ok, intra_score, intra_details = mode_e_intrabar_signal(
-                df, current_price, current_volume, current_candle_time
+                df, current_price, current_volume, current_candle_time, current_candle_open
             )
             if intra_ok:
                 ok = True
@@ -7370,58 +7372,67 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 details["mode_e_body_ratio"] = None
                 details["mode_e_intrabar_distance_ema20_pct"] = intra_details.get("mode_e_intrabar_distance_ema20_pct")
 
-        print(f"\n[CANDLE CLOSE] {now} {symbol}")
-        print(
-            f"Close={last['close']:.5f} Current={current_price:.5f} "
-            f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} "
-            f"RSI={last['rsi']:.2f} ATR={last['atr']:.5f} "
-            f"VWAP={last['vwap']:.5f} OBV={last['obv']:.2f} OBV_MA5={last['obv_ma5']:.2f}"
-        )
-        print(
-            "[SIGNAL]",
-            symbol,
-            "BUY" if ok else "HOLD",
-            "| trend:", details["trend_ok"],
-            "| trend_score:", f"{details.get('trend_score')}/8",
-            "| trend_missing:", details.get("trend_missing"),
-            "| rsi:", details["rsi_ok"],
-            "| vwap:", details["vwap_ok"],
-            "| obv:", details["obv_rising"],
-            "| breakout:", details["breakout_ok"],
-            "| green:", details["green_candle"],
-            "| breakout_level:", round(details["breakout_level"], 5),
-            "| patterns:", {
-                "bull_flag": details["bull_flag"],
-                "triangle": details["ascending_triangle"],
-                "compression": details["compression_breakout"],
-                "higher_lows": details["higher_lows"],
-            },
-            "| mode:", details.get("signal_mode"),
-            "| mode_a:", details.get("mode_a_ok"),
-            "| mode_b:", details.get("mode_b_ok"),
-            "| mode_c:", details.get("mode_c_ok"),
-            "| mode_d:", details.get("mode_d_ok"),
-            "| pattern_score:", round(details["pattern_score"], 4),
-            "| score:", round(details["score"], 4),
-        )
-
-        signal_text = "BUY" if ok else "HOLD"
-        add_analysis_entry(symbol, last, current_price, details, signal_text)
-
-        add_log_line(
-            f"[CANDLE CLOSE] {now} {symbol} Close={last['close']:.5f} Current={current_price:.5f} "
-            f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} RSI={last['rsi']:.2f} "
-            f"ATR={last['atr']:.5f} VWAP={last['vwap']:.5f} OBV={last['obv']:.2f} OBV_MA5={last['obv_ma5']:.2f}"
-        )
-        add_log_line(
-            f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} trend_score={details.get('trend_score')}/8 "
-            f"trend_missing={details.get('trend_missing')} rsi={details['rsi_ok']} "
-            f"vwap={details['vwap_ok']} obv={details['obv_rising']} breakout={details['breakout_ok']} "
-            f"green={details['green_candle']} mode={details.get('signal_mode')} "
-            f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} "
-            f"mode_d={details.get('mode_d_ok')} mode_e={details.get('mode_e_ok')} d1={details.get('mode_d_pullback_between_emas')} d2={details.get('mode_d_cross_both_emas')} "
-            f"pattern_score={round(details['pattern_score'], 4)} score={round(details['score'], 4)}"
-        )
+        if new_candle or force_rescan:
+            print(f"\n[CANDLE CLOSE] {now} {symbol}")
+            print(
+                f"Close={last['close']:.5f} Current={current_price:.5f} "
+                f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} "
+                f"RSI={last['rsi']:.2f} ATR={last['atr']:.5f} "
+                f"VWAP={last['vwap']:.5f} OBV={last['obv']:.2f} OBV_MA5={last['obv_ma5']:.2f}"
+            )
+            print(
+                "[SIGNAL]",
+                symbol,
+                "BUY" if ok else "HOLD",
+                "| trend:", details["trend_ok"],
+                "| trend_score:", f"{details.get('trend_score')}/8",
+                "| trend_missing:", details.get("trend_missing"),
+                "| rsi:", details["rsi_ok"],
+                "| vwap:", details["vwap_ok"],
+                "| obv:", details["obv_rising"],
+                "| breakout:", details["breakout_ok"],
+                "| green:", details["green_candle"],
+                "| breakout_level:", round(details["breakout_level"], 5),
+                "| patterns:", {
+                    "bull_flag": details["bull_flag"],
+                    "triangle": details["ascending_triangle"],
+                    "compression": details["compression_breakout"],
+                    "higher_lows": details["higher_lows"],
+                },
+                "| mode:", details.get("signal_mode"),
+                "| mode_a:", details.get("mode_a_ok"),
+                "| mode_b:", details.get("mode_b_ok"),
+                "| mode_c:", details.get("mode_c_ok"),
+                "| mode_d:", details.get("mode_d_ok"),
+                "| pattern_score:", round(details["pattern_score"], 4),
+                "| score:", round(details["score"], 4),
+            )
+    
+            signal_text = "BUY" if ok else "HOLD"
+            add_analysis_entry(symbol, last, current_price, details, signal_text)
+    
+            add_log_line(
+                f"[CANDLE CLOSE] {now} {symbol} Close={last['close']:.5f} Current={current_price:.5f} "
+                f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} RSI={last['rsi']:.2f} "
+                f"ATR={last['atr']:.5f} VWAP={last['vwap']:.5f} OBV={last['obv']:.2f} OBV_MA5={last['obv_ma5']:.2f}"
+            )
+            add_log_line(
+                f"[SIGNAL] {symbol} {signal_text} trend={details['trend_ok']} trend_score={details.get('trend_score')}/8 "
+                f"trend_missing={details.get('trend_missing')} rsi={details['rsi_ok']} "
+                f"vwap={details['vwap_ok']} obv={details['obv_rising']} breakout={details['breakout_ok']} "
+                f"green={details['green_candle']} mode={details.get('signal_mode')} "
+                f"mode_a={details.get('mode_a_ok')} mode_b={details.get('mode_b_ok')} mode_c={details.get('mode_c_ok')} "
+                f"mode_d={details.get('mode_d_ok')} mode_e={details.get('mode_e_ok')} d1={details.get('mode_d_pullback_between_emas')} d2={details.get('mode_d_cross_both_emas')} "
+                f"pattern_score={round(details['pattern_score'], 4)} score={round(details['score'], 4)}"
+            )
+    
+    
+        elif allow_intrabar_rescan and ok:
+            add_log_line(
+                f"[PAPER INTRABAR SIGNAL] {symbol} mode={details.get('signal_mode')} "
+                f"price={current_price:.8f} volume_ratio={details.get('mode_e_intrabar_volume_ratio')} "
+                f"move_pct={details.get('mode_e_intrabar_move_pct')}"
+            )
 
         if ok:
             adaptive_block, adaptive_mult, adaptive_info = should_adaptive_block(symbol, details.get("signal_mode"), details)
