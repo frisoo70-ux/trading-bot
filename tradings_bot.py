@@ -772,6 +772,14 @@ def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, 
         print("[PAPER SIGNAL DIAGNOSTICS] Enregistrement impossible:", str(e)[:180])
 
 
+def paper_cache_age_seconds(key):
+    try:
+        item = API_CACHE.get(key)
+        return round(max(0.0, time.time() - float(item[0])), 2) if item else None
+    except Exception:
+        return None
+
+
 def paper_derivatives_snapshot(symbol):
     """
     Instantané informatif du funding, de l'open interest et du carnet L2.
@@ -788,6 +796,7 @@ def paper_derivatives_snapshot(symbol):
             cache_ttl=300,
             max_retries=0,
         )
+        snapshot["derivatives_data_age_seconds"] = paper_cache_age_seconds("paper_meta_asset_contexts")
         if isinstance(data, list) and len(data) >= 2:
             universe = (data[0] or {}).get("universe", [])
             contexts = data[1] or []
@@ -814,6 +823,7 @@ def paper_derivatives_snapshot(symbol):
             cache_ttl=300,
             max_retries=0,
         )
+        snapshot["order_book_data_age_seconds"] = paper_cache_age_seconds(f"paper_diagnostics_l2_{symbol}")
         levels = (book or {}).get("levels") or []
         bids = levels[0] if len(levels) > 0 else []
         asks = levels[1] if len(levels) > 1 else []
