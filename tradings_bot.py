@@ -4001,9 +4001,13 @@ def get_candles(symbol, include_current_data=False):
                 current_candle_time = int(df.iloc[-1]["time"])
                 return confirmed_df, confirmed_time, current_price, current_volume, current_candle_time
             return confirmed_df, confirmed_time, current_price
+        if include_current_data:
+            return pd.DataFrame(), None, None, None, None
         return pd.DataFrame(), None, None
     except Exception as e:
         print(f"[ERREUR] Candles {symbol}:", e)
+        if include_current_data:
+            return pd.DataFrame(), None, None, None, None
         return pd.DataFrame(), None, None
 
 
@@ -7299,14 +7303,15 @@ def prepare_df_for_symbol(symbol, include_current_data=False):
         df, confirmed_time, current_price, current_volume, current_candle_time = candle_data
     else:
         df, confirmed_time, current_price = candle_data
+    empty_result = (None, None, None, None, None) if include_current_data else (None, None, None)
     if df.empty or confirmed_time is None or current_price is None:
-        return None, None, None
+        return empty_result
     if len(df) < 80:
-        return None, None, None
+        return empty_result
     df = add_indicators(df)
     df = df.dropna().copy()
     if len(df) < 60:
-        return None, None, None
+        return empty_result
     update_dashboard_chart_cache(symbol, df, current_price, confirmed_time)
     if include_current_data:
         return df, confirmed_time, current_price, current_volume, current_candle_time
