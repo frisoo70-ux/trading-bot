@@ -633,13 +633,28 @@ def load_paper_state():
         print("[PAPER LOAD ERROR]", e)
     PAPER_STATE.setdefault("initial_balance", PAPER_INITIAL_BALANCE)
     PAPER_STATE.setdefault("realized_pnl", 0.0)
-    PAPER_STATE.setdefault("position", None)
     PAPER_STATE.setdefault("trades", [])
+    # Migration sans perte : l'ancienne position unique devient la première position.
+    positions = PAPER_STATE.get("positions")
+    if not isinstance(positions, list):
+        positions = []
+    legacy_position = PAPER_STATE.get("position")
+    if not positions and isinstance(legacy_position, dict):
+        positions = [legacy_position]
+    unique = {}
+    for position in positions:
+        if isinstance(position, dict) and position.get("symbol"):
+            unique[str(position["symbol"])] = position
+    PAPER_STATE["positions"] = list(unique.values())
+    PAPER_STATE["position"] = PAPER_STATE["positions"][0] if PAPER_STATE["positions"] else None
     return PAPER_STATE
+
 
 def save_paper_state():
     try:
         with PAPER_LOCK:
+            PAPER_STATE["positions"] = list(PAPER_STATE.get("positions") or [])
+            PAPER_STATE["position"] = PAPER_STATE["positions"][0] if PAPER_STATE["positions"] else None
             PAPER_STATE["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(PAPER_STATE_PATH, "w", encoding="utf-8") as f:
                 json.dump(PAPER_STATE, f, indent=2, ensure_ascii=False)
@@ -649,133 +664,194 @@ def save_paper_state():
         print("[PAPER SAVE ERROR]", e)
         return False
 
+
 def paper_snapshot(current_price=None):
     load_paper_state()
-    p = PAPER_STATE.get("position")
     balance = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0))
     unrealized = 0.0
-    position_view = None
-    if p:
-        price = float(current_price or p.get("last_price") or p["entry_price"])
+    position_views = []
+    for p in PAPER_STATE.get("positions", []):
+        price = float(p.get("last_price") or p["entry_price"])
         direction = 1 if p.get("side") == "LONG" else -1
         remaining = float(p.get("remaining_qty", p.get("qty", 0)))
-        current_fee_rate = float(p.get("entry_fee_rate", paper_get_fee_config().get("rate", PAPER_FEE_RATE)))
-        unrealized = (float(p.get("realized_partial_pnl", 0)) + direction * (price - float(p["entry_price"])) * remaining - float(p.get("entry_fee", 0)) - abs(remaining * price) * current_fee_rate)
-        position_view = dict(p)
-        position_view["current_price"] = price
-        position_view["unrealized_pnl"] = round(unrealized, 6)
-        position_view["pnl_pct"] = round(direction * (price / float(p["entry_price"]) - 1) * 100, 4)
+        fee_rate = float(p.get("entry_fee_rate", paper_get_fee_config().get("rate", PAPER_FEE_RATE)))
+        pnl = (float(p.get("realized_partial_pnl", 0)) + direction * (price - float(p["entry_price"])) * remaining
+               - float(p.get("entry_fee", 0)) - abs(remaining * price) * fee_rate)
+        view = dict(p)
+        view["current_price"] = price
+        view["unrealized_pnl"] = round(pnl, 6)
+        view["pnl_pct"] = round(direction * (price / float(p["entry_price"]) - 1) * 100, 4)
+        position_views.append(view)
+        unrealized += pnl
     trades = PAPER_STATE.get("trades", [])
     wins = sum(1 for t in trades if float(t.get("net_pnl", 0)) > 0)
     losses = sum(1 for t in trades if float(t.get("net_pnl", 0)) < 0)
+    open_notional = sum(float(p.get("notional", 0) or 0) for p in position_views)
     return {"mode":"PAPER","safe":True,"order_submission_enabled":False,
         "initial_balance":round(float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)),2),
         "balance":round(balance,4),"equity":round(balance+unrealized,4),
         "realized_pnl":round(float(PAPER_STATE.get("realized_pnl",0)),4),"unrealized_pnl":round(unrealized,4),
         "trades":len(trades),"wins":wins,"losses":losses,
         "winrate":round(wins/len(trades)*100,2) if trades else 0,
-        "position":position_view,"recent_trades":list(reversed(trades[-30:])),
+        "positions":position_views,"position":position_views[0] if position_views else None,
+        "open_positions":len(position_views),"max_positions":PAPER_MAX_POSITIONS,
+        "position_notional":PAPER_TRADE_SIZE_USD,"leverage":PAPER_LEVERAGE,
+        "open_notional":round(open_notional,2),
+        "recent_trades":list(reversed(trades[-30:])),
         "updated_at":PAPER_STATE.get("updated_at"),"fee_rate":paper_get_fee_config().get("rate", PAPER_FEE_RATE),
         "fee_source":paper_get_fee_config().get("source"),"fee_updated_at":paper_get_fee_config().get("updated_at"),
         "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE}
 
+
 def paper_open_position(candidate):
     with PAPER_LOCK:
-        if PAPER_STATE.get("position"): return False
-        symbol=candidate["symbol"]; details=candidate.get("details") or {}; last=candidate["last"]
-        raw_price=float(candidate["current_price"])
-        side="SHORT" if details.get("signal_mode")=="MODE_L_LIQUIDITY_SWEEP" and (details.get("mode_l") or {}).get("side")=="SHORT" else "LONG"
-        direction=1 if side=="LONG" else -1
-        notional=float(TRADE_SIZE_USD)
-        execution=paper_estimate_execution(symbol, "BUY" if side=="LONG" else "SELL", notional, raw_price)
-        fill=float(execution["fill_price"]); qty=notional/fill; fee=abs(qty*fill)*float(execution["fee_rate"])
-        atr=float(last["atr"]); mode=details.get("signal_mode") or "UNKNOWN"
-        if mode=="MODE_L_LIQUIDITY_SWEEP":
-            ml=details.get("mode_l") or {}; stop=float(ml.get("stop") or (fill-direction*MODE_L_ATR_STOP_MULT*atr))
-            target=float(ml.get("target") or (fill+direction*2*atr)); tp1=None
+        positions = PAPER_STATE.setdefault("positions", [])
+        symbol = candidate["symbol"]
+        if symbol not in PAPER_SYMBOLS or len(positions) >= PAPER_MAX_POSITIONS:
+            return False
+        if any(p.get("symbol") == symbol for p in positions):
+            return False
+        details = candidate.get("details") or {}
+        last = candidate["last"]
+        raw_price = float(candidate["current_price"])
+        side = "SHORT" if details.get("signal_mode") == "MODE_L_LIQUIDITY_SWEEP" and (details.get("mode_l") or {}).get("side") == "SHORT" else "LONG"
+        direction = 1 if side == "LONG" else -1
+        notional = float(PAPER_TRADE_SIZE_USD)
+        open_notional = sum(float(p.get("notional", 0) or 0) for p in positions)
+        if open_notional + notional > PAPER_MAX_GROSS_EXPOSURE_USD + 1e-9:
+            return False
+        execution = paper_estimate_execution(symbol, "BUY" if side == "LONG" else "SELL", notional, raw_price)
+        fill = float(execution["fill_price"])
+        qty = notional / fill
+        fee = abs(qty * fill) * float(execution["fee_rate"])
+        free_equity = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0)) - open_notional
+        if free_equity + 1e-9 < notional + fee:
+            print(f"[PAPER] Capital disponible insuffisant pour {symbol}: {free_equity:.4f} USDC")
+            return False
+        atr = float(last["atr"])
+        mode = details.get("signal_mode") or "UNKNOWN"
+        if mode == "MODE_L_LIQUIDITY_SWEEP":
+            ml = details.get("mode_l") or {}
+            stop = float(ml.get("stop") or (fill - direction * MODE_L_ATR_STOP_MULT * atr))
+            target = float(ml.get("target") or (fill + direction * 2 * atr))
+            tp1 = None
         else:
-            stop=fill-(V7_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else ATR_STOP_MULT)*atr
-            tp1=calculate_adaptive_tp1(entry=fill,atr_value=atr,mode=mode,symbol=symbol)["price"]; target=None
-        PAPER_STATE["position"]={"symbol":symbol,"mode":mode,"side":side,"score":round(float(candidate.get("score",0)),4),
+            stop = fill - (V7_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else ATR_STOP_MULT) * atr
+            tp1 = calculate_adaptive_tp1(entry=fill, atr_value=atr, mode=mode, symbol=symbol)["price"]
+            target = None
+        position = {"symbol":symbol,"mode":mode,"side":side,"score":round(float(candidate.get("score",0)),4),
             "entry_time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"entry_price":round(fill,10),"market_entry_price":raw_price,
-            "qty":qty,"remaining_qty":qty,"notional":notional,"entry_fee":fee,"entry_fee_rate":float(execution["fee_rate"]),
+            "qty":qty,"remaining_qty":qty,"notional":notional,"margin":notional,"leverage":PAPER_LEVERAGE,
+            "entry_fee":fee,"entry_fee_rate":float(execution["fee_rate"]),
             "fees_paid":fee,"fee_source":execution.get("fee_source"),"entry_slippage_rate":float(execution["slippage_rate"]),
             "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
             "tp1_done":False,"highest_price":fill,"last_price":raw_price}
+        positions.append(position)
+        PAPER_STATE["position"] = positions[0]
         save_paper_state()
-    notify_telegram(f"🧪 <b>PAPER ENTRY {side}</b>\n{symbol} · {mode}\nPrix simulé VWAP: {fill:.6f}\nTaille: {notional:.2f} USDC\nFrais taker: {float(execution['fee_rate'])*100:.4f}% ({execution.get('fee_source')})\nSlippage estimé: {float(execution['slippage_rate'])*100:.4f}% ({execution.get('slippage_source')}; {execution.get('book_status')})\nAucun ordre réel envoyé.")
+    notify_telegram(f"🧪 <b>PAPER ENTRY {side}</b>\n{symbol} · {mode}\nPrix simulé VWAP: {fill:.6f}\nTaille: {notional:.2f} USDC · levier 1× · marge: {notional:.2f} USDC\nPositions: {len(PAPER_STATE.get('positions', []))}/{PAPER_MAX_POSITIONS}\nFrais taker: {float(execution['fee_rate'])*100:.4f}% ({execution.get('fee_source')})\nSlippage estimé: {float(execution['slippage_rate'])*100:.4f}% ({execution.get('slippage_source')}; {execution.get('book_status')})\nAucun ordre réel envoyé.")
     return True
 
-def paper_close_position(price, reason):
+
+def paper_close_position(symbol, price, reason):
     with PAPER_LOCK:
-        p=PAPER_STATE.get("position")
-        if not p: return False
-        direction=1 if p.get("side")=="LONG" else -1
-        qty=float(p.get("remaining_qty",p.get("qty",0)))
-        exit_notional=abs(qty*float(price))
-        execution=paper_estimate_execution(p["symbol"], "SELL" if direction==1 else "BUY", exit_notional, float(price))
-        fill=float(execution["fill_price"])
-        gross=direction*(fill-float(p["entry_price"]))*qty
-        exit_fee=abs(qty*fill)*float(execution["fee_rate"])
-        net=float(p.get("realized_partial_pnl",0))+gross-exit_fee-float(p.get("entry_fee",0))
-        trade={"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
-            "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"exit_reason":reason,
+        positions = PAPER_STATE.setdefault("positions", [])
+        p = next((item for item in positions if item.get("symbol") == symbol), None)
+        if not p:
+            return False
+        direction = 1 if p.get("side") == "LONG" else -1
+        qty = float(p.get("remaining_qty", p.get("qty", 0)))
+        exit_notional = abs(qty * float(price))
+        execution = paper_estimate_execution(p["symbol"], "SELL" if direction == 1 else "BUY", exit_notional, float(price))
+        fill = float(execution["fill_price"])
+        gross = direction * (fill - float(p["entry_price"])) * qty
+        exit_fee = abs(qty * fill) * float(execution["fee_rate"])
+        net = float(p.get("realized_partial_pnl", 0)) + gross - exit_fee - float(p.get("entry_fee", 0))
+        trade = {"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
+            "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"notional":p.get("notional"),"leverage":p.get("leverage",PAPER_LEVERAGE),"exit_reason":reason,
             "gross_pnl":round(float(p.get("realized_partial_pnl",0))+gross,6),
             "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"entry_fee_rate":p.get("entry_fee_rate"),
             "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
             "entry_slippage_rate":p.get("entry_slippage_rate"),"exit_slippage_rate":float(execution["slippage_rate"]),
             "exit_slippage_source":execution.get("slippage_source"),"exit_book_status":execution.get("book_status"),
             "net_pnl":round(net,6),"pnl_pct":round(net/float(p["notional"])*100,4)}
-        PAPER_STATE.setdefault("trades",[]).append(trade); PAPER_STATE["trades"]=PAPER_STATE["trades"][-2000:]
-        PAPER_STATE["realized_pnl"]=float(PAPER_STATE.get("realized_pnl",0))+net
-        PAPER_STATE["position"]=None; save_paper_state()
-    notify_telegram(f"🧪 <b>PAPER EXIT</b>\n{trade['symbol']} · {trade['mode']}\nRaison: {reason}\nPnL net simulé: {net:+.4f} USDC\nAucun ordre réel envoyé.")
+        PAPER_STATE.setdefault("trades",[]).append(trade)
+        PAPER_STATE["trades"] = PAPER_STATE["trades"][-2000:]
+        PAPER_STATE["realized_pnl"] = float(PAPER_STATE.get("realized_pnl",0)) + net
+        PAPER_STATE["positions"] = [item for item in positions if item.get("symbol") != symbol]
+        PAPER_STATE["position"] = PAPER_STATE["positions"][0] if PAPER_STATE["positions"] else None
+        save_paper_state()
+    notify_telegram(f"🧪 <b>PAPER EXIT</b>\n{trade['symbol']} · {trade['mode']}\nRaison: {reason}\nPnL net simulé: {net:+.4f} USDC\nPositions restantes: {len(PAPER_STATE.get('positions', []))}\nAucun ordre réel envoyé.")
     return True
 
-def paper_manage_position(df,current_price,candle_time):
+
+def paper_manage_position(symbol, df, current_price, candle_time):
+    reason = None
     with PAPER_LOCK:
-        p=PAPER_STATE.get("position")
-        if not p: return
-        price=float(current_price); p["last_price"]=price
-        side=p.get("side","LONG"); entry=float(p["entry_price"]); atr=float(p.get("entry_atr") or df.iloc[-1]["atr"])
-        if p.get("mode")=="MODE_L_LIQUIDITY_SWEEP":
-            if side=="LONG":
-                if price<=float(p["stop"]): reason="PAPER_SWEEP_INVALIDATION"
-                elif price>=float(p["target"]): reason="PAPER_LIQUIDITY_TP"
-                else: save_paper_state(); return
+        p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
+        if not p:
+            return
+        price = float(current_price)
+        p["last_price"] = price
+        side = p.get("side", "LONG")
+        entry = float(p["entry_price"])
+        atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
+        if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
+            if side == "LONG":
+                if price <= float(p["stop"]): reason = "PAPER_SWEEP_INVALIDATION"
+                elif price >= float(p["target"]): reason = "PAPER_LIQUIDITY_TP"
             else:
-                if price>=float(p["stop"]): reason="PAPER_SWEEP_INVALIDATION"
-                elif price<=float(p["target"]): reason="PAPER_LIQUIDITY_TP"
-                else: save_paper_state(); return
-        elif side=="LONG":
-            p["highest_price"]=max(float(p.get("highest_price",entry)),price)
-            if price<=float(p["stop"]): reason="PAPER_ATR_STOP"
-            elif p.get("tp1") and not p.get("tp1_done") and price>=float(p["tp1"]):
-                partial_qty=float(p["qty"])*0.5
-                partial_execution=paper_estimate_execution(p["symbol"], "SELL", abs(partial_qty*price), price)
-                fill=float(partial_execution["fill_price"])
-                gross=(fill-entry)*partial_qty; fee=abs(fill*partial_qty)*float(partial_execution["fee_rate"])
-                p["realized_partial_pnl"]=float(p.get("realized_partial_pnl",0))+gross-fee
-                p["fees_paid"]=float(p.get("fees_paid",0))+fee; p["remaining_qty"]=float(p["qty"])-partial_qty
-                p["tp1_done"]=True; p["trailing_stop"]=max(float(p["stop"]),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
+                if price >= float(p["stop"]): reason = "PAPER_SWEEP_INVALIDATION"
+                elif price <= float(p["target"]): reason = "PAPER_LIQUIDITY_TP"
+        elif side == "LONG":
+            p["highest_price"] = max(float(p.get("highest_price",entry)),price)
+            if price <= float(p["stop"]):
+                reason = "PAPER_ATR_STOP"
+            elif p.get("tp1") and not p.get("tp1_done") and price >= float(p["tp1"]):
+                partial_qty = float(p["qty"]) * 0.5
+                partial_execution = paper_estimate_execution(p["symbol"], "SELL", abs(partial_qty*price), price)
+                fill = float(partial_execution["fill_price"])
+                gross = (fill-entry)*partial_qty
+                fee = abs(fill*partial_qty)*float(partial_execution["fee_rate"])
+                p["realized_partial_pnl"] = float(p.get("realized_partial_pnl",0)) + gross - fee
+                p["fees_paid"] = float(p.get("fees_paid",0)) + fee
+                p["remaining_qty"] = float(p["qty"]) - partial_qty
+                p["tp1_done"] = True
+                p["trailing_stop"] = max(float(p["stop"]),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
                 save_paper_state()
                 notify_telegram(f"🧪 <b>PAPER TP1</b>\n{p['symbol']} · 50% simulé\nPrix: {fill:.6f}\nAucun ordre réel envoyé.")
                 return
-            elif p.get("tp1_done") and price<=float(p.get("trailing_stop",0)): reason="PAPER_TRAILING_STOP"
-            else:
-                if p.get("tp1_done"): p["trailing_stop"]=max(float(p.get("trailing_stop",0)),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
-                save_paper_state(); return
-    paper_close_position(price,reason)
+            elif p.get("tp1_done") and price <= float(p.get("trailing_stop",0)):
+                reason = "PAPER_TRAILING_STOP"
+            elif p.get("tp1_done"):
+                p["trailing_stop"] = max(float(p.get("trailing_stop",0)),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
+        save_paper_state()
+    if reason:
+        paper_close_position(symbol, price, reason)
+
 
 def paper_process_cycle():
-    p=PAPER_STATE.get("position")
-    if p:
-        df,candle_time,price=prepare_df_for_symbol(p["symbol"])
-        if df is not None: paper_manage_position(df,price,candle_time)
+    load_paper_state()
+    for position in list(PAPER_STATE.get("positions", [])):
+        symbol = position.get("symbol")
+        if not symbol:
+            continue
+        df, candle_time, price = prepare_df_for_symbol(symbol)
+        if df is not None:
+            paper_manage_position(symbol, df, price, candle_time)
+    if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
         return
-    candidate=scan_symbols_for_best_buy()
-    if candidate: paper_open_position(candidate)
+    held_symbols = {p.get("symbol") for p in PAPER_STATE.get("positions", [])}
+    candidates = scan_symbols_for_best_buy(
+        symbols=PAPER_SYMBOLS,
+        exclude_symbols=held_symbols,
+        return_all=True,
+    )
+    for candidate in candidates or []:
+        if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
+            break
+        paper_open_position(candidate)
 
 
 
