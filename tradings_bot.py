@@ -775,7 +775,7 @@ def paper_derivatives_snapshot(symbol):
         data = info_post(
             {"type": "metaAndAssetCtxs"},
             cache_key="paper_meta_asset_contexts",
-            cache_ttl=60,
+            cache_ttl=300,
             max_retries=0,
         )
         if isinstance(data, list) and len(data) >= 2:
@@ -801,7 +801,7 @@ def paper_derivatives_snapshot(symbol):
         book = info_post(
             {"type": "l2Book", "coin": symbol},
             cache_key=f"paper_diagnostics_l2_{symbol}",
-            cache_ttl=60,
+            cache_ttl=300,
             max_retries=0,
         )
         levels = (book or {}).get("levels") or []
@@ -919,6 +919,8 @@ def paper_position_market_snapshot(df, current_price, candle_time, btc_context=N
 
 
 def paper_open_position(candidate, btc_context=None):
+    # Appels réseau hors verrou pour ne pas bloquer les lectures/écritures d'état PAPER.
+    market_microstructure = paper_derivatives_snapshot(candidate["symbol"])
     with PAPER_LOCK:
         positions = PAPER_STATE.setdefault("positions", [])
         symbol = candidate["symbol"]
@@ -988,7 +990,7 @@ def paper_open_position(candidate, btc_context=None):
         entry_diagnostics["signal_mode"] = mode
         entry_diagnostics["final_score"] = round(float(candidate.get("score", 0) or 0), 4)
         entry_diagnostics["btc_context"] = btc_context or {}
-        entry_diagnostics["market_microstructure"] = paper_derivatives_snapshot(symbol)
+        entry_diagnostics["market_microstructure"] = market_microstructure
         entry_diagnostics["entry_candle_time"] = json_safe(candidate.get("confirmed_time"))
         if mode == "MODE_L_LIQUIDITY_SWEEP":
             ml = details.get("mode_l") or {}
@@ -1062,6 +1064,8 @@ def paper_close_position(symbol, price, reason):
 
 def paper_manage_position(symbol, df, current_price, candle_time, btc_context=None):
     reason = None
+    # Instantané optionnel hors verrou; son échec ne doit pas bloquer l'état partagé.
+    market_microstructure = paper_derivatives_snapshot(symbol)
     with PAPER_LOCK:
         p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
         if not p:
@@ -1097,7 +1101,7 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         p["mfe_usd"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) * original_qty)
         p["mae_usd"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) * original_qty)
         p["last_market_snapshot"] = paper_position_market_snapshot(df, price, candle_time, btc_context)
-        p["last_market_snapshot"]["market_microstructure"] = paper_derivatives_snapshot(symbol)
+        p["last_market_snapshot"]["market_microstructure"] = market_microstructure
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
