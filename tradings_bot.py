@@ -44,8 +44,14 @@ WALLET_ADDRESS = os.environ.get("HL_WALLET")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-SYMBOLS = ["SOL", "XRP", "kSHIB"]
-TRADE_SIZE_USD = 20
+SYMBOLS = ["SOL", "XRP", "kSHIB"]  # Univers LIVE inchangé.
+PAPER_SYMBOLS = ["SOL", "XRP", "kSHIB", "HYPE", "ZEC"]
+ALL_SUPPORTED_SYMBOLS = list(dict.fromKeys(SYMBOLS + PAPER_SYMBOLS))
+TRADE_SIZE_USD = 20  # Taille LIVE inchangée.
+PAPER_TRADE_SIZE_USD = 100.0
+PAPER_MAX_POSITIONS = 5
+PAPER_MAX_GROSS_EXPOSURE_USD = 500.0
+PAPER_LEVERAGE = 1.0
 CHECK_INTERVAL = 60
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -316,7 +322,7 @@ MODE_L_SWEEP_BUFFER_ATR = 0.08
 MODE_L_ATR_STOP_MULT = 1.8
 MODE_L_MIN_RR = 1.25
 
-last_candle_times = {symbol: None for symbol in SYMBOLS}
+last_candle_times = {symbol: None for symbol in ALL_SUPPORTED_SYMBOLS}
 
 # Historique en mémoire pour commandes Telegram /analysis et /log
 ANALYSIS_HISTORY = []
@@ -419,8 +425,8 @@ trade_state = {
 }
 
 META_BY_SYMBOL = {}
-SIZE_DECIMALS_BY_SYMBOL = {symbol: 2 for symbol in SYMBOLS}
-LAST_ENTRY_PRICE_BY_SYMBOL = {symbol: None for symbol in SYMBOLS}
+SIZE_DECIMALS_BY_SYMBOL = {symbol: 2 for symbol in ALL_SUPPORTED_SYMBOLS}
+LAST_ENTRY_PRICE_BY_SYMBOL = {symbol: None for symbol in ALL_SUPPORTED_SYMBOLS}
 LAST_SELL_REASON = None
 REENTRY_RESCAN_PENDING = False
 LAST_EXIT_SYMBOL = None
@@ -2538,7 +2544,7 @@ table('postTrade',[
 {label:'Verdict',key:'verdict'},{label:'Status',key:'status'}
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
-async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : calcul carnet L2 à chaque exécution (secours si carnet indisponible)`;const q=p.position;document.getElementById("paperPosition").textContent=q?`POSITION SIMULÉE ${q.side} · ${q.symbol} · ${q.mode} | Entrée ${fmt(q.entry_price,6)} | Prix ${fmt(q.current_price,6)} | PnL latent ${fmt(q.unrealized_pnl,4)} USDC | SL ${fmt(q.stop,6)} | TP ${fmt(q.tp1||q.target,6)}`:"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
+async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : calcul carnet L2 à chaque exécution (secours si carnet indisponible)`;const positions=p.positions||[];document.getElementById("paperPosition").textContent=positions.length?("PAPER · "+positions.length+"/"+p.max_positions+" positions · exposition "+fmt(p.open_notional,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.mode+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.tp1||q.target,6)).join("\n")):"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
 load();loadPaper();loadChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
@@ -2577,7 +2583,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/chart":
             params = parse_qs(parsed.query)
             requested_symbol = str((params.get("symbol") or [""])[0]).strip()
-            symbol = next((s for s in SYMBOLS if s.lower() == requested_symbol.lower()), requested_symbol)
+            symbol = next((s for s in ALL_SUPPORTED_SYMBOLS if s.lower() == requested_symbol.lower()), requested_symbol)
             with DASHBOARD_CHART_LOCK:
                 snapshot = DASHBOARD_CHART_CACHE.get(symbol)
                 if snapshot is not None:
@@ -2644,8 +2650,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             return self._json({"ok": False, "error": "Ferme d’abord toutes les positions réelles (longues ou short) avant de passer en Paper Trading : " + ", ".join(live_positions)}, 409)
                     elif not PRIVATE_KEY or not WALLET_ADDRESS:
                         return self._json({"ok": False, "error": "Identifiants Hyperliquid manquants : impossible de réactiver le Live."}, 409)
-                    elif PAPER_STATE.get("position"):
-                        return self._json({"ok": False, "error": "Ferme d’abord la position simulée avant de revenir en Live."}, 409)
+                    elif PAPER_STATE.get("positions") or PAPER_STATE.get("position"):
+                        return self._json({"ok": False, "error": "Ferme d’abord toutes les positions simulées avant de revenir en Live."}, 409)
                     base_cfg["execution_mode"] = requested_execution_mode
                     notify_telegram("🧪 Mode PAPER activé : aucun ordre réel ne sera envoyé." if requested_execution_mode == "PAPER" else "⚠️ Mode LIVE réactivé : les prochains signaux pourront envoyer de vrais ordres.")
 
@@ -3027,7 +3033,7 @@ def build_analysis_message(limit=20):
     msg = f"📊 <b>ANALYSIS {limit} dernières bougies par coin</b>\\n"
     msg += "Timeframe: 15m\\n"
 
-    for symbol in SYMBOLS:
+    for symbol in ALL_SUPPORTED_SYMBOLS:
         rows = [x for x in ANALYSIS_HISTORY if x.get("symbol") == symbol][-limit:]
 
         msg += f"\\n<b>{symbol}</b>\\n"
@@ -3829,7 +3835,7 @@ def get_meta_all():
         meta_by_symbol = {}
         for asset in data.get("universe", []):
             name = asset.get("name")
-            if name in SYMBOLS:
+            if name in ALL_SUPPORTED_SYMBOLS:
                 meta_by_symbol[name] = asset
         return meta_by_symbol
     except Exception as e:
@@ -7245,12 +7251,16 @@ def prepare_df_for_symbol(symbol):
     return df, confirmed_time, current_price
 
 
-def scan_symbols_for_best_buy(force_rescan=False):
+def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=None, return_all=False):
     global last_candle_times
     candidates = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    scan_universe = list(symbols) if symbols is not None else get_enabled_symbols()
+    excluded = set(exclude_symbols or [])
 
-    for symbol in get_enabled_symbols():
+    for symbol in scan_universe:
+        if symbol in excluded:
+            continue
         df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
         if df is None:
             continue
@@ -7377,7 +7387,7 @@ def scan_symbols_for_best_buy(force_rescan=False):
         return None
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates[0]
+    return candidates if return_all else candidates[0]
 
 
 
@@ -7455,7 +7465,7 @@ def run():
     global META_BY_SYMBOL, SIZE_DECIMALS_BY_SYMBOL, trade_state
 
     print("BOT MULTI V6.5 ADAPTIVE INTELLIGENCE TREND SCORE")
-    print("Long only | 15m | Une seule position à la fois")
+    print("Long / short Mode L | 15m | LIVE: une position · PAPER: jusqu’à 5 positions à levier 1×")
     print("Indicateurs : EMA20/EMA50 + RSI + ATR + OBV_MA5 + VWAP + Breakout + Patterns + Mode A/B/C/D/E/F")
     print("Taille fixe:", TRADE_SIZE_USD, "USDC")
 
@@ -7465,7 +7475,7 @@ def run():
         return
 
     META_BY_SYMBOL = get_meta_all()
-    for symbol in SYMBOLS:
+    for symbol in ALL_SUPPORTED_SYMBOLS:
         meta = META_BY_SYMBOL.get(symbol)
         if meta:
             SIZE_DECIMALS_BY_SYMBOL[symbol] = int(meta.get("szDecimals", SIZE_DECIMALS_BY_SYMBOL[symbol]))
@@ -7490,10 +7500,10 @@ def run():
 
     notify_telegram(
         "🤖 <b>BOT MULTI V6.9.1.1 Adaptive Intelligence Auto Optimizer TP1 Fix démarré</b>\n"
-        f"Coins: {', '.join(SYMBOLS)}\n"
-        f"Max position: 1\n"
+        f"Coins: {', '.join(PAPER_SYMBOLS if execution_mode == 'PAPER' else SYMBOLS)}\n"
+        f"Max positions: {PAPER_MAX_POSITIONS if execution_mode == 'PAPER' else 1}\n"
         f"Solde: {start_balance} USDC\n"
-        f"Taille trade: {TRADE_SIZE_USD} USDC\n"
+        f"Taille trade: {PAPER_TRADE_SIZE_USD if execution_mode == 'PAPER' else TRADE_SIZE_USD} USDC · levier {PAPER_LEVERAGE if execution_mode == 'PAPER' else 'exchange'}\n"
         f"Timeframe: {get_active_timeframe()}\n"
         f"Commandes: /report /csv /analysis /log /posttrade /posttrade_repair /help\n"
         f"Dashboard: port {DASHBOARD_PORT}"
