@@ -878,6 +878,33 @@ def paper_context_snapshot(symbol="BTC"):
     return context
 
 
+def paper_market_regime_snapshot(df):
+    """Caractéristiques brutes du régime de marché, sans seuil de décision."""
+    try:
+        if df is None or len(df) < 4:
+            return {"status": "DATA_UNAVAILABLE"}
+        last = df.iloc[-1]
+        previous = df.iloc[-4]
+        close = float(last["close"])
+        ema20 = float(last["ema20"])
+        ema50 = float(last["ema50"])
+        prior_ema20 = float(previous["ema20"])
+        atr = float(last["atr"])
+        trend = "BULLISH" if close > ema20 > ema50 else (
+            "BEARISH" if close < ema20 < ema50 else "MIXED"
+        )
+        return {
+            "status": "OK",
+            "trend_alignment": trend,
+            "ema20_slope_3_candles_pct": ((ema20 / prior_ema20) - 1) * 100 if prior_ema20 else None,
+            "ema20_ema50_spread_pct": ((ema20 - ema50) / close) * 100 if close else None,
+            "atr_pct_of_price": (atr / close) * 100 if close else None,
+            "price_vs_vwap_pct": ((close / float(last["vwap"])) - 1) * 100 if float(last["vwap"]) else None,
+        }
+    except Exception as e:
+        return {"status": "ERROR", "error": str(e)[:140]}
+
+
 def paper_position_market_snapshot(df, current_price, candle_time, btc_context=None):
     last = df.iloc[-1]
     keys = ("open", "high", "low", "close", "volume", "ema20", "ema50", "rsi", "atr", "vwap", "obv", "obv_ma5")
@@ -886,6 +913,7 @@ def paper_position_market_snapshot(df, current_price, candle_time, btc_context=N
         "candle_time": json_safe(candle_time),
         "current_price": float(current_price),
         "indicators": {key: json_safe(last.get(key)) for key in keys if key in last.index},
+        "market_regime": paper_market_regime_snapshot(df),
         "btc_context": btc_context or {},
     }
 
@@ -956,6 +984,7 @@ def paper_open_position(candidate, btc_context=None):
             for key in ("close", "open", "high", "low", "volume", "ema20", "ema50", "rsi", "atr", "vwap", "obv", "obv_ma5")
             if key in last.index
         }
+        entry_diagnostics["market_regime"] = paper_market_regime_snapshot(candidate.get("df"))
         entry_diagnostics["signal_mode"] = mode
         entry_diagnostics["final_score"] = round(float(candidate.get("score", 0) or 0), 4)
         entry_diagnostics["btc_context"] = btc_context or {}
