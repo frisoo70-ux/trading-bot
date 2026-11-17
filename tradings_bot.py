@@ -7427,13 +7427,6 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
             )
     
     
-        elif allow_intrabar_rescan and ok:
-            add_log_line(
-                f"[PAPER INTRABAR SIGNAL] {symbol} mode={details.get('signal_mode')} "
-                f"price={current_price:.8f} volume_ratio={details.get('mode_e_intrabar_volume_ratio')} "
-                f"move_pct={details.get('mode_e_intrabar_move_pct')}"
-            )
-
         if ok:
             adaptive_block, adaptive_mult, adaptive_info = should_adaptive_block(symbol, details.get("signal_mode"), details)
             details["adaptive_multiplier"] = adaptive_mult
@@ -7461,6 +7454,13 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 details["score"] = score
                 details["auto_learning_multiplier"] = symbol_auto_learning.get("multiplier")
                 details["auto_learning_reasons"] = ",".join(symbol_auto_learning.get("reasons", []))
+
+            if allow_intrabar_rescan and details.get("mode_e_intrabar"):
+                add_log_line(
+                    f"[PAPER INTRABAR SIGNAL] {symbol} mode={details.get('signal_mode')} "
+                    f"price={current_price:.8f} volume_ratio={details.get('mode_e_intrabar_volume_ratio')} "
+                    f"move_pct={details.get('mode_e_intrabar_move_pct')}"
+                )
 
             candidates.append({
                 "symbol": symbol,
