@@ -730,7 +730,30 @@ def paper_open_position(candidate):
         fill = float(execution["fill_price"])
         qty = notional / fill
         fee = abs(qty * fill) * float(execution["fee_rate"])
-        free_equity = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0)) - open_notional
+        # Capital libre net du PnL latent et de la marge réellement immobilisée.
+        unrealized_open = 0.0
+        margin_used = 0.0
+        for open_pos in positions:
+            open_entry = float(open_pos.get("entry_price", 0) or 0)
+            mark_price = float(open_pos.get("last_price") or open_entry)
+            total_qty = float(open_pos.get("qty", 0) or 0)
+            remaining_qty = float(open_pos.get("remaining_qty", total_qty) or 0)
+            direction_open = 1 if open_pos.get("side", "LONG") == "LONG" else -1
+            exit_fee_rate = float(open_pos.get("entry_fee_rate", PAPER_FEE_RATE) or PAPER_FEE_RATE)
+            unrealized_open += (
+                float(open_pos.get("realized_partial_pnl", 0) or 0)
+                + direction_open * (mark_price - open_entry) * remaining_qty
+                - float(open_pos.get("entry_fee", 0) or 0)
+                - abs(remaining_qty * mark_price) * exit_fee_rate
+            )
+            if total_qty > 0:
+                margin_used += float(open_pos.get("margin", open_pos.get("notional", 0)) or 0) * remaining_qty / total_qty
+        free_equity = (
+            float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE))
+            + float(PAPER_STATE.get("realized_pnl", 0))
+            + unrealized_open
+            - margin_used
+        )
         if free_equity + 1e-9 < notional + fee:
             print(f"[PAPER] Capital disponible insuffisant pour {symbol}: {free_equity:.4f} USDC")
             return False
@@ -745,7 +768,25 @@ def paper_open_position(candidate):
             stop = fill - (V7_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else ATR_STOP_MULT) * atr
             tp1 = calculate_adaptive_tp1(entry=fill, atr_value=atr, mode=mode, symbol=symbol)["price"]
             target = None
+        entry_signal = {
+            "trend_score": details.get("trend_score"),
+            "rsi": round(float(last.get("rsi")), 4) if last.get("rsi") is not None else None,
+            "ema20": round(float(last.get("ema20")), 10) if last.get("ema20") is not None else None,
+            "ema50": round(float(last.get("ema50")), 10) if last.get("ema50") is not None else None,
+            "vwap": round(float(last.get("vwap")), 10) if last.get("vwap") is not None else None,
+            "atr_pct": round(atr / fill * 100, 4) if fill > 0 else None,
+            "pattern_score": details.get("pattern_score"),
+            "mode_e_volume_ratio": details.get("mode_e_volume_ratio"),
+            "mode_e_body_ratio": details.get("mode_e_body_ratio"),
+            "mode_e_intrabar": details.get("mode_e_intrabar"),
+            "mode_e_intrabar_move_pct": details.get("mode_e_intrabar_move_pct"),
+            "mode_e_intrabar_volume_ratio": details.get("mode_e_intrabar_volume_ratio"),
+            "adaptive_multiplier": details.get("adaptive_multiplier"),
+            "auto_learning_multiplier": details.get("auto_learning_multiplier"),
+            "score_before_adaptive": details.get("score_before_adaptive"),
+        }
         position = {"symbol":symbol,"mode":mode,"side":side,"score":round(float(candidate.get("score",0)),4),
+            "entry_signal":entry_signal,
             "entry_time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"entry_price":round(fill,10),"market_entry_price":raw_price,
             "qty":qty,"remaining_qty":qty,"notional":notional,"margin":notional,"leverage":PAPER_LEVERAGE,
             "entry_fee":fee,"entry_fee_rate":float(execution["fee_rate"]),
@@ -781,7 +822,8 @@ def paper_close_position(symbol, price, reason):
             "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
             "entry_slippage_rate":p.get("entry_slippage_rate"),"exit_slippage_rate":float(execution["slippage_rate"]),
             "exit_slippage_source":execution.get("slippage_source"),"exit_book_status":execution.get("book_status"),
-            "net_pnl":round(net,6),"pnl_pct":round(net/float(p["notional"])*100,4)}
+            "net_pnl":round(net,6),"pnl_pct":round(net/float(p["notional"])*100,4),
+            "entry_signal":dict(p.get("entry_signal") or {})}
         PAPER_STATE.setdefault("trades",[]).append(trade)
         PAPER_STATE["trades"] = PAPER_STATE["trades"][-2000:]
         PAPER_STATE["realized_pnl"] = float(PAPER_STATE.get("realized_pnl",0)) + net
@@ -853,6 +895,7 @@ def paper_process_cycle():
         symbols=PAPER_SYMBOLS,
         exclude_symbols=held_symbols,
         return_all=True,
+        allow_intrabar_rescan=True,
     )
     for candidate in candidates or []:
         if len(PAPER_STATE.get("positions", [])) >= PAPER_MAX_POSITIONS:
@@ -3926,7 +3969,7 @@ def get_open_position():
     return None
 
 
-def get_candles(symbol):
+def get_candles(symbol, include_current_data=False):
     try:
         payload = {
             "type": "candleSnapshot",
@@ -3953,6 +3996,10 @@ def get_candles(symbol):
             confirmed_df = df.iloc[:-1].copy()
             current_price = float(df.iloc[-1]["close"])
             confirmed_time = int(confirmed_df.iloc[-1]["time"])
+            if include_current_data:
+                current_volume = float(df.iloc[-1]["volume"])
+                current_candle_time = int(df.iloc[-1]["time"])
+                return confirmed_df, confirmed_time, current_price, current_volume, current_candle_time
             return confirmed_df, confirmed_time, current_price
         return pd.DataFrame(), None, None
     except Exception as e:
@@ -4553,7 +4600,7 @@ def candle_reversal_patterns(df):
         print("[ERREUR MODE F CANDLE]", e)
         return 0, {"patterns": [], "score": 0}
 
-def mode_e_intrabar_signal(df, current_price):
+def mode_e_intrabar_signal(df, current_price, current_volume=None, current_candle_time=None):
     """
     MODE E INTRABAR :
     Achat précoce sur impulsion en cours, sans attendre la clôture 15m.
@@ -4584,8 +4631,16 @@ def mode_e_intrabar_signal(df, current_price):
         distance_ema20_pct = abs(current_price - ema20) / ema20
 
         volume_ma20 = df["volume"].rolling(20).mean().iloc[-1]
-        last_volume = float(last["volume"])
-        volume_ratio = (last_volume / volume_ma20) if volume_ma20 and volume_ma20 > 0 else 0
+        # En PAPER, utiliser le volume cumulatif de la bougie en formation.
+        # Normaliser le rythme par le temps écoulé (plancher 25 %).
+        last_volume = float(current_volume) if current_volume is not None else float(last["volume"])
+        if current_volume is not None and current_candle_time is not None:
+            candle_duration_ms = get_active_timeframe_minutes() * 60 * 1000
+            elapsed_ms = max(0, int(time.time() * 1000) - int(current_candle_time))
+            elapsed_fraction = min(1.0, max(0.25, elapsed_ms / max(1, candle_duration_ms)))
+        else:
+            elapsed_fraction = 1.0
+        volume_ratio = (last_volume / volume_ma20 / elapsed_fraction) if volume_ma20 and volume_ma20 > 0 else 0
 
         obv_ok = obv > obv_ma5
         price_ok = current_price > ema20
@@ -4616,6 +4671,7 @@ def mode_e_intrabar_signal(df, current_price):
             "mode_e_intrabar": ok,
             "mode_e_intrabar_move_pct": round(move_pct * 100, 3),
             "mode_e_intrabar_volume_ratio": round(volume_ratio, 2),
+            "mode_e_intrabar_elapsed_fraction": round(elapsed_fraction, 3),
             "mode_e_intrabar_distance_ema20_pct": round(distance_ema20_pct * 100, 3),
         }
 
@@ -7237,8 +7293,12 @@ def update_dashboard_chart_cache(symbol, df, current_price, confirmed_time):
         print("[DASHBOARD CHART CACHE ERROR]", symbol, e)
 
 
-def prepare_df_for_symbol(symbol):
-    df, confirmed_time, current_price = get_candles(symbol)
+def prepare_df_for_symbol(symbol, include_current_data=False):
+    candle_data = get_candles(symbol, include_current_data=include_current_data)
+    if include_current_data:
+        df, confirmed_time, current_price, current_volume, current_candle_time = candle_data
+    else:
+        df, confirmed_time, current_price = candle_data
     if df.empty or confirmed_time is None or current_price is None:
         return None, None, None
     if len(df) < 80:
@@ -7248,10 +7308,12 @@ def prepare_df_for_symbol(symbol):
     if len(df) < 60:
         return None, None, None
     update_dashboard_chart_cache(symbol, df, current_price, confirmed_time)
+    if include_current_data:
+        return df, confirmed_time, current_price, current_volume, current_candle_time
     return df, confirmed_time, current_price
 
 
-def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=None, return_all=False):
+def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=None, return_all=False, allow_intrabar_rescan=False):
     global last_candle_times
     candidates = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -7261,25 +7323,34 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
     for symbol in scan_universe:
         if symbol in excluded:
             continue
-        df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
+        if allow_intrabar_rescan:
+            df, confirmed_time, current_price, current_volume, current_candle_time = prepare_df_for_symbol(
+                symbol, include_current_data=True
+            )
+        else:
+            df, confirmed_time, current_price = prepare_df_for_symbol(symbol)
+            current_volume = None
+            current_candle_time = None
         if df is None:
             continue
 
         new_candle = confirmed_time != last_candle_times.get(symbol)
-        if not new_candle and not force_rescan:
+        if not new_candle and not force_rescan and not allow_intrabar_rescan:
             continue
 
-        # En rescannage après une vente, la bougie est évaluée une seule fois
-        # sans modifier artificiellement son horodatage.
         if new_candle:
             last_candle_times[symbol] = confirmed_time
         last = df.iloc[-1]
-        ok, score, details = buy_signal(df)
+        base_ok, score, details = buy_signal(df)
+        # Les signaux classiques restent limités aux bougies clôturées.
+        ok = bool(base_ok and (new_candle or force_rescan))
 
-        # MODE E INTRABAR :
-        # Si aucun signal 15m classique n'est validé, on teste l'impulsion en cours.
+        # MODE E INTRABAR : en PAPER, rescannage à chaque cycle avec le volume
+        # cumulatif de la bougie en formation, et non le volume précédent clôturé.
         if not ok and is_mode_enabled("MODE_E_EARLY_MOMENTUM"):
-            intra_ok, intra_score, intra_details = mode_e_intrabar_signal(df, current_price)
+            intra_ok, intra_score, intra_details = mode_e_intrabar_signal(
+                df, current_price, current_volume, current_candle_time
+            )
             if intra_ok:
                 ok = True
                 score = round(intra_score, 4)
@@ -7288,6 +7359,8 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 details["mode_e_ok"] = True
                 details["mode_e_intrabar"] = True
                 details["mode_e_intrabar_move_pct"] = intra_details.get("mode_e_intrabar_move_pct")
+                details["mode_e_intrabar_volume_ratio"] = intra_details.get("mode_e_intrabar_volume_ratio")
+                details["mode_e_intrabar_elapsed_fraction"] = intra_details.get("mode_e_intrabar_elapsed_fraction")
                 details["mode_e_volume_ratio"] = intra_details.get("mode_e_intrabar_volume_ratio")
                 details["mode_e_body_ratio"] = None
                 details["mode_e_intrabar_distance_ema20_pct"] = intra_details.get("mode_e_intrabar_distance_ema20_pct")
