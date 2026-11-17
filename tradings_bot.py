@@ -709,6 +709,127 @@ def paper_snapshot(current_price=None):
         "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE,"funding_simulated":False}
 
 
+def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, details, status, reasons=None, score=None):
+    """
+    Historique PAPER des signaux évalués, y compris ceux rejetés par les filtres.
+    Informatif uniquement : ne modifie jamais la décision de trading.
+    """
+    try:
+        if load_bot_config().get("execution_mode", "LIVE") != "PAPER":
+            return
+        details = details or {}
+        flags = (
+            "trend_ok", "trend_score", "trend_missing", "rsi_ok", "vwap_ok",
+            "obv_rising", "breakout_ok", "green_candle", "mode_a_ok",
+            "mode_b_ok", "mode_c_ok", "mode_d_ok", "mode_e_ok",
+            "mode_f_ok", "mode_l_ok", "pattern_score", "mode_e_volume_ratio",
+            "mode_e_body_ratio", "mode_e_intrabar", "mode_c_drop_pct",
+            "mode_c_volume_ok", "mode_c_wick_ok", "adaptive_multiplier",
+            "adaptive_info", "auto_learning_multiplier", "auto_learning_reasons",
+        )
+        indicators = {}
+        if last is not None:
+            for key in ("open", "high", "low", "close", "volume", "ema20", "ema50",
+                        "rsi", "atr", "vwap", "obv", "obv_ma5"):
+                if key in last.index:
+                    indicators[key] = json_safe(last.get(key))
+        row = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp_ms": int(time.time() * 1000),
+            "symbol": symbol,
+            "candle_time": json_safe(confirmed_time),
+            "current_price": json_safe(current_price),
+            "status": str(status),
+            "mode": details.get("signal_mode"),
+            "score": json_safe(score if score is not None else details.get("score")),
+            "flags": {key: json_safe(details.get(key)) for key in flags if key in details},
+            "indicators": indicators,
+            "rejection_reasons": list(reasons or []),
+            "mode_details": {
+                key: json_safe(details.get(key))
+                for key in ("mode_c_reversal", "mode_c_drop_pct", "mode_d_type",
+                            "mode_e_intrabar_move_pct", "mode_e_intrabar_distance_ema20_pct",
+                            "mode_f_pattern", "mode_f_score", "mode_l")
+                if key in details
+            },
+        }
+        with PAPER_LOCK:
+            history = PAPER_STATE.setdefault("signal_diagnostics", [])
+            history.append(row)
+            PAPER_STATE["signal_diagnostics"] = history[-2000:]
+            save_paper_state()
+    except Exception as e:
+        print("[PAPER SIGNAL DIAGNOSTICS] Enregistrement impossible:", str(e)[:180])
+
+
+def paper_derivatives_snapshot(symbol):
+    """
+    Instantané informatif du funding, de l'open interest et du carnet L2.
+    Requêtes publiques Hyperliquid avec cache; aucun effet sur les signaux.
+    """
+    snapshot = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "PARTIAL",
+    }
+    try:
+        data = info_post(
+            {"type": "metaAndAssetCtxs"},
+            cache_key="paper_meta_asset_contexts",
+            cache_ttl=60,
+            max_retries=1,
+        )
+        if isinstance(data, list) and len(data) >= 2:
+            universe = (data[0] or {}).get("universe", [])
+            contexts = data[1] or []
+            for asset, ctx in zip(universe, contexts):
+                if asset.get("name") == symbol:
+                    snapshot["derivatives"] = {
+                        key: json_safe(ctx.get(key))
+                        for key in ("funding", "openInterest", "dayNtlVlm", "prevDayPx",
+                                    "markPx", "oraclePx", "midPx", "premium")
+                        if ctx.get(key) is not None
+                    }
+                    snapshot["derivatives_status"] = "OK"
+                    break
+        if "derivatives" not in snapshot:
+            snapshot["derivatives_status"] = "UNAVAILABLE"
+    except Exception as e:
+        snapshot["derivatives_status"] = "ERROR"
+        snapshot["derivatives_error"] = str(e)[:140]
+
+    try:
+        book = info_post(
+            {"type": "l2Book", "coin": symbol},
+            cache_key=f"paper_diagnostics_l2_{symbol}",
+            cache_ttl=60,
+            max_retries=1,
+        )
+        levels = (book or {}).get("levels") or []
+        bids = levels[0] if len(levels) > 0 else []
+        asks = levels[1] if len(levels) > 1 else []
+        bid_qty = sum(float(x.get("sz", 0) or 0) for x in bids[:5])
+        ask_qty = sum(float(x.get("sz", 0) or 0) for x in asks[:5])
+        bid_notional = sum(float(x.get("px", 0) or 0) * float(x.get("sz", 0) or 0) for x in bids[:5])
+        ask_notional = sum(float(x.get("px", 0) or 0) * float(x.get("sz", 0) or 0) for x in asks[:5])
+        best_bid = float(bids[0].get("px", 0)) if bids else 0.0
+        best_ask = float(asks[0].get("px", 0)) if asks else 0.0
+        mid = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
+        snapshot["order_book"] = {
+            "status": "OK" if mid > 0 else "UNAVAILABLE",
+            "best_bid": best_bid or None,
+            "best_ask": best_ask or None,
+            "spread_pct": ((best_ask - best_bid) / mid * 100) if mid > 0 else None,
+            "bid_depth_top5_qty": bid_qty,
+            "ask_depth_top5_qty": ask_qty,
+            "bid_depth_top5_usd": bid_notional,
+            "ask_depth_top5_usd": ask_notional,
+            "imbalance_top5": ((bid_qty - ask_qty) / (bid_qty + ask_qty)) if bid_qty + ask_qty > 0 else None,
+        }
+    except Exception as e:
+        snapshot["order_book"] = {"status": "ERROR", "error": str(e)[:140]}
+    return snapshot
+
+
 def paper_context_snapshot(symbol="BTC"):
     """
     Capture le contexte BTC en 15m/1h/4h au moment d'une entrée/sortie PAPER.
@@ -838,6 +959,7 @@ def paper_open_position(candidate, btc_context=None):
         entry_diagnostics["signal_mode"] = mode
         entry_diagnostics["final_score"] = round(float(candidate.get("score", 0) or 0), 4)
         entry_diagnostics["btc_context"] = btc_context or {}
+        entry_diagnostics["market_microstructure"] = paper_derivatives_snapshot(symbol)
         entry_diagnostics["entry_candle_time"] = json_safe(candidate.get("confirmed_time"))
         if mode == "MODE_L_LIQUIDITY_SWEEP":
             ml = details.get("mode_l") or {}
@@ -923,10 +1045,16 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         observed_high = price
         observed_low = price
         try:
-            if candle_time is not None and int(candle_time) > int(p.get("entry_candle_time") or 0):
-                observed_high = max(observed_high, float(df.iloc[-1]["high"]))
-                observed_low = min(observed_low, float(df.iloc[-1]["low"]))
+            entry_candle_ms = int(p.get("entry_candle_time") or 0)
+            last_observed_ms = int(p.get("last_excursion_candle_time") or entry_candle_ms)
+            new_rows = df[df["time"].astype("int64") > max(entry_candle_ms, last_observed_ms)]
+            for _, candle in new_rows.iterrows():
+                observed_high = max(observed_high, float(candle["high"]))
+                observed_low = min(observed_low, float(candle["low"]))
+            if candle_time is not None:
+                p["last_excursion_candle_time"] = max(last_observed_ms, int(candle_time))
         except Exception:
+            # Le prix courant reste une observation valide si les timestamps sont incomplets.
             pass
         favorable_observation = observed_high if side == "LONG" else observed_low
         adverse_observation = observed_low if side == "LONG" else observed_high
@@ -940,6 +1068,7 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         p["mfe_usd"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) * original_qty)
         p["mae_usd"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) * original_qty)
         p["last_market_snapshot"] = paper_position_market_snapshot(df, price, candle_time, btc_context)
+        p["last_market_snapshot"]["market_microstructure"] = paper_derivatives_snapshot(symbol)
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
@@ -7472,6 +7601,16 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
         signal_text = "BUY" if ok else "HOLD"
         add_analysis_entry(symbol, last, current_price, details, signal_text)
 
+        if not ok:
+            rejection_reasons = ["BASE_SIGNAL_NOT_VALIDATED"]
+            for flag in ("trend_ok", "rsi_ok", "vwap_ok", "obv_rising", "breakout_ok", "green_candle"):
+                if details.get(flag) is False:
+                    rejection_reasons.append(flag.upper() + "_FALSE")
+            paper_record_signal_diagnostic(
+                symbol, confirmed_time, current_price, last, details,
+                "REJECTED_BASE_SIGNAL", rejection_reasons, score,
+            )
+
         add_log_line(
             f"[CANDLE CLOSE] {now} {symbol} Close={last['close']:.5f} Current={current_price:.5f} "
             f"EMA20={last['ema20']:.5f} EMA50={last['ema50']:.5f} RSI={last['rsi']:.2f} "
@@ -7498,6 +7637,10 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
             if adaptive_block:
                 ok = False
                 print(f"[ADAPTIVE BLOCK] {symbol} {details.get('signal_mode')} mult={adaptive_mult} score_before={score_before_adaptive}")
+                paper_record_signal_diagnostic(
+                    symbol, confirmed_time, current_price, last, details,
+                    "REJECTED_ADAPTIVE", [str(adaptive_info or "ADAPTIVE_BLOCK")], score,
+                )
 
 
         if ok:
@@ -7507,7 +7650,14 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 pattern=details.get("mode_f_pattern") if details.get("signal_mode") == "MODE_F_CANDLE_REVERSAL" else None,
             )
             if symbol_auto_learning.get("blocked"):
-                print(f"[AUTO LEARNING BLOCK] {symbol} {details.get('signal_mode')} reasons={symbol_auto_learning.get('reasons')}")
+                learning_reasons = symbol_auto_learning.get("reasons", [])
+                details["auto_learning_reasons"] = ",".join(learning_reasons)
+                details["auto_learning_multiplier"] = symbol_auto_learning.get("multiplier")
+                print(f"[AUTO LEARNING BLOCK] {symbol} {details.get('signal_mode')} reasons={learning_reasons}")
+                paper_record_signal_diagnostic(
+                    symbol, confirmed_time, current_price, last, details,
+                    "REJECTED_AUTO_LEARNING", learning_reasons, score,
+                )
                 continue
             if symbol_auto_learning.get("multiplier", 1.0) != 1.0:
                 score = score * float(symbol_auto_learning.get("multiplier", 1.0))
@@ -7515,6 +7665,10 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
                 details["auto_learning_multiplier"] = symbol_auto_learning.get("multiplier")
                 details["auto_learning_reasons"] = ",".join(symbol_auto_learning.get("reasons", []))
 
+            paper_record_signal_diagnostic(
+                symbol, confirmed_time, current_price, last, details,
+                "ACCEPTED_CANDIDATE", [], score,
+            )
             candidates.append({
                 "symbol": symbol,
                 "df": df,
