@@ -781,6 +781,7 @@ def paper_open_position(candidate):
             "mode_e_intrabar": details.get("mode_e_intrabar"),
             "mode_e_intrabar_move_pct": details.get("mode_e_intrabar_move_pct"),
             "mode_e_intrabar_volume_ratio": details.get("mode_e_intrabar_volume_ratio"),
+            "mode_e_intrabar_elapsed_fraction": details.get("mode_e_intrabar_elapsed_fraction"),
             "adaptive_multiplier": details.get("adaptive_multiplier"),
             "auto_learning_multiplier": details.get("auto_learning_multiplier"),
             "score_before_adaptive": details.get("score_before_adaptive"),
