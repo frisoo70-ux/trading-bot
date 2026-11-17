@@ -755,7 +755,7 @@ def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, 
             "indicators": indicators,
             "rejection_reasons": list(reasons or []),
             "mode_details": {
-                key: json_safe(details.get(key))
+                key: paper_safe_structure(details.get(key))
                 for key in ("mode_c_reversal", "mode_c_drop_pct", "mode_d_type",
                             "mode_e_intrabar_move_pct", "mode_e_intrabar_distance_ema20_pct",
                             "mode_f_pattern", "mode_f_score", "mode_l")
