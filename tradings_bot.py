@@ -730,12 +730,53 @@ def paper_open_position(candidate):
         fill = float(execution["fill_price"])
         qty = notional / fill
         fee = abs(qty * fill) * float(execution["fee_rate"])
-        free_equity = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0)) - open_notional
+        # Marque les positions ouvertes au marché avant de réserver la marge.
+        # L'ancien calcul ne retranchait que le notionnel et ignorait les pertes latentes.
+        cash_balance = float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0))
+        unrealized_net = 0.0
+        reserved_margin = 0.0
+        for open_position in positions:
+            open_entry = float(open_position.get("entry_price", 0) or 0)
+            open_mark = float(open_position.get("last_price") or open_entry)
+            open_qty = float(open_position.get("remaining_qty", open_position.get("qty", 0)) or 0)
+            open_direction = 1 if open_position.get("side", "LONG") == "LONG" else -1
+            open_fee_rate = float(open_position.get("entry_fee_rate", PAPER_FEE_RATE) or PAPER_FEE_RATE)
+            unrealized_net += (
+                float(open_position.get("realized_partial_pnl", 0) or 0)
+                + open_direction * (open_mark - open_entry) * open_qty
+                - float(open_position.get("entry_fee", 0) or 0)
+                - abs(open_qty * open_mark) * open_fee_rate
+            )
+            reserved_margin += float(open_position.get("margin", open_position.get("notional", 0)) or 0)
+        marked_equity = cash_balance + unrealized_net
+        free_equity = marked_equity - reserved_margin
         if free_equity + 1e-9 < notional + fee:
-            print(f"[PAPER] Capital disponible insuffisant pour {symbol}: {free_equity:.4f} USDC")
+            print(f"[PAPER] Capital disponible insuffisant pour {symbol}: {free_equity:.4f} USDC (equity marquée: {marked_equity:.4f})")
             return False
         atr = float(last["atr"])
         mode = details.get("signal_mode") or "UNKNOWN"
+        diagnostic_keys = (
+            "trend_score", "trend_ok", "trend_missing", "rsi_ok", "vwap_ok",
+            "obv_rising", "breakout_ok", "green_candle", "pattern_score",
+            "mode_a_ok", "mode_b_ok", "mode_c_ok", "mode_d_ok", "mode_e_ok",
+            "mode_e_intrabar", "mode_e_intrabar_move_pct", "mode_e_volume_ratio",
+            "mode_e_body_ratio", "mode_e_intrabar_distance_ema20_pct",
+            "mode_c_drop_pct", "mode_c_volume_ok", "mode_c_wick_ok",
+            "adaptive_multiplier", "score_before_adaptive",
+            "auto_learning_multiplier", "auto_learning_reasons",
+        )
+        entry_diagnostics = {
+            key: json_safe(details.get(key))
+            for key in diagnostic_keys
+            if key in details
+        }
+        entry_diagnostics["candle"] = {
+            key: json_safe(last.get(key))
+            for key in ("close", "open", "high", "low", "volume", "ema20", "ema50", "rsi", "atr", "vwap", "obv", "obv_ma5")
+            if key in last.index
+        }
+        entry_diagnostics["signal_mode"] = mode
+        entry_diagnostics["final_score"] = round(float(candidate.get("score", 0) or 0), 4)
         if mode == "MODE_L_LIQUIDITY_SWEEP":
             ml = details.get("mode_l") or {}
             stop = float(ml.get("stop") or (fill - direction * MODE_L_ATR_STOP_MULT * atr))
@@ -752,6 +793,7 @@ def paper_open_position(candidate):
             "fees_paid":fee,"fee_source":execution.get("fee_source"),"entry_slippage_rate":float(execution["slippage_rate"]),
             "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
+            "entry_diagnostics":entry_diagnostics,
             "tp1_done":False,"highest_price":fill,"last_price":raw_price}
         positions.append(position)
         PAPER_STATE["position"] = positions[0]
@@ -776,6 +818,7 @@ def paper_close_position(symbol, price, reason):
         net = float(p.get("realized_partial_pnl", 0)) + gross - exit_fee - float(p.get("entry_fee", 0))
         trade = {"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
             "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"notional":p.get("notional"),"leverage":p.get("leverage",PAPER_LEVERAGE),"exit_reason":reason,
+            "entry_diagnostics":p.get("entry_diagnostics", {}),
             "gross_pnl":round(float(p.get("realized_partial_pnl",0))+gross,6),
             "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"entry_fee_rate":p.get("entry_fee_rate"),
             "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
