@@ -1030,6 +1030,7 @@ def paper_open_position(candidate, btc_context=None):
             "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
             "entry_diagnostics":entry_diagnostics,
             "market_microstructure_captured_at_ms":int(time.time() * 1000),
+            "market_microstructure_history":[{"timestamp_ms":int(time.time() * 1000), "snapshot":market_microstructure}],
             "entry_candle_time":json_safe(candidate.get("confirmed_time")),
             "favorable_extreme_price":fill,"adverse_extreme_price":fill,
             "mfe_pct":0.0,"mae_pct":0.0,"mfe_usd":0.0,"mae_usd":0.0,
@@ -1060,6 +1061,7 @@ def paper_close_position(symbol, price, reason):
             "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"notional":p.get("notional"),"leverage":p.get("leverage",PAPER_LEVERAGE),"exit_reason":reason,
             "entry_diagnostics":p.get("entry_diagnostics", {}),
             "exit_diagnostics":p.get("last_market_snapshot", {}),
+            "market_microstructure_history":p.get("market_microstructure_history", []),
             "mfe_pct":round(float(p.get("mfe_pct", 0) or 0), 4),
             "mae_pct":round(float(p.get("mae_pct", 0) or 0), 4),
             "mfe_usd":round(float(p.get("mfe_usd", 0) or 0), 6),
@@ -1166,8 +1168,12 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         with PAPER_LOCK:
             p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
             if p and p.get("last_market_snapshot") is not None:
+                captured_ms = int(time.time() * 1000)
                 p["last_market_snapshot"]["market_microstructure"] = market_microstructure
-                p["market_microstructure_captured_at_ms"] = int(time.time() * 1000)
+                p["market_microstructure_captured_at_ms"] = captured_ms
+                history = p.setdefault("market_microstructure_history", [])
+                history.append({"timestamp_ms": captured_ms, "snapshot": market_microstructure})
+                p["market_microstructure_history"] = history[-144:]
                 save_paper_state()
 
 
