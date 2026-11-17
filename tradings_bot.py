@@ -709,6 +709,15 @@ def paper_snapshot(current_price=None):
         "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE,"funding_simulated":False}
 
 
+def paper_safe_structure(value):
+    """Convertit récursivement les structures de diagnostics en types JSON sûrs."""
+    if isinstance(value, dict):
+        return {str(key): paper_safe_structure(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [paper_safe_structure(item) for item in value]
+    return json_safe(value)
+
+
 def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, details, status, reasons=None, score=None):
     """
     Historique PAPER des signaux évalués, y compris ceux rejetés par les filtres.
@@ -725,7 +734,7 @@ def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, 
             "mode_f_ok", "mode_l_ok", "pattern_score", "mode_e_volume_ratio",
             "mode_e_body_ratio", "mode_e_intrabar", "mode_c_drop_pct",
             "mode_c_volume_ok", "mode_c_wick_ok", "adaptive_multiplier",
-            "adaptive_info", "auto_learning_multiplier", "auto_learning_reasons",
+            "adaptive_info", "auto_learning_multiplier", "auto_learning_reasons", "mode_l",
         )
         indicators = {}
         if last is not None:
@@ -742,7 +751,7 @@ def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, 
             "status": str(status),
             "mode": details.get("signal_mode"),
             "score": json_safe(score if score is not None else details.get("score")),
-            "flags": {key: json_safe(details.get(key)) for key in flags if key in details},
+            "flags": {key: paper_safe_structure(details.get(key)) for key in flags if key in details},
             "indicators": indicators,
             "rejection_reasons": list(reasons or []),
             "mode_details": {
@@ -752,6 +761,7 @@ def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, 
                             "mode_f_pattern", "mode_f_score", "mode_l")
                 if key in details
             },
+            "market_microstructure": paper_derivatives_snapshot(symbol),
         }
         with PAPER_LOCK:
             history = PAPER_STATE.setdefault("signal_diagnostics", [])
@@ -974,10 +984,10 @@ def paper_open_position(candidate, btc_context=None):
             "mode_e_body_ratio", "mode_e_intrabar_distance_ema20_pct",
             "mode_c_drop_pct", "mode_c_volume_ok", "mode_c_wick_ok",
             "adaptive_multiplier", "score_before_adaptive",
-            "auto_learning_multiplier", "auto_learning_reasons",
+            "auto_learning_multiplier", "auto_learning_reasons", "mode_l",
         )
         entry_diagnostics = {
-            key: json_safe(details.get(key))
+            key: paper_safe_structure(details.get(key))
             for key in diagnostic_keys
             if key in details
         }
