@@ -1120,7 +1120,10 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         original_qty = float(p.get("qty", 0) or 0)
         p["mfe_usd"] = max(0.0, direction_for_excursion * (float(p["favorable_extreme_price"]) - entry_for_excursion) * original_qty)
         p["mae_usd"] = min(0.0, direction_for_excursion * (float(p["adverse_extreme_price"]) - entry_for_excursion) * original_qty)
+        previous_microstructure = (p.get("last_market_snapshot") or {}).get("market_microstructure")
         p["last_market_snapshot"] = paper_position_market_snapshot(df, price, candle_time, btc_context)
+        if previous_microstructure:
+            p["last_market_snapshot"]["market_microstructure"] = previous_microstructure
         last_microstructure_ms = int(p.get("market_microstructure_captured_at_ms", 0) or 0)
         market_microstructure_due = (int(time.time() * 1000) - last_microstructure_ms) >= 300000
         entry = float(p["entry_price"])
