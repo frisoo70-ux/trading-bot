@@ -776,13 +776,13 @@ def paper_derivatives_snapshot(symbol):
             {"type": "metaAndAssetCtxs"},
             cache_key="paper_meta_asset_contexts",
             cache_ttl=60,
-            max_retries=1,
+            max_retries=0,
         )
         if isinstance(data, list) and len(data) >= 2:
             universe = (data[0] or {}).get("universe", [])
             contexts = data[1] or []
             for asset, ctx in zip(universe, contexts):
-                if asset.get("name") == symbol:
+                if isinstance(asset, dict) and isinstance(ctx, dict) and asset.get("name") == symbol:
                     snapshot["derivatives"] = {
                         key: json_safe(ctx.get(key))
                         for key in ("funding", "openInterest", "dayNtlVlm", "prevDayPx",
@@ -802,7 +802,7 @@ def paper_derivatives_snapshot(symbol):
             {"type": "l2Book", "coin": symbol},
             cache_key=f"paper_diagnostics_l2_{symbol}",
             cache_ttl=60,
-            max_retries=1,
+            max_retries=0,
         )
         levels = (book or {}).get("levels") or []
         bids = levels[0] if len(levels) > 0 else []
