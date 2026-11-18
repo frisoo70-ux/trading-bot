@@ -1112,8 +1112,10 @@ def paper_intrabar_exit_trigger(mode, side, stop, target, tp1, tp1_done, trailin
         return None
 
     if tp1_done:
-        trailing_value = float(trailing_stop) if trailing_stop is not None else None
-        if trailing_value is not None and trailing_value > 0 and low <= trailing_value:
+        trailing_value = float(trailing_stop) if trailing_stop is not None else stop_value
+        if trailing_value is None or trailing_value <= 0:
+            trailing_value = stop_value
+        if trailing_value is not None and low <= trailing_value:
             return "PAPER_TRAILING_STOP", trailing_value
         return None
 
@@ -1213,12 +1215,11 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
             reason = trigger_reason
             exit_price = trigger_price
 
-        if side == "LONG" and p.get("mode") != "MODE_L_LIQUIDITY_SWEEP":
-            if not (trigger and trigger[0] == "PAPER_TRAILING_STOP"):
-                p["highest_price"] = max(float(p.get("highest_price", entry)), observed_high)
-            if p.get("tp1_done") and not reason:
+        if side == "LONG" and p.get("mode") != "MODE_L_LIQUIDITY_SWEEP" and not trigger:
+            p["highest_price"] = max(float(p.get("highest_price", entry)), observed_high)
+            if p.get("tp1_done"):
                 p["trailing_stop"] = max(
-                    float(p.get("trailing_stop", 0)),
+                    float(p.get("trailing_stop", p["stop"])),
                     float(p["highest_price"]) - ATR_TRAIL_MULT * atr,
                 )
 
