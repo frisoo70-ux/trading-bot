@@ -111,6 +111,7 @@ class V2PaperEngine:
         s=self.load(); s["trades"].append(trade); s["trades"]=s["trades"][-MAX_TRADES:]
         s["realized_pnl"]=_num(s.get("realized_pnl"))+net
         s["positions"]=[x for x in s["positions"] if x.get("position_id")!=p.get("position_id")]
+        self.save()
         return trade
 
     def _manage(self,p,df,current_price,execution_fn):
