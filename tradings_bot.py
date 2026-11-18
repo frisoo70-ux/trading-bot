@@ -13,6 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from strategy_engine_v2 import evaluate_strategy_candidates
+from strategy_engine_v2_paper import V2PaperEngine
 
 # ============================================================
 # BOT MULTI-COINS V3
@@ -120,6 +121,7 @@ GITHUB_BACKUP_FILES = [
     "bot_config.json",
     "adaptive_config.json",
     "paper_trades.json",
+    "paper_v2_trades.json",
 ]
 
 GITHUB_SYNC_LOCK = threading.Lock()
@@ -551,6 +553,11 @@ PAPER_SLIPPAGE_RATE = 0.00020
 PAPER_INITIAL_BALANCE = 1000.0
 PAPER_LOCK = threading.RLock()
 PAPER_STATE = {"initial_balance": PAPER_INITIAL_BALANCE, "realized_pnl": 0.0, "position": None, "trades": [], "updated_at": None}
+V2_PAPER_ENGINE = V2PaperEngine(
+    DATA_DIR / "paper_v2_trades.json", initial_balance=1000.0, trade_size=100.0,
+    max_positions=5, max_gross_exposure=500.0, leverage=1.0, min_score=55.0,
+    on_save=lambda: schedule_github_backup(),
+)
 PAPER_FEE_CACHE = {"rate": None, "source": "UNAVAILABLE", "updated_at": None}
 PAPER_FEE_CACHE_LOCK = threading.Lock()
 
@@ -1224,6 +1231,27 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
 
 def paper_process_cycle():
     load_paper_state()
+
+    # Separate V2 virtual portfolio. It runs only in PAPER and never calls
+    # any exchange order-submission function.
+    if load_bot_config().get("execution_mode", "LIVE") == "PAPER":
+        for v2_symbol in PAPER_SYMBOLS:
+            try:
+                v2_df, v2_candle_time, v2_price = prepare_df_for_symbol(v2_symbol)
+                if v2_df is not None and not v2_df.empty:
+                    V2_PAPER_ENGINE.process_symbol(
+                        symbol=v2_symbol,
+                        df=v2_df,
+                        candle_time=v2_candle_time,
+                        current_price=v2_price,
+                        evaluator=evaluate_strategy_candidates,
+                        execution_estimator=paper_estimate_execution,
+                        timeframe=get_active_timeframe(),
+                    )
+            except Exception as v2_error:
+                print(f"[V2 PAPER] Cycle error {v2_symbol}:", str(v2_error)[:180])
+
+    # Historical PAPER engine retains its existing independent portfolio.
     btc_context = paper_context_snapshot("BTC") if PAPER_STATE.get("positions") else None
     for position in list(PAPER_STATE.get("positions", [])):
         symbol = position.get("symbol")
@@ -2138,6 +2166,7 @@ def compute_dashboard_stats():
         "open_position": get_open_position(),
         "live_trade": get_live_trade_snapshot_v48(),
         "config": load_bot_config(),
+        "strategy_v2_paper": V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
         "active_timeframe": get_active_timeframe(),
         "timeframe_options": TIMEFRAME_OPTIONS,
         "summary": {
@@ -2967,6 +2996,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/paper":
             return self._json(paper_snapshot())
+
+        if parsed.path == "/api/paper_v2":
+            return self._json(V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE))
 
         if parsed.path == "/api/chart":
             params = parse_qs(parsed.query)
