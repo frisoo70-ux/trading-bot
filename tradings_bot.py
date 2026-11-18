@@ -2401,6 +2401,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="muted" id="executionModeLabel" style="margin-top:8px">Mode d’exécution : LIVE</div>
     <div style="margin-top:10px"><label class="toggle"><span>Exécution du bot<br><small style="color:#9ca3af;font-weight:500">LIVE = vrais ordres · PAPER = simulation sans ordre</small></span><select id="executionMode" class="chartSelect"><option value="LIVE">LIVE</option><option value="PAPER">PAPER TEST</option></select></label></div>
   </div>
+  <div class="card" id="v2PaperPanel" style="margin-top:12px;border-color:#2563eb">
+    <h3>🧪 Strategy V2 — portefeuille PAPER indépendant</h3>
+    <div class="muted">Simulation autonome des stratégies V2 · capital séparé de l'ancien PAPER · aucun ordre réel envoyé.</div>
+    <div class="liveGrid" style="margin-top:10px">
+      <div class="liveBox"><div class="liveLabel">Equity V2</div><div class="liveVal" id="v2PaperEquity">1 000 USDC</div></div>
+      <div class="liveBox"><div class="liveLabel">PnL réalisé V2</div><div class="liveVal" id="v2PaperPnl">0 USDC</div></div>
+      <div class="liveBox"><div class="liveLabel">Winrate V2</div><div class="liveVal" id="v2PaperWinrate">0%</div></div>
+      <div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="v2PaperTrades">0</div></div>
+      <div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="v2PaperPF">-</div></div>
+      <div class="liveBox"><div class="liveLabel">Drawdown max.</div><div class="liveVal" id="v2PaperDD">0%</div></div>
+    </div>
+    <div class="muted" id="v2PaperCosts" style="margin-top:10px">Frais/slippage estimés via carnet L2 · funding non simulé.</div>
+    <div class="muted" id="v2PaperPositions" style="margin-top:8px">Aucune position V2 ouverte.</div>
+    <div class="muted" id="v2PaperStrategies" style="margin-top:8px">Statistiques par stratégie : en attente.</div>
+    <div class="scroll" style="margin-top:10px"><table id="v2PaperTradesTable"></table></div>
+  </div>
   <div class="grid two" style="margin-top:12px">
     <div class="card">
       <h3>⚙️ Contrôle du bot</h3>
@@ -2962,7 +2978,8 @@ table('postTrade',[
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
 async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : carnet L2 (secours si indisponible) · Funding perp non simulé`;const positions=p.positions||[];document.getElementById("paperPosition").textContent=positions.length?("PAPER · "+positions.length+"/"+p.max_positions+" positions · exposition "+fmt(p.open_notional,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.mode+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.tp1||q.target,6)).join("\n")):"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
-load();loadPaper();loadChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadChart,60000);
+async function loadPaperV2(){try{const r=await fetch("/api/paper_v2"+window.location.search);const p=await r.json();document.getElementById("v2PaperEquity").textContent=fmt(p.equity,2)+" USDC";document.getElementById("v2PaperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("v2PaperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("v2PaperTrades").textContent=p.closed_trades;document.getElementById("v2PaperPF").textContent=p.profit_factor===null?"∞":fmt(p.profit_factor,2);document.getElementById("v2PaperDD").textContent=fmt(p.max_drawdown_pct,2)+"%";const positions=p.positions||[];document.getElementById("v2PaperPositions").textContent=positions.length?("V2 · "+positions.length+"/"+p.max_positions+" positions · exposition max. "+fmt(p.max_gross_exposure,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.strategy_id+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.target,6)).join("\n")):"Aucune position V2 ouverte.";const stats=p.by_strategy||{};document.getElementById("v2PaperStrategies").textContent="Par stratégie : "+(Object.keys(stats).length?Object.entries(stats).map(([k,v])=>k+" · "+v.trades+" trades · WR "+fmt(v.winrate,1)+"% · PnL "+fmt(v.net_pnl,4)+" USDC · PF "+(v.profit_factor===null?"∞":fmt(v.profit_factor,2))).join(" | "):"en attente des premiers trades clôturés");document.getElementById("v2PaperCosts").textContent="Frais et slippage estimés avec carnet L2 (secours si indisponible) · funding non simulé · capital initial indépendant : "+fmt(p.initial_balance,2)+" USDC";table("v2PaperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Stratégie",key:"strategy_id"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
+load();loadPaper();loadPaperV2();loadChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadPaperV2,5000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
 
