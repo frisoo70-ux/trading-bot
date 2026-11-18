@@ -1103,6 +1103,7 @@ def paper_close_position(symbol, price, reason):
 
 def paper_manage_position(symbol, df, current_price, candle_time, btc_context=None):
     reason = None
+    exit_reference_price = None
     market_microstructure_due = False
     with PAPER_LOCK:
         p = next((item for item in PAPER_STATE.get("positions", []) if item.get("symbol") == symbol), None)
@@ -1166,8 +1167,10 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
             target_hit = observed_high >= target if side == "LONG" else observed_low <= target
             if stop_hit:
                 reason = "PAPER_SWEEP_INVALIDATION"
+                exit_reference_price = stop
             elif target_hit:
                 reason = "PAPER_LIQUIDITY_TP"
+                exit_reference_price = target
         elif side == "LONG":
             stop_hit = observed_low <= float(p["stop"])
             tp1_hit = bool(p.get("tp1") and not p.get("tp1_done") and observed_high >= float(p["tp1"]))
@@ -1176,8 +1179,10 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
             # Un stop touché dans la fenêtre observée prime sur TP1 : pas de séquence intrabougie inventée.
             if stop_hit:
                 reason = "PAPER_ATR_STOP"
+                exit_reference_price = float(p["stop"])
             elif trailing_hit:
                 reason = "PAPER_TRAILING_STOP"
+                exit_reference_price = trailing
             elif tp1_hit:
                 partial_qty = float(p["qty"]) * 0.5
                 tp1_reference = float(p["tp1"])
@@ -1198,7 +1203,8 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
                 p["trailing_stop"] = max(float(p.get("trailing_stop",0)),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
         save_paper_state()
     if reason:
-        paper_close_position(symbol, price, reason)
+        # Une mèche déclenche au niveau du stop/de la cible, même si le prix a rebondi.
+        paper_close_position(symbol, exit_reference_price if exit_reference_price is not None else price, reason)
     elif market_microstructure_due:
         # Rafraîchissement après la gestion du stop/TP et hors verrou d'état.
         market_microstructure = paper_derivatives_snapshot(symbol)
