@@ -1162,7 +1162,7 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
             stop = float(p["stop"])
             target = float(p["target"])
-            # Si stop et cible sont touchés dans la même bougie, hypothèse prudente : stop d'abord.
+            # Si stop et cible sont touchés dans la fenêtre observée, hypothèse prudente : stop d'abord.
             stop_hit = observed_low <= stop if side == "LONG" else observed_high >= stop
             target_hit = observed_high >= target if side == "LONG" else observed_low <= target
             if stop_hit:
