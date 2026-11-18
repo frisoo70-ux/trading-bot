@@ -12,6 +12,7 @@ import eth_account
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+from strategy_engine_v2 import evaluate_strategy_candidates
 
 # ============================================================
 # BOT MULTI-COINS V3
@@ -754,6 +755,7 @@ def paper_record_signal_diagnostic(symbol, confirmed_time, current_price, last, 
             "flags": {key: paper_safe_structure(details.get(key)) for key in flags if key in details},
             "indicators": indicators,
             "rejection_reasons": list(reasons or []),
+            "strategy_v2_shadow": paper_safe_structure(details.get("strategy_v2_shadow")) if details.get("strategy_v2_shadow") is not None else None,
             "mode_details": {
                 key: paper_safe_structure(details.get(key))
                 for key in ("mode_c_reversal", "mode_c_drop_pct", "mode_d_type",
@@ -7661,6 +7663,24 @@ def scan_symbols_for_best_buy(force_rescan=False, symbols=None, exclude_symbols=
             last_candle_times[symbol] = confirmed_time
         last = df.iloc[-1]
         ok, score, details = buy_signal(df)
+
+        # Strategy Architecture V2 : analyse parallèle PAPER uniquement.
+        # Le résultat est journalisé pour comparaison; il ne modifie jamais le signal legacy.
+        if load_bot_config().get("execution_mode", "LIVE") == "PAPER":
+            try:
+                details["strategy_v2_shadow"] = evaluate_strategy_candidates(
+                    df,
+                    symbol=symbol,
+                    timeframe=get_active_timeframe(),
+                    source_candle_time=confirmed_time,
+                )
+            except Exception as shadow_error:
+                details["strategy_v2_shadow"] = {
+                    "engine_version": "2.0-shadow",
+                    "status": "ERROR",
+                    "execution_allowed": False,
+                    "error": str(shadow_error)[:180],
+                }
 
         # MODE E INTRABAR :
         # Si aucun signal 15m classique n'est validé, on teste l'impulsion en cours.
