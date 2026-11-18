@@ -1017,6 +1017,16 @@ def paper_open_position(candidate, btc_context=None):
             stop = float(ml.get("stop") or (fill - direction * MODE_L_ATR_STOP_MULT * atr))
             target = float(ml.get("target") or (fill + direction * 2 * atr))
             tp1 = None
+            risk_distance = direction * (fill - stop)
+            reward_distance = direction * (target - fill)
+            rr = reward_distance / risk_distance if risk_distance > 0 else 0.0
+            if risk_distance <= 0 or reward_distance <= 0 or rr + 1e-9 < MODE_L_MIN_RR:
+                print(
+                    f"[PAPER MODE L BLOCK] {symbol} R:R insuffisant "
+                    f"(fill={fill:.8f}, stop={stop:.8f}, target={target:.8f}, "
+                    f"R:R={rr:.3f}, minimum={MODE_L_MIN_RR:.2f})"
+                )
+                return False
         else:
             stop = fill - (V7_ATR_STOP_MULT if V7_STABILIZATION_ENABLED else ATR_STOP_MULT) * atr
             tp1 = calculate_adaptive_tp1(entry=fill, atr_value=atr, mode=mode, symbol=symbol)["price"]
@@ -1027,7 +1037,9 @@ def paper_open_position(candidate, btc_context=None):
             "entry_fee":fee,"entry_fee_rate":float(execution["fee_rate"]),
             "fees_paid":fee,"fee_source":execution.get("fee_source"),"entry_slippage_rate":float(execution["slippage_rate"]),
             "entry_slippage_source":execution.get("slippage_source"),"entry_book_status":execution.get("book_status"),
-            "realized_partial_pnl":0.0,"entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
+            "realized_partial_pnl":0.0,"realized_partial_gross":0.0,
+            "entry_atr":atr,"stop":stop,"tp1":tp1,"target":target,
+            "mode_l_rr":round(rr,4) if mode == "MODE_L_LIQUIDITY_SWEEP" else None,
             "entry_diagnostics":entry_diagnostics,
             "market_microstructure_captured_at_ms":int(time.time() * 1000),
             "market_microstructure_history":[{"timestamp_ms":int(time.time() * 1000), "snapshot":market_microstructure}],
@@ -1057,6 +1069,10 @@ def paper_close_position(symbol, price, reason):
         gross = direction * (fill - float(p["entry_price"])) * qty
         exit_fee = abs(qty * fill) * float(execution["fee_rate"])
         net = float(p.get("realized_partial_pnl", 0)) + gross - exit_fee - float(p.get("entry_fee", 0))
+        partial_net = float(p.get("realized_partial_pnl", 0) or 0)
+        partial_fees = max(0.0, float(p.get("fees_paid", 0) or 0) - float(p.get("entry_fee", 0) or 0))
+        # Compatibilité avec les positions créées avant la séparation brut/net.
+        partial_gross = float(p.get("realized_partial_gross", partial_net + partial_fees) or 0)
         trade = {"date":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"symbol":p["symbol"],"mode":p["mode"],"side":p["side"],
             "entry":p["entry_price"],"exit":round(fill,10),"qty":p["qty"],"notional":p.get("notional"),"leverage":p.get("leverage",PAPER_LEVERAGE),"exit_reason":reason,
             "entry_diagnostics":p.get("entry_diagnostics", {}),
@@ -1069,7 +1085,7 @@ def paper_close_position(symbol, price, reason):
             "favorable_extreme_price":p.get("favorable_extreme_price"),
             "adverse_extreme_price":p.get("adverse_extreme_price"),
             "duration_minutes":round(max(0, (datetime.now() - datetime.strptime(p.get("entry_time"), "%Y-%m-%d %H:%M:%S")).total_seconds()/60), 2) if p.get("entry_time") else None,
-            "gross_pnl":round(float(p.get("realized_partial_pnl",0))+gross,6),
+            "gross_pnl":round(partial_gross + gross,6),
             "fees":round(float(p.get("fees_paid",0))+exit_fee,6),"entry_fee_rate":p.get("entry_fee_rate"),
             "exit_fee_rate":float(execution["fee_rate"]),"fee_source":execution.get("fee_source"),
             "entry_slippage_rate":p.get("entry_slippage_rate"),"exit_slippage_rate":float(execution["slippage_rate"]),
@@ -1100,7 +1116,18 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         observed_high = price
         observed_low = price
         try:
-            entry_candle_ms = int(p.get("entry_candle_time") or 0)
+            # Les anciennes positions sans horodatage d'entrée ne doivent jamais
+            # intégrer des bougies antérieures à leur entrée dans MAE/MFE.
+            if not p.get("entry_candle_time"):
+                tracking_start = int(candle_time) if candle_time is not None else int(time.time() * 1000)
+                p["entry_candle_time"] = tracking_start
+                p["last_excursion_candle_time"] = tracking_start
+                p["excursion_data_status"] = "RESET_NO_ENTRY_TIMESTAMP"
+                p["favorable_extreme_price"] = entry_for_excursion
+                p["adverse_extreme_price"] = entry_for_excursion
+                p["mfe_pct"] = p["mae_pct"] = 0.0
+                p["mfe_usd"] = p["mae_usd"] = 0.0
+            entry_candle_ms = int(p.get("entry_candle_time"))
             last_observed_ms = int(p.get("last_excursion_candle_time") or entry_candle_ms)
             new_rows = df[df["time"].astype("int64") > max(entry_candle_ms, last_observed_ms)]
             for _, candle in new_rows.iterrows():
@@ -1130,24 +1157,36 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         market_microstructure_due = (int(time.time() * 1000) - last_microstructure_ms) >= 300000
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
+        p["highest_price"] = max(float(p.get("highest_price", entry)), observed_high)
         if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
-            if side == "LONG":
-                if price <= float(p["stop"]): reason = "PAPER_SWEEP_INVALIDATION"
-                elif price >= float(p["target"]): reason = "PAPER_LIQUIDITY_TP"
-            else:
-                if price >= float(p["stop"]): reason = "PAPER_SWEEP_INVALIDATION"
-                elif price <= float(p["target"]): reason = "PAPER_LIQUIDITY_TP"
+            stop = float(p["stop"])
+            target = float(p["target"])
+            # Si stop et cible sont touchés dans la même bougie, hypothèse prudente : stop d'abord.
+            stop_hit = observed_low <= stop if side == "LONG" else observed_high >= stop
+            target_hit = observed_high >= target if side == "LONG" else observed_low <= target
+            if stop_hit:
+                reason = "PAPER_SWEEP_INVALIDATION"
+            elif target_hit:
+                reason = "PAPER_LIQUIDITY_TP"
         elif side == "LONG":
-            p["highest_price"] = max(float(p.get("highest_price",entry)),price)
-            if price <= float(p["stop"]):
+            stop_hit = observed_low <= float(p["stop"])
+            tp1_hit = bool(p.get("tp1") and not p.get("tp1_done") and observed_high >= float(p["tp1"]))
+            trailing = float(p.get("trailing_stop") or 0)
+            trailing_hit = bool(p.get("tp1_done") and observed_low <= trailing)
+            # Un stop touché dans la fenêtre observée prime sur TP1 : pas de séquence intrabougie inventée.
+            if stop_hit:
                 reason = "PAPER_ATR_STOP"
-            elif p.get("tp1") and not p.get("tp1_done") and price >= float(p["tp1"]):
+            elif trailing_hit:
+                reason = "PAPER_TRAILING_STOP"
+            elif tp1_hit:
                 partial_qty = float(p["qty"]) * 0.5
-                partial_execution = paper_estimate_execution(p["symbol"], "SELL", abs(partial_qty*price), price)
+                tp1_reference = float(p["tp1"])
+                partial_execution = paper_estimate_execution(p["symbol"], "SELL", abs(partial_qty * tp1_reference), tp1_reference)
                 fill = float(partial_execution["fill_price"])
                 gross = (fill-entry)*partial_qty
                 fee = abs(fill*partial_qty)*float(partial_execution["fee_rate"])
                 p["realized_partial_pnl"] = float(p.get("realized_partial_pnl",0)) + gross - fee
+                p["realized_partial_gross"] = float(p.get("realized_partial_gross",0) or 0) + gross
                 p["fees_paid"] = float(p.get("fees_paid",0)) + fee
                 p["remaining_qty"] = float(p["qty"]) - partial_qty
                 p["tp1_done"] = True
@@ -1155,8 +1194,6 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
                 save_paper_state()
                 notify_telegram(f"🧪 <b>PAPER TP1</b>\n{p['symbol']} · 50% simulé\nPrix: {fill:.6f}\nAucun ordre réel envoyé.")
                 return
-            elif p.get("tp1_done") and price <= float(p.get("trailing_stop",0)):
-                reason = "PAPER_TRAILING_STOP"
             elif p.get("tp1_done"):
                 p["trailing_stop"] = max(float(p.get("trailing_stop",0)),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
         save_paper_state()
