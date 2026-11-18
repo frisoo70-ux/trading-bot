@@ -214,7 +214,7 @@ class V2PaperEngine:
             "closed_trades":len(trades),"wins":len(wins),"losses":len(losses),
             "winrate":round(len(wins)/len(trades)*100,2) if trades else 0,
             "profit_factor":round(gp/gl,4) if gl else (None if gp else 0),
-            "max_drawdown_pct":round(mdd,4),"open_positions":len(positions),
+            "max_drawdown_pct":round(mdd,4),"drawdown_basis":"CLOSED_TRADES_ONLY","open_positions":len(positions),
             "max_positions":self.max_positions,"position_notional":self.trade_size,
             "max_gross_exposure":self.max_gross_exposure,"leverage":self.leverage,
             "by_strategy":by_strategy,"positions":positions,

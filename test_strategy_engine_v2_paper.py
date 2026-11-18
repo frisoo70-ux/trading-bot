@@ -32,6 +32,13 @@ class V2PaperEngineTests(unittest.TestCase):
         p={"side":"SHORT","stop":105,"target":90}
         self.assertEqual(candle_exit(p,{"open":100,"high":106,"low":92}),("STOP",105))
         self.assertEqual(candle_exit(p,{"open":100,"high":103,"low":89}),("TARGET",90))
+    def test_close_records_net_after_both_fees(self):
+        self.engine._open(self.candidate(),1000,self.execution)
+        position=self.engine.load()["positions"][0]
+        trade=self.engine._close(position,110,"V2_PAPER_TARGET",self.execution,2000)
+        self.assertGreater(trade["gross_pnl"],trade["net_pnl"])
+        self.assertEqual(len(self.engine.load()["positions"]),0)
+        self.assertGreater(self.engine.load()["realized_pnl"],0)
     def test_independent_initial_balance(self):
         self.assertEqual(self.engine.snapshot()["initial_balance"],1000)
 if __name__=="__main__": unittest.main()

@@ -2410,7 +2410,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="liveBox"><div class="liveLabel">Winrate V2</div><div class="liveVal" id="v2PaperWinrate">0%</div></div>
       <div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="v2PaperTrades">0</div></div>
       <div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="v2PaperPF">-</div></div>
-      <div class="liveBox"><div class="liveLabel">Drawdown max.</div><div class="liveVal" id="v2PaperDD">0%</div></div>
+      <div class="liveBox"><div class="liveLabel">Drawdown max. (clôtures)</div><div class="liveVal" id="v2PaperDD">0%</div></div>
     </div>
     <div class="muted" id="v2PaperCosts" style="margin-top:10px">Frais/slippage estimés via carnet L2 · funding non simulé.</div>
     <div class="muted" id="v2PaperPositions" style="margin-top:8px">Aucune position V2 ouverte.</div>
