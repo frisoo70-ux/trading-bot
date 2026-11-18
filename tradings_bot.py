@@ -1206,8 +1206,8 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
                 )
                 save_paper_state()
                 notify_telegram(
-                    f"🧪 <b>PAPER TP1</b>\\n{p['symbol']} · 50% simulé\\n"
-                    f"Prix: {fill:.6f}\\nAucun ordre réel envoyé."
+                    f"🧪 <b>PAPER TP1</b>\n{p['symbol']} · 50% simulé\n"
+                    f"Prix: {fill:.6f}\nAucun ordre réel envoyé."
                 )
                 return
             reason = trigger_reason
@@ -3408,11 +3408,11 @@ def split_telegram_message(text, max_len=3500):
     text = str(text)
 
     while len(text) > max_len:
-        cut = text.rfind("\\n", 0, max_len)
+        cut = text.rfind("\n", 0, max_len)
         if cut == -1:
             cut = max_len
         chunks.append(text[:cut])
-        text = text[cut:].lstrip("\\n")
+        text = text[cut:].lstrip("\n")
 
     if text:
         chunks.append(text)
@@ -3434,18 +3434,18 @@ def build_analysis_message(limit=20):
     limit = max(5, min(limit, 120))
 
     if not ANALYSIS_HISTORY:
-        return "📊 ANALYSIS\\nAucun historique disponible depuis le dernier redémarrage."
+        return "📊 ANALYSIS\nAucun historique disponible depuis le dernier redémarrage."
 
-    msg = f"📊 <b>ANALYSIS {limit} dernières bougies par coin</b>\\n"
-    msg += "Timeframe: 15m\\n"
+    msg = f"📊 <b>ANALYSIS {limit} dernières bougies par coin</b>\n"
+    msg += "Timeframe: 15m\n"
 
     for symbol in ALL_SUPPORTED_SYMBOLS:
         rows = [x for x in ANALYSIS_HISTORY if x.get("symbol") == symbol][-limit:]
 
-        msg += f"\\n<b>{symbol}</b>\\n"
+        msg += f"\n<b>{symbol}</b>\n"
 
         if not rows:
-            msg += "Aucune donnée.\\n"
+            msg += "Aucune donnée.\n"
             continue
 
         for r in rows:
@@ -3462,7 +3462,7 @@ def build_analysis_message(limit=20):
                 f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} D={r.get('mode_d')} "
                 f"D1={r.get('mode_d_d1')} D2={r.get('mode_d_d2')} | "
                 f"Pat={r['pattern_score']:.1f} Score={r['score']:.2f} | "
-                f"Mode={mode}\\n"
+                f"Mode={mode}\n"
             )
 
     return msg
@@ -3477,11 +3477,11 @@ def build_log_message(limit=100):
     limit = max(20, min(limit, 250))
 
     if not LOG_HISTORY:
-        return "📋 LOG\\nAucun log disponible depuis le dernier redémarrage."
+        return "📋 LOG\nAucun log disponible depuis le dernier redémarrage."
 
     rows = LOG_HISTORY[-limit:]
 
-    return "📋 <b>DERNIERS LOGS</b>\\n" + "\\n".join(rows)
+    return "📋 <b>DERNIERS LOGS</b>\n" + "\n".join(rows)
 
 
 
@@ -4911,7 +4911,7 @@ def format_mode_f_pattern_details(patterns):
     lines = []
     for p in patterns:
         lines.append(f"✅ {mode_f_pattern_label(p)} : {mode_f_pattern_explanation(p)}")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 
