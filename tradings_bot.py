@@ -1085,6 +1085,50 @@ def paper_close_position(symbol, price, reason):
     return True
 
 
+def paper_intrabar_exit_trigger(mode, side, stop, target, tp1, tp1_done, trailing_stop, observed_high, observed_low):
+    """
+    PAPER-only trigger evaluation using confirmed candle extremes plus current price.
+    If stop and target are both touched in one candle, the stop wins conservatively.
+    """
+    high = float(observed_high)
+    low = float(observed_low)
+    stop_value = float(stop) if stop is not None else None
+
+    if mode == "MODE_L_LIQUIDITY_SWEEP":
+        target_value = float(target) if target is not None else None
+        if side == "LONG":
+            if stop_value is not None and low <= stop_value:
+                return "PAPER_SWEEP_INVALIDATION", stop_value
+            if target_value is not None and high >= target_value:
+                return "PAPER_LIQUIDITY_TP", target_value
+        else:
+            if stop_value is not None and high >= stop_value:
+                return "PAPER_SWEEP_INVALIDATION", stop_value
+            if target_value is not None and low <= target_value:
+                return "PAPER_LIQUIDITY_TP", target_value
+        return None
+
+    if side != "LONG":
+        return None
+
+    if tp1_done:
+        trailing_value = float(trailing_stop) if trailing_stop is not None else stop_value
+        if trailing_value is None or trailing_value <= 0:
+            trailing_value = stop_value
+        if trailing_value is not None and low <= trailing_value:
+            return "PAPER_TRAILING_STOP", trailing_value
+        return None
+
+    if stop_value is not None and low <= stop_value:
+        return "PAPER_ATR_STOP", stop_value
+
+    tp1_value = float(tp1) if tp1 is not None else None
+    if tp1_value is not None and high >= tp1_value:
+        return "PAPER_TP1", tp1_value
+
+    return None
+
+
 def paper_manage_position(symbol, df, current_price, candle_time, btc_context=None):
     reason = None
     market_microstructure_due = False
@@ -1130,38 +1174,58 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
         market_microstructure_due = (int(time.time() * 1000) - last_microstructure_ms) >= 300000
         entry = float(p["entry_price"])
         atr = float(p.get("entry_atr") or df.iloc[-1]["atr"])
-        if p.get("mode") == "MODE_L_LIQUIDITY_SWEEP":
-            if side == "LONG":
-                if price <= float(p["stop"]): reason = "PAPER_SWEEP_INVALIDATION"
-                elif price >= float(p["target"]): reason = "PAPER_LIQUIDITY_TP"
-            else:
-                if price >= float(p["stop"]): reason = "PAPER_SWEEP_INVALIDATION"
-                elif price <= float(p["target"]): reason = "PAPER_LIQUIDITY_TP"
-        elif side == "LONG":
-            p["highest_price"] = max(float(p.get("highest_price",entry)),price)
-            if price <= float(p["stop"]):
-                reason = "PAPER_ATR_STOP"
-            elif p.get("tp1") and not p.get("tp1_done") and price >= float(p["tp1"]):
+        exit_price = price
+        trigger = paper_intrabar_exit_trigger(
+            mode=p.get("mode"),
+            side=side,
+            stop=p.get("stop"),
+            target=p.get("target"),
+            tp1=p.get("tp1"),
+            tp1_done=bool(p.get("tp1_done")),
+            trailing_stop=p.get("trailing_stop"),
+            observed_high=observed_high,
+            observed_low=observed_low,
+        )
+
+        if trigger:
+            trigger_reason, trigger_price = trigger
+            if trigger_reason == "PAPER_TP1":
+                p["highest_price"] = max(float(p.get("highest_price", entry)), observed_high)
                 partial_qty = float(p["qty"]) * 0.5
-                partial_execution = paper_estimate_execution(p["symbol"], "SELL", abs(partial_qty*price), price)
+                partial_execution = paper_estimate_execution(
+                    p["symbol"], "SELL", abs(partial_qty * trigger_price), trigger_price
+                )
                 fill = float(partial_execution["fill_price"])
-                gross = (fill-entry)*partial_qty
-                fee = abs(fill*partial_qty)*float(partial_execution["fee_rate"])
-                p["realized_partial_pnl"] = float(p.get("realized_partial_pnl",0)) + gross - fee
-                p["fees_paid"] = float(p.get("fees_paid",0)) + fee
+                gross = (fill - entry) * partial_qty
+                fee = abs(fill * partial_qty) * float(partial_execution["fee_rate"])
+                p["realized_partial_pnl"] = float(p.get("realized_partial_pnl", 0)) + gross - fee
+                p["fees_paid"] = float(p.get("fees_paid", 0)) + fee
                 p["remaining_qty"] = float(p["qty"]) - partial_qty
                 p["tp1_done"] = True
-                p["trailing_stop"] = max(float(p["stop"]),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
+                p["trailing_stop"] = max(
+                    float(p["stop"]),
+                    float(p["highest_price"]) - ATR_TRAIL_MULT * atr,
+                )
                 save_paper_state()
-                notify_telegram(f"🧪 <b>PAPER TP1</b>\n{p['symbol']} · 50% simulé\nPrix: {fill:.6f}\nAucun ordre réel envoyé.")
+                notify_telegram(
+                    f"🧪 <b>PAPER TP1</b>\n{p['symbol']} · 50% simulé\n"
+                    f"Prix: {fill:.6f}\nAucun ordre réel envoyé."
+                )
                 return
-            elif p.get("tp1_done") and price <= float(p.get("trailing_stop",0)):
-                reason = "PAPER_TRAILING_STOP"
-            elif p.get("tp1_done"):
-                p["trailing_stop"] = max(float(p.get("trailing_stop",0)),float(p["highest_price"])-ATR_TRAIL_MULT*atr)
+            reason = trigger_reason
+            exit_price = trigger_price
+
+        if side == "LONG" and p.get("mode") != "MODE_L_LIQUIDITY_SWEEP" and not trigger:
+            p["highest_price"] = max(float(p.get("highest_price", entry)), observed_high)
+            if p.get("tp1_done"):
+                p["trailing_stop"] = max(
+                    float(p.get("trailing_stop", p["stop"])),
+                    float(p["highest_price"]) - ATR_TRAIL_MULT * atr,
+                )
+
         save_paper_state()
     if reason:
-        paper_close_position(symbol, price, reason)
+        paper_close_position(symbol, exit_price, reason)
     elif market_microstructure_due:
         # Rafraîchissement après la gestion du stop/TP et hors verrou d'état.
         market_microstructure = paper_derivatives_snapshot(symbol)
@@ -3345,11 +3409,11 @@ def split_telegram_message(text, max_len=3500):
     text = str(text)
 
     while len(text) > max_len:
-        cut = text.rfind("\\n", 0, max_len)
+        cut = text.rfind("\n", 0, max_len)
         if cut == -1:
             cut = max_len
         chunks.append(text[:cut])
-        text = text[cut:].lstrip("\\n")
+        text = text[cut:].lstrip("\n")
 
     if text:
         chunks.append(text)
@@ -3371,18 +3435,18 @@ def build_analysis_message(limit=20):
     limit = max(5, min(limit, 120))
 
     if not ANALYSIS_HISTORY:
-        return "📊 ANALYSIS\\nAucun historique disponible depuis le dernier redémarrage."
+        return "📊 ANALYSIS\nAucun historique disponible depuis le dernier redémarrage."
 
-    msg = f"📊 <b>ANALYSIS {limit} dernières bougies par coin</b>\\n"
-    msg += "Timeframe: 15m\\n"
+    msg = f"📊 <b>ANALYSIS {limit} dernières bougies par coin</b>\n"
+    msg += "Timeframe: 15m\n"
 
     for symbol in ALL_SUPPORTED_SYMBOLS:
         rows = [x for x in ANALYSIS_HISTORY if x.get("symbol") == symbol][-limit:]
 
-        msg += f"\\n<b>{symbol}</b>\\n"
+        msg += f"\n<b>{symbol}</b>\n"
 
         if not rows:
-            msg += "Aucune donnée.\\n"
+            msg += "Aucune donnée.\n"
             continue
 
         for r in rows:
@@ -3399,7 +3463,7 @@ def build_analysis_message(limit=20):
                 f"A={r['mode_a']} B={r['mode_b']} C={r['mode_c']} D={r.get('mode_d')} "
                 f"D1={r.get('mode_d_d1')} D2={r.get('mode_d_d2')} | "
                 f"Pat={r['pattern_score']:.1f} Score={r['score']:.2f} | "
-                f"Mode={mode}\\n"
+                f"Mode={mode}\n"
             )
 
     return msg
@@ -3414,11 +3478,11 @@ def build_log_message(limit=100):
     limit = max(20, min(limit, 250))
 
     if not LOG_HISTORY:
-        return "📋 LOG\\nAucun log disponible depuis le dernier redémarrage."
+        return "📋 LOG\nAucun log disponible depuis le dernier redémarrage."
 
     rows = LOG_HISTORY[-limit:]
 
-    return "📋 <b>DERNIERS LOGS</b>\\n" + "\\n".join(rows)
+    return "📋 <b>DERNIERS LOGS</b>\n" + "\n".join(rows)
 
 
 
@@ -4848,7 +4912,7 @@ def format_mode_f_pattern_details(patterns):
     lines = []
     for p in patterns:
         lines.append(f"✅ {mode_f_pattern_label(p)} : {mode_f_pattern_explanation(p)}")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 
