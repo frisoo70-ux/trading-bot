@@ -131,7 +131,7 @@ class V2PaperEngine:
 
     def _open(self,c,ct,execution_fn):
         s=self.load(); symbol=str(c["symbol"]); side=str(c["side"]).upper()
-        if side not in ("LONG","SHORT"): return False
+        if side != "LONG": return False
         if any(p.get("symbol")==symbol for p in s["positions"]): return False
         if len(s["positions"])>=self.max_positions: return False
         exposure=sum(_num(p.get("notional")) for p in s["positions"])
@@ -174,7 +174,7 @@ class V2PaperEngine:
         s["last_evaluated_candle_by_symbol"][symbol]=key; self.save()
         result=evaluator(df,symbol,timeframe=timeframe,source_candle_time=candle_time)
         candidates=result.get("ranked_candidates") or result.get("candidates") or []
-        valid=[c for c in candidates if c.get("risk_valid") and _num(c.get("setup_score"))>=self.min_score]
+        valid=[c for c in candidates if str(c.get("side","")).upper()=="LONG" and c.get("risk_valid") and _num(c.get("setup_score"))>=self.min_score]
         if not valid: return {"status":result.get("status","NO_CANDIDATE"),"opened":False}
         chosen=valid[0]; opened=self._open(chosen,candle_time,execution_estimator)
         return {"status":"OPENED" if opened else "ENTRY_REJECTED","opened":opened,
