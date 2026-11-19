@@ -39,6 +39,32 @@ class V2PaperEngineTests(unittest.TestCase):
         self.assertGreater(trade["gross_pnl"],trade["net_pnl"])
         self.assertEqual(len(self.engine.load()["positions"]),0)
         self.assertGreater(self.engine.load()["realized_pnl"],0)
+    def test_rejects_long_liquidity_sweep_in_downtrend(self):
+        candidate=self.candidate()
+        candidate["regime"]="TREND_DOWN"
+        class Frame:
+            empty=False
+        result=self.engine.process_symbol(
+            "SOL",Frame(),1000,100,
+            lambda *args,**kwargs:{"status":"OK","ranked_candidates":[candidate]},
+            self.execution,
+        )
+        self.assertEqual(result["status"],"FILTERED_COUNTERTREND_LONG_SWEEP")
+        self.assertEqual(self.engine.snapshot()["open_positions"],0)
+
+    def test_allows_long_liquidity_sweep_outside_downtrend(self):
+        candidate=self.candidate()
+        candidate["regime"]="MIXED"
+        class Frame:
+            empty=False
+        result=self.engine.process_symbol(
+            "SOL",Frame(),1000,100,
+            lambda *args,**kwargs:{"status":"OK","ranked_candidates":[candidate]},
+            self.execution,
+        )
+        self.assertEqual(result["status"],"OPENED")
+        self.assertEqual(self.engine.snapshot()["open_positions"],1)
+
     def test_independent_initial_balance(self):
         self.assertEqual(self.engine.snapshot()["initial_balance"],1000)
 if __name__=="__main__": unittest.main()
