@@ -2389,6 +2389,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="card" style="margin-top:12px;border-color:#a16207">
     <h3>🧪 Mode TEST LIVE — Paper Trading</h3>
     <div class="muted">Données de marché réelles · ordres simulés · aucun ordre envoyé à Hyperliquid. Résultats séparés du trading réel.</div>
+    <div id="legacyPaperResults">
     <div class="liveGrid" style="margin-top:10px">
       <div class="liveBox"><div class="liveLabel">Capital simulé</div><div class="liveVal" id="paperBalance">1 000 USDC</div></div>
       <div class="liveBox"><div class="liveLabel">PnL réalisé</div><div class="liveVal" id="paperPnl">0 USDC</div></div>
@@ -2398,10 +2399,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="muted" id="paperCosts" style="margin-top:10px">Frais : chargement… · Slippage : estimation carnet L2</div>
     <div class="muted" id="paperPosition" style="margin-top:6px">Aucune position simulée.</div>
     <div class="scroll" style="margin-top:10px"><table id="paperTradesTable"></table></div>
+    </div>
     <div class="muted" id="executionModeLabel" style="margin-top:8px">Mode d’exécution : LIVE</div>
-    <div style="margin-top:10px"><label class="toggle"><span>Exécution du bot<br><small style="color:#9ca3af;font-weight:500">LIVE = vrais ordres · PAPER = simulation sans ordre</small></span><select id="executionMode" class="chartSelect"><option value="LIVE">LIVE</option><option value="PAPER">PAPER TEST</option></select></label></div>
+    <div style="margin-top:10px"><label class="toggle"><span>Exécution du bot<br><small style="color:#9ca3af;font-weight:500">LIVE = vrais ordres · PAPER = simulation sans ordre</small></span><select id="executionMode" class="chartSelect" onchange="applyPaperDashboardView(this.value)"><option value="LIVE">LIVE</option><option value="PAPER">PAPER TEST</option></select></label></div>
   </div>
-  <div class="card" id="v2PaperPanel" style="margin-top:12px;border-color:#2563eb">
+  <div class="card" id="v2PaperPanel" style="margin-top:12px;border-color:#2563eb;display:none">
     <h3>🧪 Strategy V2 — portefeuille PAPER indépendant</h3>
     <div class="muted">Simulation autonome des stratégies V2 · capital séparé de l'ancien PAPER · aucun ordre réel envoyé.</div>
     <div class="liveGrid" style="margin-top:10px">
@@ -2744,6 +2746,7 @@ function renderToggles(cfg){
         'Timeframe actif : '+(cfg.timeframe||'15m');
     const modeSelect=document.getElementById("executionMode");
     if(modeSelect) modeSelect.value=cfg.execution_mode||"LIVE";
+    applyPaperDashboardView(modeSelect ? modeSelect.value : (cfg.execution_mode||"LIVE"));
     const modeLabel=document.getElementById("executionModeLabel");
     if(modeLabel) modeLabel.textContent="Mode d’exécution : "+(cfg.execution_mode||"LIVE")+(cfg.execution_mode==="PAPER"?" — AUCUN ORDRE RÉEL":" — ORDRES RÉELS AUTORISÉS");
 }
@@ -2930,6 +2933,13 @@ async function loadChart(){
   if(d.sweep&&d.sweep.valid)summary.textContent+=' · SWEEP '+d.sweep.side+' confirmé · Niveau '+fmt(d.sweep.level,6)+' · SL '+fmt(d.sweep.stop,6)+' · TP '+fmt(d.sweep.target,6);
  }catch(e){document.getElementById('chartSummary').textContent='Graphique momentanément indisponible'}
  finally{chartBusy=false}
+}
+function applyPaperDashboardView(mode){
+ const isPaper=mode==="PAPER";
+ const legacy=document.getElementById("legacyPaperResults");
+ const v2=document.getElementById("v2PaperPanel");
+ if(legacy) legacy.style.display=isPaper?"none":"block";
+ if(v2) v2.style.display=isPaper?"block":"none";
 }
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
 const perfCols=[{label:'Nom',key:'name'},{label:'Trades',key:'trades'},{label:'WR',get:r=>fmt(r.winrate,1)+'%'},{label:'PnL',get:r=>fmt(r.pnl,4),cls:v=>cls(v)},{label:'Avg',get:r=>fmt(r.avg_pnl,4),cls:v=>cls(v)},{label:'PF',get:r=>r.profit_factor===null?'∞':fmt(r.profit_factor,2)}];table('byMode',perfCols,d.by_mode);table('bySymbol',perfCols,d.by_symbol);table('byExit',perfCols,d.by_exit_reason);
