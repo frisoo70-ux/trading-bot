@@ -2938,7 +2938,7 @@ function applyPaperDashboardView(mode){
  const isPaper=mode==="PAPER";
  const legacy=document.getElementById("legacyPaperResults");
  const v2=document.getElementById("v2PaperPanel");
- if(legacy) legacy.style.display=isPaper?"none":"block";
+ if(legacy) legacy.style.display="block";
  if(v2) v2.style.display=isPaper?"block":"none";
 }
 async function load(){const r=await fetch('/api/data'+window.location.search);const d=await r.json();document.getElementById('balance').textContent=fmt(d.balance,2);document.getElementById('pnl').innerHTML=`<span class="${cls(d.summary.pnl_total)}">${fmt(d.summary.pnl_total,4)}</span>`;document.getElementById('winrate').textContent=fmt(d.summary.winrate,1)+'%';document.getElementById('trades').textContent=d.summary.trades;document.getElementById('position').textContent=d.open_position?JSON.stringify(d.open_position,null,2):'Aucune position ouverte';renderToggles(d.config);renderLiveTradeV48(d.live_trade);
