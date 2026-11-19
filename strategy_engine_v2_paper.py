@@ -18,6 +18,15 @@ def _ms(value):
     try: return int(value)
     except (TypeError, ValueError): return None
 
+def _paper_candidate_allowed(candidate):
+    """PAPER-only entry guard: avoid buying a liquidity sweep in a falling regime."""
+    if str(candidate.get("side", "")).upper() != "LONG":
+        return False
+    return not (
+        str(candidate.get("strategy_id", "")) == "LIQUIDITY_SWEEP_RECLAIM"
+        and str(candidate.get("regime", "")).upper() == "TREND_DOWN"
+    )
+
 def candle_exit(position, candle):
     """Stop-first conservative OHLC execution; returns (reason, reference_price)."""
     side=position.get("side","LONG")
@@ -174,8 +183,17 @@ class V2PaperEngine:
         s["last_evaluated_candle_by_symbol"][symbol]=key; self.save()
         result=evaluator(df,symbol,timeframe=timeframe,source_candle_time=candle_time)
         candidates=result.get("ranked_candidates") or result.get("candidates") or []
-        valid=[c for c in candidates if str(c.get("side","")).upper()=="LONG" and c.get("risk_valid") and _num(c.get("setup_score"))>=self.min_score]
-        if not valid: return {"status":result.get("status","NO_CANDIDATE"),"opened":False}
+        blocked_countertrend_sweep = any(
+            str(c.get("side", "")).upper() == "LONG"
+            and str(c.get("strategy_id", "")) == "LIQUIDITY_SWEEP_RECLAIM"
+            and str(c.get("regime", "")).upper() == "TREND_DOWN"
+            for c in candidates
+        )
+        valid=[c for c in candidates if _paper_candidate_allowed(c) and c.get("risk_valid") and _num(c.get("setup_score"))>=self.min_score]
+        if not valid:
+            if blocked_countertrend_sweep:
+                return {"status":"FILTERED_COUNTERTREND_LONG_SWEEP","opened":False}
+            return {"status":result.get("status","NO_CANDIDATE"),"opened":False}
         chosen=valid[0]; opened=self._open(chosen,candle_time,execution_estimator)
         return {"status":"OPENED" if opened else "ENTRY_REJECTED","opened":opened,
                 "strategy_id":chosen.get("strategy_id"),"symbol":symbol}
