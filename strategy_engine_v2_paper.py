@@ -19,13 +19,12 @@ def _ms(value):
     except (TypeError, ValueError): return None
 
 def _paper_candidate_allowed(candidate):
-    """PAPER-only entry guard: avoid buying a liquidity sweep in a falling regime."""
+    """PAPER-only entry guard: liquidity-sweep longs require a confirmed uptrend."""
     if str(candidate.get("side", "")).upper() != "LONG":
         return False
-    return not (
-        str(candidate.get("strategy_id", "")) == "LIQUIDITY_SWEEP_RECLAIM"
-        and str(candidate.get("regime", "")).upper() == "TREND_DOWN"
-    )
+    if str(candidate.get("strategy_id", "")) == "LIQUIDITY_SWEEP_RECLAIM":
+        return str(candidate.get("regime", "")).upper() == "TREND_UP"
+    return True
 
 def candle_exit(position, candle):
     """Stop-first conservative OHLC execution; returns (reason, reference_price)."""
