@@ -52,9 +52,22 @@ class V2PaperEngineTests(unittest.TestCase):
         self.assertEqual(result["status"],"FILTERED_COUNTERTREND_LONG_SWEEP")
         self.assertEqual(self.engine.snapshot()["open_positions"],0)
 
-    def test_allows_long_liquidity_sweep_outside_downtrend(self):
+    def test_rejects_long_liquidity_sweep_in_mixed_regime(self):
         candidate=self.candidate()
         candidate["regime"]="MIXED"
+        class Frame:
+            empty=False
+        result=self.engine.process_symbol(
+            "SOL",Frame(),1000,100,
+            lambda *args,**kwargs:{"status":"OK","ranked_candidates":[candidate]},
+            self.execution,
+        )
+        self.assertEqual(result["status"],"NO_CANDIDATE")
+        self.assertEqual(self.engine.snapshot()["open_positions"],0)
+
+    def test_allows_long_liquidity_sweep_in_uptrend(self):
+        candidate=self.candidate()
+        candidate["regime"]="TREND_UP"
         class Frame:
             empty=False
         result=self.engine.process_symbol(
