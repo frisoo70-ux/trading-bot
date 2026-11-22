@@ -62,7 +62,7 @@ class V2PaperEngineTests(unittest.TestCase):
             lambda *args,**kwargs:{"status":"OK","ranked_candidates":[candidate]},
             self.execution,
         )
-        self.assertEqual(result["status"],"NO_CANDIDATE")
+        self.assertEqual(result["status"],"FILTERED_PAPER_ENTRY_GUARD")
         self.assertEqual(self.engine.snapshot()["open_positions"],0)
 
     def test_allows_long_liquidity_sweep_in_uptrend(self):
