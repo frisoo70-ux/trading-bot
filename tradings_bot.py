@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from strategy_engine_v2 import evaluate_strategy_candidates
 from strategy_engine_v2_paper import V2PaperEngine
+from paper_state_guard import should_restore_paper_state, should_upload_paper_state
 
 # ============================================================
 # BOT MULTI-COINS V3
@@ -3204,6 +3205,11 @@ def github_restore_data():
                 if remote is None:
                     continue
                 local_path = DATA_DIR / filename
+                if filename == "paper_trades.json":
+                    local_content = local_path.read_bytes() if local_path.exists() else None
+                    if not should_restore_paper_state(local_content, remote.get("content")):
+                        print("[GITHUB RESTORE] paper_trades.json ignoré : l'historique local est plus complet ou la sauvegarde distante est invalide.")
+                        continue
                 local_path.write_bytes(remote["content"])
                 downloaded += 1
 
@@ -3230,10 +3236,16 @@ def _github_upload_file(filename):
     if not local_path.exists():
         return False
 
+    local_content = local_path.read_bytes()
     remote = _github_get_remote_file(filename)
+    if filename == "paper_trades.json":
+        remote_content = remote.get("content") if remote else None
+        if not should_upload_paper_state(local_content, remote_content):
+            print("[GITHUB BACKUP] paper_trades.json ignoré : fichier local invalide ou historique distant plus complet.")
+            return False
     payload = {
         "message": f"Bot data backup: {filename}",
-        "content": base64.b64encode(local_path.read_bytes()).decode("ascii"),
+        "content": base64.b64encode(local_content).decode("ascii"),
         "branch": GITHUB_BACKUP_BRANCH,
     }
     if remote and remote.get("sha"):
