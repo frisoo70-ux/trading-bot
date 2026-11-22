@@ -949,6 +949,14 @@ def paper_position_market_snapshot(df, current_price, candle_time, btc_context=N
 
 
 def paper_open_position(candidate, btc_context=None):
+    # Garde PAPER uniquement : MODE A et MODE C sont temporairement en pause
+    # après des performances nettes négatives sur l'historique PAPER.
+    candidate_details = candidate.get("details") or {}
+    candidate_mode = candidate_details.get("signal_mode") or "UNKNOWN"
+    if candidate_mode in {"MODE_A_CLASSIQUE", "MODE_C_CAPITULATION"}:
+        print(f"[PAPER ENTRY GUARD] {candidate_mode} temporairement bloqué après analyse des performances.")
+        return False
+
     # Appels réseau hors verrou pour ne pas bloquer les lectures/écritures d'état PAPER.
     market_microstructure = paper_derivatives_snapshot(candidate["symbol"])
     with PAPER_LOCK:
