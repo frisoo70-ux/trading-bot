@@ -192,6 +192,8 @@ class V2PaperEngine:
         if not valid:
             if blocked_countertrend_sweep:
                 return {"status":"FILTERED_COUNTERTREND_LONG_SWEEP","opened":False}
+            if candidates:
+                return {"status":"FILTERED_PAPER_ENTRY_GUARD","opened":False}
             return {"status":result.get("status","NO_CANDIDATE"),"opened":False}
         chosen=valid[0]; opened=self._open(chosen,candle_time,execution_estimator)
         return {"status":"OPENED" if opened else "ENTRY_REJECTED","opened":opened,
