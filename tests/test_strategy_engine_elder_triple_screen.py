@@ -60,6 +60,24 @@ class ElderTripleScreenTests(unittest.TestCase):
         self.assertEqual(result["candidate"]["side"], "LONG")
         self.assertEqual(result["candidate"]["strategy_id"], "ELDER_TRIPLE_SCREEN_LONG")
 
+    def test_each_timeframe_is_required(self):
+        daily = make_daily()
+        hourly = make_hourly()
+        minute = make_minute()
+
+        self.assertEqual(
+            evaluate_triple_screen(None, hourly, minute, "SOL")["status"],
+            "INSUFFICIENT_DATA",
+        )
+        self.assertEqual(
+            evaluate_triple_screen(daily, None, minute, "SOL")["status"],
+            "INSUFFICIENT_DATA",
+        )
+        self.assertEqual(
+            evaluate_triple_screen(daily, hourly, None, "SOL")["status"],
+            "INSUFFICIENT_DATA",
+        )
+
     def test_missing_volume_is_rejected(self):
         df = make_hourly().drop(columns=["volume"])
         self.assertFalse(hourly_force_index_screen(df)["ready"])
