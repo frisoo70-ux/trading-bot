@@ -1,0 +1,31 @@
+name: Deploy Bot-Hosting
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync-deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Synchronize Bot-Hosting deployment
+        env:
+          BOT_HOSTING_API_KEY: ${{ secrets.BOT_HOSTING_API_KEY }}
+          BOT_HOSTING_DEPLOYMENT_ID: "64357697-df67-4f2c-a3ec-c11faafd9db4"
+        run: |
+          set -eu
+          if [ -z "$BOT_HOSTING_API_KEY" ]; then
+            echo "Missing GitHub Actions secret: BOT_HOSTING_API_KEY" >&2
+            exit 1
+          fi
+          curl --silent --show-error --fail-with-body \
+            --request POST \
+            "https://bot-hosting.net/api/v1/deployments/$BOT_HOSTING_DEPLOYMENT_ID/sync" \
+            --header "Authorization: Bearer $BOT_HOSTING_API_KEY" \
+            --header "Content-Type: application/json" \
+            --data '{"repo":"frisoo70-ux/trading-bot","branch":"main"}'
