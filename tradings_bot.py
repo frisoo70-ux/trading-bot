@@ -712,7 +712,7 @@ def paper_snapshot(current_price=None):
         "open_positions":len(position_views),"max_positions":PAPER_MAX_POSITIONS,
         "position_notional":PAPER_TRADE_SIZE_USD,"leverage":PAPER_LEVERAGE,
         "open_notional":round(open_notional,2),
-        "recent_trades":list(reversed(trades[-30:])),
+        "recent_trades":list(reversed(trades[-100:])),
         "updated_at":PAPER_STATE.get("updated_at"),"fee_rate":paper_get_fee_config().get("rate", PAPER_FEE_RATE),
         "fee_source":paper_get_fee_config().get("source"),"fee_updated_at":paper_get_fee_config().get("updated_at"),
         "slippage_source":"L2_ORDERBOOK_VWAP","slippage_fallback_rate":PAPER_SLIPPAGE_RATE,"funding_simulated":False}
