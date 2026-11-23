@@ -1267,9 +1267,21 @@ def paper_process_cycle():
             except Exception as v2_error:
                 print(f"[V2 PAPER] Cycle error {v2_symbol}:", str(v2_error)[:180])
             try:
-                elder_df, elder_ct, elder_price = prepare_df_for_symbol(v2_symbol)
-                if elder_df is not None and not elder_df.empty:
-                    ELDER_PAPER_ENGINE.process_symbol(v2_symbol, elder_df, elder_ct, elder_price, paper_estimate_execution, timeframe=get_active_timeframe())
+                elder_daily, _, _ = get_candles_for_interval(v2_symbol, "1d")
+                elder_hourly, _, _ = get_candles_for_interval(v2_symbol, "1h")
+                elder_minute, elder_ct, elder_price = get_candles_for_interval(v2_symbol, "1m")
+                if elder_daily is not None and elder_hourly is not None and elder_minute is not None:
+                    ELDER_PAPER_ENGINE.process_symbol(
+                        symbol=v2_symbol,
+                        daily_df=elder_daily,
+                        hourly_df=elder_hourly,
+                        minute_df=elder_minute,
+                        candle_time=elder_ct,
+                        current_price=elder_price,
+                        execution_estimator=paper_estimate_execution,
+                    )
+                else:
+                    print(f"[ELDER PAPER] {v2_symbol}: données multi-timeframe insuffisantes")
             except Exception as elder_error:
                 print(f"[ELDER PAPER] Cycle error {v2_symbol}:", str(elder_error)[:180])
 
@@ -4446,6 +4458,48 @@ def get_candles(symbol):
     except Exception as e:
         print(f"[ERREUR] Candles {symbol}:", e)
         return pd.DataFrame(), None, None
+
+
+def get_candles_for_interval(symbol, interval):
+    """Fetch CLOSED candles for a fixed Elder timeframe, independent of LIVE config."""
+    interval_seconds = {"1m": 60, "1h": 3600, "1d": 86400}
+    cache_ttl = {"1m": 15, "1h": 300, "1d": 1800}
+    if interval not in interval_seconds:
+        raise ValueError(f"Unsupported Elder timeframe: {interval}")
+    try:
+        now = time.time()
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": interval,
+                "startTime": int((now - 220 * interval_seconds[interval]) * 1000),
+                "endTime": int(now * 1000),
+            },
+        }
+        data = info_post(
+            payload,
+            cache_key=f"elder_candles:{symbol}:{interval}",
+            cache_ttl=cache_ttl[interval],
+            max_retries=2,
+        )
+        if not isinstance(data, list) or len(data) < 60:
+            return None, None, None
+        rows = [{
+            "time": int(c["t"]), "open": float(c["o"]),
+            "high": float(c["h"]), "low": float(c["l"]),
+            "close": float(c["c"]), "volume": float(c["v"]),
+        } for c in data]
+        frame = pd.DataFrame(rows).drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        if len(frame) < 60:
+            return None, None, None
+        confirmed = frame.iloc[:-1].copy()
+        if confirmed.empty:
+            return None, None, None
+        return confirmed, int(confirmed.iloc[-1]["time"]), float(frame.iloc[-1]["close"])
+    except Exception as exc:
+        print(f"[ELDER PAPER] Candles {interval} {symbol}:", str(exc)[:160])
+        return None, None, None
 
 
 def add_indicators(df):
