@@ -19,12 +19,16 @@ def _ms(value):
     except (TypeError, ValueError): return None
 
 def _paper_candidate_allowed(candidate):
-    """PAPER-only entry guard: liquidity-sweep longs require a confirmed uptrend."""
+    """PAPER-only allowlist: pause unproven strategy families with negative net expectancy."""
     if str(candidate.get("side", "")).upper() != "LONG":
         return False
-    if str(candidate.get("strategy_id", "")) == "LIQUIDITY_SWEEP_RECLAIM":
-        return str(candidate.get("regime", "")).upper() == "TREND_UP"
-    return True
+    # The 29 recorded liquidity-sweep trades lost 22.48 USDC with a 3.4% win
+    # rate. Keep this family disabled until a separate out-of-sample test
+    # demonstrates positive expectancy after fees and slippage.
+    return str(candidate.get("strategy_id", "")) in {
+        "TREND_BREAKOUT_RETEST",
+        "EMA_PULLBACK",
+    }
 
 def candle_exit(position, candle):
     """Stop-first conservative OHLC execution; returns (reason, reference_price)."""
