@@ -6,7 +6,7 @@ from strategy_engine_elder_triple_screen import (
 
 
 def make_daily(n=80):
-    close = [100 + i * 0.8 for i in range(n)]
+    close = [100 + i * 0.1 + i * i * 0.003 for i in range(n)]
     return pd.DataFrame({
         "time": [i * 86400000 for i in range(n)],
         "open": [x - 0.2 for x in close], "high": [x + 1 for x in close],
@@ -16,8 +16,8 @@ def make_daily(n=80):
 
 def make_hourly(n=80):
     close = [100 + i * 0.2 for i in range(n)]
-    # Latest bars create a negative but rising Force Index EMA(2).
-    close[-3:] = [close[-4] - 2, close[-4] - 1, close[-4] - 0.5]
+    base = close[-4]
+    close[-3:] = [base - 2.0, base - 2.5, base - 2.4]
     return pd.DataFrame({
         "time": [i * 3600000 for i in range(n)],
         "open": close, "high": [x + 1 for x in close],
@@ -27,7 +27,8 @@ def make_hourly(n=80):
 
 
 def make_minute(n=10):
-    close = [100 + i * 0.05 for i in range(n)]
+    start = make_hourly().iloc[-1]["close"]
+    close = [start + i * 0.02 for i in range(n)]
     return pd.DataFrame({
         "time": [i * 60000 for i in range(n)],
         "open": close, "high": [x + 0.05 for x in close],
@@ -41,15 +42,23 @@ class ElderTripleScreenTests(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertTrue(result["bullish"])
 
-    def test_hourly_screen_rejects_non_pullback(self):
-        df = make_hourly()
-        df["close"] = [100 + i for i in range(len(df))]
-        result = hourly_force_index_screen(df)
-        self.assertFalse(result["pullback"])
+    def test_hourly_force_index_negative_and_rising(self):
+        result = hourly_force_index_screen(make_hourly())
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["pullback"])
 
-    def test_three_timeframes_are_required(self):
+    def test_non_pullback_is_rejected(self):
+        df = make_hourly()
+        close = [100 + i for i in range(len(df))]
+        df["open"] = close
+        df["close"] = close
+        self.assertFalse(hourly_force_index_screen(df)["pullback"])
+
+    def test_full_three_screen_setup(self):
         result = evaluate_triple_screen(make_daily(), make_hourly(), make_minute(), "SOL")
-        self.assertIn(result["status"], {"SETUP_READY", "HOURLY_PULLBACK_NOT_READY", "INVALID_STOP", "STOP_TOO_WIDE"})
+        self.assertEqual(result["status"], "SETUP_READY")
+        self.assertEqual(result["candidate"]["side"], "LONG")
+        self.assertEqual(result["candidate"]["strategy_id"], "ELDER_TRIPLE_SCREEN_LONG")
 
     def test_missing_volume_is_rejected(self):
         df = make_hourly().drop(columns=["volume"])
