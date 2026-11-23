@@ -18,7 +18,7 @@ class ElderPaperEngine(V2PaperEngine):
         result=evaluate_three_candle_setup(df,symbol,timeframe=timeframe,source_candle_time=candle_time)
         c=result.get("candidate")
         if not c: return {"status":result.get("status","NO_SETUP"),"opened":False}
-        c.update({"strategy_id":"ELDER_3_CANDLE_PAPER","strategy_version":ENGINE_VERSION,
+        c.update({"symbol":symbol,"strategy_id":"ELDER_3_CANDLE_PAPER","strategy_version":ENGINE_VERSION,
                   "setup_score":100.0,"risk_reward_gross":c.get("risk_reward"),
                   "risk_valid":True})
         opened=self._open(c,candle_time,execution_estimator)
