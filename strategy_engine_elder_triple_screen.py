@@ -162,7 +162,7 @@ class ElderTripleScreenPaperEngine(V2PaperEngine):
             return False
         execution = self._estimate(execution_fn, symbol, "BUY", self.trade_size, reference)
         fill = execution["fill"]
-        if not stop < fill:
+        if not stop < fill or (fill - stop) / fill * 100.0 > MAX_STOP_DISTANCE_PCT:
             return False
         qty = self.trade_size / fill
         fee = abs(qty * fill) * execution["fee"]
@@ -218,7 +218,11 @@ class ElderTripleScreenPaperEngine(V2PaperEngine):
         symbol = str(symbol)
         position = next((p for p in list(state["positions"]) if p.get("symbol") == symbol), None)
         if position:
-            self._manage_elder(position, minute_df, current_price, execution_estimator, daily_df, candle_time)
+            if position.get("strategy_id") == "ELDER_3_CANDLE_PAPER":
+                # Preserve the old prototype position's original stop/target semantics.
+                self._manage(position, minute_df, current_price, execution_estimator)
+            else:
+                self._manage_elder(position, minute_df, current_price, execution_estimator, daily_df, candle_time)
             return {"status": "POSITION_MANAGED"}
 
         minute_time = _ms(candle_time)
