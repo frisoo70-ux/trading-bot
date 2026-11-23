@@ -9,6 +9,7 @@ All frames must contain CLOSED OHLCV candles. No exchange orders are sent.
 from __future__ import annotations
 
 import math
+import pandas as pd
 from strategy_engine_v2_paper import V2PaperEngine, _num, _ms
 
 ENGINE_VERSION = "elder-triple-screen-crypto-1.0"
@@ -62,7 +63,7 @@ def hourly_force_index_screen(hourly_df):
     pullback = current < 0 and current > previous
     tr = hourly_df["high"].astype(float) - hourly_df["low"].astype(float)
     prev_close = close.shift(1)
-    tr = __import__("pandas").concat(
+    tr = pd.concat(
         [tr, (hourly_df["high"].astype(float) - prev_close).abs(),
          (hourly_df["low"].astype(float) - prev_close).abs()], axis=1
     ).max(axis=1)
@@ -137,6 +138,8 @@ class ElderTripleScreenPaperEngine(V2PaperEngine):
         state = super().load()
         if not isinstance(state.get("pending_entries"), dict):
             state["pending_entries"] = {}
+        if not isinstance(state.get("last_screen_by_symbol"), dict):
+            state["last_screen_by_symbol"] = {}
         return state
 
     def _open_elder(self, candidate, candle_time, execution_fn):
@@ -228,6 +231,13 @@ class ElderTripleScreenPaperEngine(V2PaperEngine):
         self.save()
 
         setup = evaluate_triple_screen(daily_df, hourly_df, minute_df, symbol)
+        state["last_screen_by_symbol"][symbol] = {
+            "status": setup.get("status"),
+            "daily": setup.get("daily"),
+            "hourly": setup.get("hourly"),
+            "minute_candle_time": minute_time,
+            "updated_at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
         if setup["status"] != "SETUP_READY":
             state["pending_entries"].pop(symbol, None)
             self.save()
@@ -277,7 +287,9 @@ class ElderTripleScreenPaperEngine(V2PaperEngine):
     def snapshot(self, default_fee_rate=0.00045):
         result = super().snapshot(default_fee_rate)
         result["engine_version"] = ENGINE_VERSION
-        result["pending_entries"] = dict(self.load().get("pending_entries", {}))
+        state = self.load()
+        result["pending_entries"] = dict(state.get("pending_entries", {}))
+        result["last_screen_by_symbol"] = dict(state.get("last_screen_by_symbol", {}))
         result["strategy"] = "Triple Screen 1D / 1H / 1m — LONG only"
         result["order_submission_enabled"] = False
         return result
