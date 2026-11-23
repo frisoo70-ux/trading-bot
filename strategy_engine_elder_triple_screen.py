@@ -270,7 +270,7 @@ class ElderTripleScreenPaperEngine(V2PaperEngine):
         # Elder's trailing entry stop only follows price down; it never moves higher.
         next_trigger = min(old_trigger, bar_high * (1.0 + ENTRY_BUFFER_BPS / 10000.0))
         pending["trigger_price"] = next_trigger
-        pending["stop"] = min(stop, _num(signal["invalidation_price"], stop))
+        pending["stop"] = max(stop, _num(signal["invalidation_price"], stop))
         self.save()
         return {"status": "BUY_STOP_WAITING", "opened": False, "trigger_price": next_trigger}
 
