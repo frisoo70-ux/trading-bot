@@ -65,7 +65,7 @@ class V2PaperEngineTests(unittest.TestCase):
         self.assertEqual(result["status"],"FILTERED_PAPER_ENTRY_GUARD")
         self.assertEqual(self.engine.snapshot()["open_positions"],0)
 
-    def test_allows_long_liquidity_sweep_in_uptrend(self):
+    def test_rejects_long_liquidity_sweep_even_in_uptrend(self):
         candidate=self.candidate()
         candidate["regime"]="TREND_UP"
         class Frame:
@@ -75,8 +75,22 @@ class V2PaperEngineTests(unittest.TestCase):
             lambda *args,**kwargs:{"status":"OK","ranked_candidates":[candidate]},
             self.execution,
         )
-        self.assertEqual(result["status"],"OPENED")
-        self.assertEqual(self.engine.snapshot()["open_positions"],1)
+        self.assertEqual(result["status"],"FILTERED_PAPER_ENTRY_GUARD")
+        self.assertEqual(self.engine.snapshot()["open_positions"],0)
+
+    def test_rejects_unvalidated_strategy_family(self):
+        candidate=self.candidate()
+        candidate["strategy_id"]="UNVALIDATED_STRATEGY"
+        candidate["regime"]="TREND_UP"
+        class Frame:
+            empty=False
+        result=self.engine.process_symbol(
+            "SOL",Frame(),1000,100,
+            lambda *args,**kwargs:{"status":"OK","ranked_candidates":[candidate]},
+            self.execution,
+        )
+        self.assertEqual(result["status"],"FILTERED_PAPER_ENTRY_GUARD")
+        self.assertEqual(self.engine.snapshot()["open_positions"],0)
 
     def test_independent_initial_balance(self):
         self.assertEqual(self.engine.snapshot()["initial_balance"],1000)
