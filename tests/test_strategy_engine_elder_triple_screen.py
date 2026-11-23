@@ -6,7 +6,7 @@ from strategy_engine_elder_triple_screen import (
 
 
 def make_daily(n=80):
-    close = [100 + i * 0.1 + i * i * 0.003 for i in range(n)]
+    close = [100 + i * 0.1 + i * i * 0.01 for i in range(n)]
     return pd.DataFrame({
         "time": [i * 86400000 for i in range(n)],
         "open": [x - 0.2 for x in close], "high": [x + 1 for x in close],
