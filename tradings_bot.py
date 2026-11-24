@@ -7,6 +7,7 @@ import os
 import csv
 import shutil
 import base64
+import hmac
 from pathlib import Path
 import eth_account
 import threading
@@ -143,6 +144,8 @@ GITHUB_SYNC_STATE = {
 
 
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+# Secret distinct du dashboard : accès strictement en lecture aux diagnostics Elder PAPER.
+PAPER_ELDER_LOG_TOKEN = os.environ.get("PAPER_ELDER_LOG_TOKEN", "").strip()
 DASHBOARD_PORT = int(os.environ.get("SERVER_PORT", os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000"))))
 
 TIMEFRAME_OPTIONS = ["1m", "3m", "5m", "15m"]
@@ -3055,10 +3058,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(obj, ensure_ascii=False, default=str), "application/json; charset=utf-8")
 
     def do_GET(self):
+        parsed = urlparse(self.path)
+
+        # Endpoint indépendant, lecture seule, protégé par un secret dédié.
+        # Le token n'est accepté que dans l'en-tête, jamais dans l'URL ni les logs.
+        if parsed.path == "/api/paper_elder/logs":
+            supplied = str(self.headers.get("X-Paper-Elder-Log-Token", "") or "")
+            if not PAPER_ELDER_LOG_TOKEN:
+                return self._json({"error": "log_access_not_configured"}, 503)
+            if not supplied or not hmac.compare_digest(supplied, PAPER_ELDER_LOG_TOKEN):
+                return self._json({"error": "unauthorized"}, 401)
+            snap = ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE)
+            diagnostics = snap.get("last_video_diagnostics", {})
+            return self._json({
+                "ok": True,
+                "read_only": True,
+                "engine_version": snap.get("engine_version"),
+                "strategy": snap.get("strategy"),
+                "updated_at": snap.get("updated_at"),
+                "diagnostics": diagnostics,
+                "positions": snap.get("positions", []),
+                "recent_trades": snap.get("recent_trades", [])[-20:],
+                "portfolio": {
+                    key: snap.get(key) for key in (
+                        "initial_balance", "equity", "realized_pnl", "unrealized_pnl",
+                        "closed_trades", "open_positions", "winrate", "profit_factor",
+                        "max_drawdown_pct"
+                    ) if key in snap
+                },
+            })
+
         if not dashboard_auth_ok(self):
             return self._json({"error": "unauthorized"}, 401)
-
-        parsed = urlparse(self.path)
 
         if parsed.path == "/":
             return self._send(200, DASHBOARD_HTML)
