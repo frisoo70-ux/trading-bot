@@ -3068,23 +3068,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "log_access_not_configured"}, 503)
             if not supplied or not hmac.compare_digest(supplied, PAPER_ELDER_LOG_TOKEN):
                 return self._json({"error": "unauthorized"}, 401)
-            snap = ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE)
-            diagnostics = snap.get("last_video_diagnostics", {})
+            # Trois moteurs PAPER indépendants : ne jamais agréger leurs capitaux/PnL.
+            legacy = paper_snapshot()
+            v2 = V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE)
+            elder = ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE)
+
+            def paper_engine_view(snapshot, diagnostic_keys=()):
+                return {
+                    "engine_version": snapshot.get("engine_version"),
+                    "mode": snapshot.get("mode", "PAPER"),
+                    "safe": snapshot.get("safe", True),
+                    "order_submission_enabled": False,
+                    "updated_at": snapshot.get("updated_at"),
+                    "portfolio": {
+                        key: snapshot.get(key) for key in (
+                            "initial_balance", "balance", "equity", "realized_pnl",
+                            "unrealized_pnl", "trades", "closed_trades", "wins", "losses",
+                            "winrate", "profit_factor", "max_drawdown_pct", "open_positions",
+                            "max_positions", "open_notional", "max_gross_exposure", "leverage"
+                        ) if key in snapshot
+                    },
+                    "positions": snapshot.get("positions", []),
+                    "recent_trades": snapshot.get("recent_trades", [])[:30],
+                    "diagnostics": {
+                        key: snapshot.get(key) for key in diagnostic_keys if key in snapshot
+                    },
+                }
+
+            # Redaction défensive avant d'exposer les logs runtime.
+            import re
+            def safe_log(line):
+                value = str(line)
+                value = re.sub(r"(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]+", r"\\1[REDACTED]", value)
+                value = re.sub(r"(?i)((?:api[_ -]?key|secret|private[_ -]?key|token)\\s*[:=]\\s*)[^\\s,;]+", r"\\1[REDACTED]", value)
+                value = re.sub(r"0x[a-fA-F0-9]{64}", "[REDACTED_KEY]", value)
+                return value[:1000]
+
+            v2_state = V2_PAPER_ENGINE.load()
+            elder_state = ELDER_PAPER_ENGINE.load()
             return self._json({
                 "ok": True,
                 "read_only": True,
-                "engine_version": snap.get("engine_version"),
-                "strategy": snap.get("strategy"),
-                "updated_at": snap.get("updated_at"),
-                "diagnostics": diagnostics,
-                "positions": snap.get("positions", []),
-                "recent_trades": snap.get("recent_trades", [])[-20:],
-                "portfolio": {
-                    key: snap.get(key) for key in (
-                        "initial_balance", "equity", "realized_pnl", "unrealized_pnl",
-                        "closed_trades", "open_positions", "winrate", "profit_factor",
-                        "max_drawdown_pct"
-                    ) if key in snap
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "engines": {
+                    "legacy_paper": paper_engine_view(legacy),
+                    "strategy_v2_paper": paper_engine_view(v2, ("by_strategy",)),
+                    "elder_video_paper": paper_engine_view(elder, ("strategy", "last_video_diagnostics")),
+                },
+                "runtime": {
+                    "recent_logs": [safe_log(line) for line in list(LOG_HISTORY)[-250:]],
+                    "last_evaluated_candles": {
+                        "strategy_v2_paper": v2_state.get("last_evaluated_candle_by_symbol", {}),
+                        "elder_video_paper": elder_state.get("last_evaluated_candle_by_symbol", {}),
+                    },
+                    "github_sync": dict(GITHUB_SYNC_STATE),
                 },
             })
 
