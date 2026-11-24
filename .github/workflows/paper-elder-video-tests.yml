@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - paper/elder-video-strategy
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
