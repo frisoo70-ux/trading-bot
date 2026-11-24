@@ -130,6 +130,9 @@ GITHUB_BACKUP_FILES = [
 
 GITHUB_SYNC_LOCK = threading.Lock()
 PAPER_LIVE_LOGS_LAST_EXPORT_TS = 0.0
+PAPER_LIVE_LOGS_LAST_ATTEMPT_TS = 0.0
+PAPER_LIVE_LOGS_WORKER_RUNNING = False
+PAPER_LIVE_LOGS_WORKER_LOCK = threading.Lock()
 GITHUB_SYNC_STATE = {
     "enabled": GITHUB_BACKUP_ENABLED,
     "restored": False,
@@ -3369,12 +3372,13 @@ def _redact_paper_live_value(value):
 
 def _github_upload_paper_live_logs():
     """Publie un instantané strictement PAPER dans le dépôt privé, au plus une fois/minute."""
-    global PAPER_LIVE_LOGS_LAST_EXPORT_TS
+    global PAPER_LIVE_LOGS_LAST_EXPORT_TS, PAPER_LIVE_LOGS_LAST_ATTEMPT_TS
     if not GITHUB_BACKUP_ENABLED:
         return False
     now = time.time()
-    if now - PAPER_LIVE_LOGS_LAST_EXPORT_TS < 60:
+    if now - PAPER_LIVE_LOGS_LAST_ATTEMPT_TS < 60:
         return False
+    PAPER_LIVE_LOGS_LAST_ATTEMPT_TS = now
 
     try:
         v2_state = V2_PAPER_ENGINE.load()
@@ -3414,6 +3418,37 @@ def _github_upload_paper_live_logs():
         GITHUB_SYNC_STATE["last_live_logs_error"] = str(export_error)[:200]
         print("[GITHUB PAPER LOGS ERROR]", export_error)
         return False
+
+
+def _paper_live_logs_worker(delay_seconds=5):
+    global PAPER_LIVE_LOGS_WORKER_RUNNING
+    try:
+        time.sleep(delay_seconds)
+        with GITHUB_SYNC_LOCK:
+            _github_upload_paper_live_logs()
+    finally:
+        with PAPER_LIVE_LOGS_WORKER_LOCK:
+            PAPER_LIVE_LOGS_WORKER_RUNNING = False
+
+
+def schedule_paper_live_logs_export(delay_seconds=5):
+    """Programme un export PAPER seul, sans réuploader les autres sauvegardes."""
+    global PAPER_LIVE_LOGS_WORKER_RUNNING
+    if not GITHUB_BACKUP_ENABLED:
+        return
+    if time.time() - PAPER_LIVE_LOGS_LAST_ATTEMPT_TS < 60:
+        return
+    with PAPER_LIVE_LOGS_WORKER_LOCK:
+        if PAPER_LIVE_LOGS_WORKER_RUNNING:
+            return
+        PAPER_LIVE_LOGS_WORKER_RUNNING = True
+    thread = threading.Thread(
+        target=_paper_live_logs_worker,
+        args=(delay_seconds,),
+        daemon=True,
+        name="paper-live-logs-export",
+    )
+    thread.start()
 
 
 def _github_upload_file(filename):
@@ -8224,6 +8259,7 @@ def run():
         print("[PAPER] Protection active : aucun ordre Hyperliquid ne sera envoyé.")
 
     load_paper_state()
+    schedule_paper_live_logs_export(delay_seconds=5)
     start_balance = round(get_balance(), 2) if execution_mode == "LIVE" else round(float(PAPER_STATE.get("initial_balance", PAPER_INITIAL_BALANCE)) + float(PAPER_STATE.get("realized_pnl", 0)), 2)
     print("Solde:", start_balance, "USDC")
     print("---")
@@ -8252,6 +8288,7 @@ def run():
             maybe_send_monthly_report()
             if load_bot_config().get("execution_mode", "LIVE") == "PAPER":
                 paper_process_cycle()
+                schedule_paper_live_logs_export(delay_seconds=5)
                 time.sleep(CHECK_INTERVAL)
                 continue
             pos = get_open_position()
