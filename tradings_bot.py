@@ -1267,15 +1267,21 @@ def paper_process_cycle():
             except Exception as v2_error:
                 print(f"[V2 PAPER] Cycle error {v2_symbol}:", str(v2_error)[:180])
             try:
-                elder_daily, _, _ = get_candles_for_interval(v2_symbol, "1d")
-                elder_hourly, _, _ = get_candles_for_interval(v2_symbol, "1h")
-                elder_minute, elder_ct, elder_price = get_candles_for_interval(v2_symbol, "1m")
-                if elder_daily is not None and elder_hourly is not None and elder_minute is not None:
+                elder_frames = {}
+                for interval in ("1d", "4h", "1h", "30m", "15m", "1m"):
+                    frame, frame_ct, frame_price = get_candles_for_interval(v2_symbol, interval)
+                    elder_frames[interval] = frame
+                    if interval == "1m":
+                        elder_ct, elder_price = frame_ct, frame_price
+                if all(elder_frames.get(tf) is not None for tf in ("1d", "4h", "1h", "30m", "15m", "1m")):
                     ELDER_PAPER_ENGINE.process_symbol(
                         symbol=v2_symbol,
-                        daily_df=elder_daily,
-                        hourly_df=elder_hourly,
-                        minute_df=elder_minute,
+                        daily_df=elder_frames["1d"],
+                        four_hour_df=elder_frames["4h"],
+                        hourly_df=elder_frames["1h"],
+                        half_hour_df=elder_frames["30m"],
+                        fifteen_df=elder_frames["15m"],
+                        minute_df=elder_frames["1m"],
                         candle_time=elder_ct,
                         current_price=elder_price,
                         execution_estimator=paper_estimate_execution,
@@ -2454,7 +2460,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="muted" id="v2PaperStrategies" style="margin-top:8px">Statistiques par stratégie : en attente.</div>
     <div class="scroll" style="margin-top:10px"><table id="v2PaperTradesTable"></table></div>
   </div>
-  <div class="card" id="elderPaperPanel" style="margin-top:12px;border-color:#7c3aed;display:none"><h3>🧪 Elder 3 bougies — PAPER indépendant</h3><div class="muted">Simulation isolée · LONG uniquement · aucun ordre réel envoyé.</div><div class="liveGrid" style="margin-top:10px"><div class="liveBox"><div class="liveLabel">Equity</div><div class="liveVal" id="elderEquity">-</div></div><div class="liveBox"><div class="liveLabel">PnL réalisé</div><div class="liveVal" id="elderPnl">-</div></div><div class="liveBox"><div class="liveLabel">Winrate</div><div class="liveVal" id="elderWinrate">-</div></div><div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="elderTrades">-</div></div><div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="elderPF">-</div></div><div class="liveBox"><div class="liveLabel">Drawdown max.</div><div class="liveVal" id="elderDD">-</div></div></div><div class="muted" id="elderPositions" style="margin-top:8px">Aucune position.</div><div class="scroll" style="margin-top:10px"><table id="elderTradesTable"></table></div></div>
+  <div class="card" id="elderPaperPanel" style="margin-top:12px;border-color:#7c3aed;display:none"><h3>🧪 Elder Video Strategy — PAPER indépendant</h3><div class="muted">PDL sweep → biais 4H → setup 1H/30m → cassure 15m → retest Order Block 1m · LONG uniquement · aucun ordre réel envoyé. TP1 1R / TP2 2R : hypothèses expérimentales.</div><div class="liveGrid" style="margin-top:10px"><div class="liveBox"><div class="liveLabel">Equity</div><div class="liveVal" id="elderEquity">-</div></div><div class="liveBox"><div class="liveLabel">PnL réalisé</div><div class="liveVal" id="elderPnl">-</div></div><div class="liveBox"><div class="liveLabel">Winrate</div><div class="liveVal" id="elderWinrate">-</div></div><div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="elderTrades">-</div></div><div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="elderPF">-</div></div><div class="liveBox"><div class="liveLabel">Drawdown max.</div><div class="liveVal" id="elderDD">-</div></div></div><div class="muted" id="elderPositions" style="margin-top:8px">Aucune position.</div><div class="scroll" style="margin-top:10px"><table id="elderTradesTable"></table></div></div>
   <div class="grid two" style="margin-top:12px">
     <div class="card">
       <h3>⚙️ Contrôle du bot</h3>
@@ -4462,8 +4468,8 @@ def get_candles(symbol):
 
 def get_candles_for_interval(symbol, interval):
     """Fetch CLOSED candles for a fixed Elder timeframe, independent of LIVE config."""
-    interval_seconds = {"1m": 60, "1h": 3600, "1d": 86400}
-    cache_ttl = {"1m": 15, "1h": 300, "1d": 1800}
+    interval_seconds = {"1m": 60, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+    cache_ttl = {"1m": 15, "15m": 60, "30m": 120, "1h": 300, "4h": 600, "1d": 1800}
     if interval not in interval_seconds:
         raise ValueError(f"Unsupported Elder timeframe: {interval}")
     try:
