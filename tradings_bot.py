@@ -3100,7 +3100,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             def safe_log(line):
                 value = str(line)
                 value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
-                value = re.sub(r"(?i)((?:api[_ -]?key|secret|private[_ -]?key|token)\s*[:=]\s*)[^\s,;]+", r"\\1[REDACTED]", value)
+                value = re.sub(r"(?i)((?:api[_ -]?key|secret|private[_ -]?key|token)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", value)
                 value = re.sub(r"0x[a-fA-F0-9]{64}", "[REDACTED_KEY]", value)
                 return value[:1000]
 
