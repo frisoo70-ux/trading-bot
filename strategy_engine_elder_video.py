@@ -96,12 +96,29 @@ class ElderVideoPaperEngine(V2PaperEngine):
         s = self.load()
         pos = next((p for p in list(s["positions"]) if p.get("symbol") == symbol), None)
         if pos:
-            # TP1 is a first scale-out checkpoint. V2's conservative accounting
-            # supports a single full close, so TP1 protects at breakeven and TP2
-            # remains the final full-exit target.
+            # Migrate/manage pre-existing Triple Screen positions safely: they
+            # have no TP field, so only their original protective stop applies.
+            if pos.get("strategy_id") != STRATEGY_ID:
+                entry_t = _ms(pos.get("entry_candle_time")) or 0
+                last_t = _ms(pos.get("last_processed_candle_time")) or entry_t
+                rows = minute_df[minute_df["time"].astype("int64") > max(entry_t, last_t)]
+                for _, bar in rows.iterrows():
+                    stop = _num(pos.get("stop"))
+                    op, low = float(bar["open"]), float(bar["low"])
+                    pos["last_processed_candle_time"] = _ms(bar["time"])
+                    if low <= stop:
+                        self._close(pos, op if 0 < op < stop else stop, "ELDER_LEGACY_STOP", execution_estimator, _ms(bar["time"]))
+                        break
+                else:
+                    pos["last_price"] = _num(current_price, pos.get("entry_price"))
+                    self.save()
+                return {"status": "LEGACY_POSITION_MANAGED"}
+            # TP1 is a first protection checkpoint. The existing portfolio
+            # ledger supports full closes only: TP1 moves the stop to breakeven;
+            # TP2 remains the final full-exit target.
             if not pos.get("tp1_reached"):
                 for _, bar in minute_df[minute_df["time"].astype("int64") > (_ms(pos.get("entry_candle_time")) or 0)].iterrows():
-                    if float(bar["high"]) >= _num(pos.get("tp1")):
+                    if float(bar["high"]) >= _num(pos.get("tp1"), float("inf")):
                         pos["tp1_reached"] = True
                         pos["stop"] = max(_num(pos.get("stop")), _num(pos.get("entry_price")))
                         self.save()
