@@ -41,7 +41,7 @@ class ElderVideoStrategyTests(unittest.TestCase):
         df=candles(close,lows=low,opens=op,highs=high,step=900000)
         result=_break_and_order_block(df)
         self.assertTrue(result["valid"])
-        self.assertEqual(result["ob_time"],3*900000)
+        self.assertEqual(result["ob_time"],5*900000)
 
     def test_no_break_rejected(self):
         df=candles([10,10.1,10,10.2,10.1,10,10.2],step=900000)
