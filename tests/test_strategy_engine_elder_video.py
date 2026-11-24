@@ -21,7 +21,7 @@ class ElderVideoStrategyTests(unittest.TestCase):
         self.assertTrue(result["bullish"])
 
     def test_no_pdl_reclaim_blocks_direction(self):
-        daily=candles([100,101,100,99],lows=[98,99,98,96],opens=[99,100,99,98],highs=[102,103,102,100],step=86400000)
+        daily=candles([100,101,100,97],lows=[98,99,98,96],opens=[99,100,99,98],highs=[102,103,102,100],step=86400000)
         four=candles([100+i*.2 for i in range(30)],step=14400000)
         self.assertFalse(_bullish_direction(daily,four)["bullish"])
 
