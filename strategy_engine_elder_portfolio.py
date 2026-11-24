@@ -1,7 +1,7 @@
-"""Compatibility import for the Elder Triple Screen PAPER portfolio."""
-from strategy_engine_elder_triple_screen import ElderTripleScreenPaperEngine
+"""Compatibility import for the video-based Elder PAPER portfolio."""
+from strategy_engine_elder_video import ElderVideoPaperEngine
 
 
-class ElderPaperEngine(ElderTripleScreenPaperEngine):
+class ElderPaperEngine(ElderVideoPaperEngine):
     """Dashboard/backward-compatible engine name."""
     pass
