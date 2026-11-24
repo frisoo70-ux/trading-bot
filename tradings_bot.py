@@ -129,6 +129,7 @@ GITHUB_BACKUP_FILES = [
 ]
 
 GITHUB_SYNC_LOCK = threading.Lock()
+PAPER_LIVE_LOGS_LAST_EXPORT_TS = 0.0
 GITHUB_SYNC_STATE = {
     "enabled": GITHUB_BACKUP_ENABLED,
     "restored": False,
@@ -3346,6 +3347,70 @@ def github_restore_data():
         return False
 
 
+def _redact_paper_live_value(value):
+    """Redaction récursive avant publication des diagnostics PAPER."""
+    import re
+    if isinstance(value, str):
+        value = re.sub(r"(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]+", r"\\1[REDACTED]", value)
+        value = re.sub(r"(?i)((?:api[_ -]?key|secret|private[_ -]?key|token)\\s*[:=]\\s*)[^\\s,;]+", r"\\1[REDACTED]", value)
+        value = re.sub(r"0x[a-fA-F0-9]{64}", "[REDACTED_KEY]", value)
+        return value[:2000]
+    if isinstance(value, dict):
+        return {str(k): _redact_paper_live_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_paper_live_value(v) for v in value]
+    return value
+
+
+def _github_upload_paper_live_logs():
+    """Publie un instantané strictement PAPER dans le dépôt privé, au plus une fois/minute."""
+    global PAPER_LIVE_LOGS_LAST_EXPORT_TS
+    if not GITHUB_BACKUP_ENABLED:
+        return False
+    now = time.time()
+    if now - PAPER_LIVE_LOGS_LAST_EXPORT_TS < 60:
+        return False
+
+    try:
+        v2_state = V2_PAPER_ENGINE.load()
+        elder_state = ELDER_PAPER_ENGINE.load()
+        payload = {
+            "ok": True,
+            "read_only": True,
+            "order_submission_enabled": False,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "engines": {
+                "legacy_paper": paper_snapshot(),
+                "strategy_v2_paper": V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
+                "elder_video_paper": ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
+            },
+            "runtime": {
+                "recent_logs": list(LOG_HISTORY)[-250:],
+                "last_evaluated_candles": {
+                    "strategy_v2_paper": v2_state.get("last_evaluated_candle_by_symbol", {}),
+                    "elder_video_paper": elder_state.get("last_evaluated_candle_by_symbol", {}),
+                },
+                "github_sync": dict(GITHUB_SYNC_STATE),
+            },
+        }
+        safe_payload = _redact_paper_live_value(payload)
+        local_path = DATA_DIR / "paper_live_logs.json"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = local_path.with_suffix(".json.tmp")
+        temp_path.write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        temp_path.replace(local_path)
+
+        if _github_upload_file("paper_live_logs.json"):
+            PAPER_LIVE_LOGS_LAST_EXPORT_TS = now
+            GITHUB_SYNC_STATE["last_live_logs_export"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return True
+        return False
+    except Exception as export_error:
+        GITHUB_SYNC_STATE["last_live_logs_error"] = str(export_error)[:200]
+        print("[GITHUB PAPER LOGS ERROR]", export_error)
+        return False
+
+
 def _github_upload_file(filename):
     local_path = DATA_DIR / filename
     if not local_path.exists():
@@ -3391,6 +3456,12 @@ def github_backup_now():
                 except Exception as file_error:
                     print("[GITHUB BACKUP FILE ERROR]", filename, file_error)
                     GITHUB_SYNC_STATE["last_error"] = f"{filename}: {str(file_error)[:180]}"
+
+            try:
+                if _github_upload_paper_live_logs():
+                    uploaded += 1
+            except Exception as live_logs_error:
+                GITHUB_SYNC_STATE["last_live_logs_error"] = str(live_logs_error)[:200]
 
             GITHUB_SYNC_STATE.update({
                 "last_backup": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
