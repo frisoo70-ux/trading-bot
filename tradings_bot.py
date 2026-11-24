@@ -3356,7 +3356,12 @@ def _redact_paper_live_value(value):
         value = re.sub(r"0x[a-fA-F0-9]{64}", "[REDACTED_KEY]", value)
         return value[:2000]
     if isinstance(value, dict):
-        return {str(k): _redact_paper_live_value(v) for k, v in value.items()}
+        safe = {}
+        sensitive_key = re.compile(r"(?i)(api[_-]?key|secret|private[_-]?key|token|authorization|password|credential)")
+        for key, item in value.items():
+            key_text = str(key)
+            safe[key_text] = "[REDACTED]" if sensitive_key.search(key_text) else _redact_paper_live_value(item)
+        return safe
     if isinstance(value, (list, tuple)):
         return [_redact_paper_live_value(v) for v in value]
     return value
