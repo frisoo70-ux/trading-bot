@@ -43,10 +43,8 @@ class RangeManipulationPaper:
         pos=next((p for p in s["positions"] if p["symbol"]==symbol),None)
         if pos:
             pos["current_price"]=price
-            if price<=pos["stop"]:
-                self.close(pos,pos["stop"],"STOP",execution)
-            elif price>=pos["target"]:
-                self.close(pos,pos["target"],"TARGET",execution)
+            if price<=pos["stop"]: self.close(pos,pos["stop"],"STOP",execution)
+            elif price>=pos["target"]: self.close(pos,pos["target"],"TARGET",execution)
             else:
                 pos["unrealized_pnl"]=(price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-price*pos["qty"]*pos["fee_rate"]
                 self.save()
@@ -54,50 +52,62 @@ class RangeManipulationPaper:
         key=str(ct)
         if s["last_evaluated_candle_by_symbol"].get(symbol)==key:return
         s["last_evaluated_candle_by_symbol"][symbol]=key
-        # Use closed bars, range from 20 bars preceding the manipulation candidate.
         rows=df.tail(26).copy()
         if len(rows)<26:return
         base=rows.iloc[-26:-6]; recent=rows.iloc[-6:-1]; last=rows.iloc[-1]
         hi=n(base.high.max()); lo=n(base.low.min()); width=(hi-lo)/max((hi+lo)/2,1e-12)
-        diag={"symbol":symbol,"range_high":hi,"range_low":lo,"range_pct":width*100,"status":"NO_SETUP","last_candle":key}
-        if width>0.035 or width<0.002: s["diagnostics"][symbol]=diag;self.save();return
-        # Sweep + reclaim; require a recent excursion beyond range and closed back inside.
-        bullish_sweep= n(recent.low.min())<lo and n(last.close)>lo and n(last.close)<hi
-        # VP approximation: bin range into 24 bins, assign candle volume to typical-price bins.
-        typical=(base.high+base.low+base.close)/3
+        diag={"symbol":symbol,"range_high":hi,"range_low":lo,"range_pct":width*100,"status":"WAIT","last_candle":key,"rejection_reasons":[]}
+        # More tolerant range envelope, still reject excessively volatile / trivial ranges.
+        if width>0.05 or width<0.0015:
+            diag["status"]="NO_SETUP";diag["rejection_reasons"]=["RANGE_OUTSIDE_0_15_TO_5_PERCENT"];s["diagnostics"][symbol]=diag;self.save();return
+        lows=recent.low.astype(float); closes=recent.close.astype(float)
+        sweep_idx=[i for i in range(len(recent)) if n(recent.iloc[i].low)<lo and n(recent.iloc[i].close)>lo]
+        # Allow the sweep/reclaim to occur on any of the last five bars; entry confirmation may follow it.
+        sweep=bool(sweep_idx) or (n(last.low)<lo and n(last.close)>lo)
+        sweep_low=min([n(recent.iloc[i].low) for i in sweep_idx]+([n(last.low)] if n(last.low)<lo and n(last.close)>lo else [])) if sweep else n(recent.low.min())
         bins=24; step=(hi-lo)/bins; vp=[0.0]*bins
         for _,row in base.iterrows():
-            ix=max(0,min(bins-1,int(((n(row.high)+n(row.low)+n(row.close))/3-lo)/max(step,1e-12))))
+            typ=(n(row.high)+n(row.low)+n(row.close))/3
+            ix=max(0,min(bins-1,int((typ-lo)/max(step,1e-12))))
             vp[ix]+=n(row.volume)
         level=lo+(vp.index(max(vp))+0.5)*step if step>0 else (hi+lo)/2
-        # Retest and rejection: closes near the volume concentration with candle directional body.
-        retest=abs(n(last.close)-level)<=max(step*1.5,price*0.0015)
-        bullish= bullish_sweep and retest and n(last.close)>n(last.open)
-        diag.update({"volume_level":level,"vp_bin_step":step,"vp_max_bin_volume":max(vp) if vp else 0.0,"low_sweep_reclaim":bullish_sweep,"retest":retest,"retest_distance":abs(n(last.close)-level),"retest_tolerance":max(step*1.5,price*0.0015),"bullish_candle":n(last.close)>n(last.open),"sweep_low":n(recent.low.min()),"confirmation_close":n(last.close),"status":"SETUP" if bullish else "WAIT","rejection_reasons":[]})
-        if not bullish_sweep: diag["rejection_reasons"].append("NO_LOW_SWEEP_OR_RECLAIM")
-        if not retest: diag["rejection_reasons"].append("NO_VOLUME_PROFILE_RETEST")
-        if n(last.close)<=n(last.open): diag["rejection_reasons"].append("NO_BULLISH_CONFIRMATION")
-        s["diagnostics"][symbol]=diag
+        tolerance=max(step*2.5,price*0.003)
+        # Flexible retest: VP zone OR reclaimed range-low zone. A subsequent bullish close,
+        # higher close, or wick rejection can confirm rather than demanding one candle shape.
+        vp_retest=abs(n(last.close)-level)<=tolerance or abs(n(last.low)-level)<=tolerance
+        range_retest=n(last.low)<=lo+tolerance and n(last.close)>lo
+        retest=vp_retest or range_retest
+        bullish_body=n(last.close)>n(last.open)
+        higher_close=n(last.close)>n(recent.iloc[-2].close)
+        rejection_wick=(n(last.close)-n(last.low))/max(n(last.high)-n(last.low),1e-12)>=0.55
+        confirmation=bullish_body or higher_close or rejection_wick
+        bullish=sweep and n(last.close)>lo and retest and confirmation
+        diag.update({"volume_level":level,"vp_bin_step":step,"vp_max_bin_volume":max(vp) if vp else 0.0,
+          "low_sweep_reclaim":sweep,"sweep_low":sweep_low,"retest":retest,"vp_retest":vp_retest,
+          "range_low_retest":range_retest,"retest_distance":abs(n(last.close)-level),"retest_tolerance":tolerance,
+          "bullish_candle":bullish_body,"higher_close":higher_close,"wick_rejection":rejection_wick,
+          "confirmation":confirmation,"confirmation_close":n(last.close)})
+        if not sweep:diag["rejection_reasons"].append("NO_SWEEP_RECLAIM")
+        if not retest:diag["rejection_reasons"].append("NO_VP_OR_RANGE_LOW_RETEST")
+        if not confirmation:diag["rejection_reasons"].append("NO_BULLISH_CONFIRMATION")
+        diag["status"]="SETUP" if bullish else "WAIT";s["diagnostics"][symbol]=diag
         if not bullish:self.save();return
-        side="LONG"; entryref=price
-        manipulation_low=n(recent.low.min())
-        manipulation_high=n(recent.high.max())
-        stop=manipulation_low
-        risk=abs(entryref-stop)
+        entryref=price; manipulation_low=sweep_low; manipulation_high=n(recent.high.max())
+        stop=manipulation_low; risk=entryref-stop
         if risk<=0 or risk/entryref>0.025:
-            diag["status"]="SKIP_RISK";diag["risk_pct"]=risk/entryref*100 if entryref else None;diag["rejection_reasons"]=["RISK_INVALID_OR_OVER_2_5_PERCENT"];self.save();return
-        # Long-only structural liquidity target: prior range high.
-        target=hi
-        reward=abs(target-entryref)
+            diag["status"]="SKIP_RISK";diag["risk_pct"]=risk/entryref*100 if entryref else None;diag["rejection_reasons"]=["INVALID_OR_OVER_2_5_PERCENT_RISK"];self.save();return
+        target=hi; reward=target-entryref
         if reward<=0 or reward/risk<1.0 or target<=entryref:
             diag["status"]="SKIP_LOW_RR";diag["risk_pct"]=risk/entryref*100;diag["target_rr"]=reward/risk if risk else None;diag["rejection_reasons"]=["TARGET_OR_RR_INVALID"];self.save();return
         if len(s["positions"])>=self.max_positions or sum(p["notional"] for p in s["positions"])+self.size>self.max_exposure:
             diag["status"]="SKIP_CAPACITY";diag["rejection_reasons"]=["POSITION_OR_EXPOSURE_LIMIT"];self.save();return
-        if any(p["symbol"]==symbol for p in s["positions"]):self.save();return
         ex=execution(symbol,"BUY",self.size,entryref) or {}
-        fill=n(ex.get("fill_price"),entryref); fee=n(ex.get("fee_rate"),0.00045); qty=self.size/fill
-        p={"symbol":symbol,"side":side,"entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,"entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"manipulation_low":manipulation_low,"manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,"entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None}
-        s["positions"].append(p);diag["status"]="OPEN";diag["side"]=side;self.save()
+        fill=n(ex.get("fill_price"),entryref);fee=n(ex.get("fee_rate"),0.00045);qty=self.size/fill
+        p={"symbol":symbol,"side":"LONG","entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,
+          "entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"manipulation_low":manipulation_low,
+          "manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,
+          "entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None}
+        s["positions"].append(p);diag["status"]="OPEN";diag["side"]="LONG";self.save()
     def close(self,p,reference,reason,execution):
         s=self.load(); ex=execution(p["symbol"],"SELL",p["notional"],reference) or {}
         fill=n(ex.get("fill_price"),reference); fee=n(ex.get("fee_rate"),p["fee_rate"]); direction=1
