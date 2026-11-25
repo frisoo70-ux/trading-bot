@@ -15,6 +15,15 @@ class RangeManipPaperTests(unittest.TestCase):
     def frame(self, price):
         return pd.DataFrame([{"time":i,"open":price,"high":price+1,"low":price-1,"close":price,"volume":10} for i in range(30)])
 
+    def test_diagnostic_records_no_setup_reasons(self):
+        e=self.make_engine()
+        df=self.frame(100)
+        e.process_symbol("BTC",df,100,1,execution)
+        diag=e.load()["diagnostics"].get("BTC")
+        self.assertIsNotNone(diag)
+        self.assertIn("status",diag)
+        self.tmp.cleanup()
+
     def test_long_stop(self):
         e=self.make_engine();s=e.load()
         s["positions"]=[{"symbol":"BTC","side":"LONG","entry_price":100,"qty":1,"notional":100,"entry_fee":0,"fee_rate":0,"stop":95,"target":105,"current_price":100}]
