@@ -43,9 +43,9 @@ class RangeManipulationPaper:
         pos=next((p for p in s["positions"] if p["symbol"]==symbol),None)
         if pos:
             pos["current_price"]=price
-            if price<=pos["stop"]:
+            if (pos["side"]=="LONG" and price<=pos["stop"]) or (pos["side"]=="SHORT" and price>=pos["stop"]):
                 self.close(pos,pos["stop"],"STOP",execution)
-            elif price>=pos["target"]:
+            elif (pos["side"]=="LONG" and price>=pos["target"]) or (pos["side"]=="SHORT" and price<=pos["target"]):
                 self.close(pos,pos["target"],"TARGET",execution)
             else:
                 pos["unrealized_pnl"]=(price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-price*pos["qty"]*pos["fee_rate"]
@@ -79,15 +79,20 @@ class RangeManipulationPaper:
         s["diagnostics"][symbol]=diag
         if not (bullish or bearish):self.save();return
         side="LONG" if bullish else "SHORT"; entryref=price
-        stop=lo if bullish else hi
+        manipulation_low=n(recent.low.min()); manipulation_high=n(recent.high.max())
+        stop=manipulation_low if bullish else manipulation_high
         risk=abs(entryref-stop)
         if risk<=0 or risk/entryref>0.025:self.save();return
-        target=entryref+2*risk if bullish else entryref-2*risk
+        # Structural liquidity target: opposite side of the prior range.
+        target=hi if bullish else lo
+        reward=abs(target-entryref)
+        if reward<=0 or reward/risk<1.0 or (bullish and target<=entryref) or (bearish and target>=entryref):
+            diag["status"]="SKIP_LOW_RR";diag["risk_pct"]=risk/entryref*100;diag["target_rr"]=reward/risk if risk else None;self.save();return
         if len(s["positions"])>=self.max_positions or sum(p["notional"] for p in s["positions"])+self.size>self.max_exposure:self.save();return
         if any(p["symbol"]==symbol for p in s["positions"]):self.save();return
         ex=execution(symbol,"BUY" if bullish else "SELL",self.size,entryref) or {}
         fill=n(ex.get("fill_price"),entryref); fee=n(ex.get("fee_rate"),0.00045); qty=self.size/fill
-        p={"symbol":symbol,"side":side,"entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,"entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"current_price":price,"entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None}
+        p={"symbol":symbol,"side":side,"entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,"entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"manipulation_low":manipulation_low,"manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,"entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None}
         s["positions"].append(p);diag["status"]="OPEN";diag["side"]=side;self.save()
     def close(self,p,reference,reason,execution):
         s=self.load(); ex=execution(p["symbol"],"SELL" if p["side"]=="LONG" else "BUY",p["notional"],reference) or {}
