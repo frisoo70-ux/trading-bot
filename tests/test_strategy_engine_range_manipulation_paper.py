@@ -24,6 +24,27 @@ class RangeManipPaperTests(unittest.TestCase):
         self.assertIn("status",diag)
         self.tmp.cleanup()
 
+    def test_relaxed_sweep_retest_can_open_long(self):
+        e=self.make_engine()
+        rows=[]
+        # Twenty-bar compact base with prior range liquidity above.
+        for i in range(20):
+            rows.append({"time":i,"open":101,"high":103,"low":99,"close":101,"volume":10})
+        # Sweep below range, reclaim and a retest/rejection in subsequent candles.
+        rows.extend([
+            {"time":20,"open":100,"high":101,"low":98,"close":100,"volume":12},
+            {"time":21,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":22,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":23,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":24,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":25,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+        ])
+        df=pd.DataFrame(rows)
+        e.process_symbol("SOL",df,101,25,execution)
+        self.assertEqual(len(e.load()["positions"]),1)
+        self.assertEqual(e.load()["positions"][0]["side"],"LONG")
+        self.tmp.cleanup()
+
     def test_long_stop(self):
         e=self.make_engine();s=e.load()
         s["positions"]=[{"symbol":"BTC","side":"LONG","entry_price":100,"qty":1,"notional":100,"entry_fee":0,"fee_rate":0,"stop":95,"target":105,"current_price":100}]
