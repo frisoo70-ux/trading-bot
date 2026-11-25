@@ -40,7 +40,7 @@ class RangeManipPaperTests(unittest.TestCase):
             {"time":25,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
         ])
         df=pd.DataFrame(rows)
-        e.process_symbol("SOL",df,101,25,execution)
+        e.process_symbol("SOL",df,100,25,execution)
         self.assertEqual(len(e.load()["positions"]),1)
         self.assertEqual(e.load()["positions"][0]["side"],"LONG")
         self.tmp.cleanup()
