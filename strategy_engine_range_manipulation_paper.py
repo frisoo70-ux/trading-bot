@@ -73,20 +73,26 @@ class RangeManipulationPaper:
         # Retest and rejection: closes near the volume concentration with candle directional body.
         retest=abs(n(last.close)-level)<=max(step*1.5,price*0.0015)
         bullish= bullish_sweep and retest and n(last.close)>n(last.open)
-        diag.update({"volume_level":level,"low_sweep_reclaim":bullish_sweep,"retest":retest,"status":"SETUP" if bullish else "WAIT"})
+        diag.update({"volume_level":level,"vp_bin_step":step,"vp_max_bin_volume":max(vp) if vp else 0.0,"low_sweep_reclaim":bullish_sweep,"retest":retest,"retest_distance":abs(n(last.close)-level),"retest_tolerance":max(step*1.5,price*0.0015),"bullish_candle":n(last.close)>n(last.open),"sweep_low":n(recent.low.min()),"confirmation_close":n(last.close),"status":"SETUP" if bullish else "WAIT","rejection_reasons":[]})
+        if not bullish_sweep: diag["rejection_reasons"].append("NO_LOW_SWEEP_OR_RECLAIM")
+        if not retest: diag["rejection_reasons"].append("NO_VOLUME_PROFILE_RETEST")
+        if n(last.close)<=n(last.open): diag["rejection_reasons"].append("NO_BULLISH_CONFIRMATION")
         s["diagnostics"][symbol]=diag
         if not bullish:self.save();return
         side="LONG"; entryref=price
         manipulation_low=n(recent.low.min())
+        manipulation_high=n(recent.high.max())
         stop=manipulation_low
         risk=abs(entryref-stop)
-        if risk<=0 or risk/entryref>0.025:self.save();return
+        if risk<=0 or risk/entryref>0.025:
+            diag["status"]="SKIP_RISK";diag["risk_pct"]=risk/entryref*100 if entryref else None;diag["rejection_reasons"]=["RISK_INVALID_OR_OVER_2_5_PERCENT"];self.save();return
         # Long-only structural liquidity target: prior range high.
         target=hi
         reward=abs(target-entryref)
         if reward<=0 or reward/risk<1.0 or target<=entryref:
-            diag["status"]="SKIP_LOW_RR";diag["risk_pct"]=risk/entryref*100;diag["target_rr"]=reward/risk if risk else None;self.save();return
-        if len(s["positions"])>=self.max_positions or sum(p["notional"] for p in s["positions"])+self.size>self.max_exposure:self.save();return
+            diag["status"]="SKIP_LOW_RR";diag["risk_pct"]=risk/entryref*100;diag["target_rr"]=reward/risk if risk else None;diag["rejection_reasons"]=["TARGET_OR_RR_INVALID"];self.save();return
+        if len(s["positions"])>=self.max_positions or sum(p["notional"] for p in s["positions"])+self.size>self.max_exposure:
+            diag["status"]="SKIP_CAPACITY";diag["rejection_reasons"]=["POSITION_OR_EXPOSURE_LIMIT"];self.save();return
         if any(p["symbol"]==symbol for p in s["positions"]):self.save();return
         ex=execution(symbol,"BUY",self.size,entryref) or {}
         fill=n(ex.get("fill_price"),entryref); fee=n(ex.get("fee_rate"),0.00045); qty=self.size/fill
