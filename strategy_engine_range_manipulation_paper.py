@@ -68,7 +68,7 @@ class RangeManipulationPaper:
         typical=(base.high+base.low+base.close)/3
         bins=24; step=(hi-lo)/bins; vp=[0.0]*bins
         for _,row in base.iterrows():
-            ix=max(0,min(bins-1,int((n(row.high)+n(row.low)+n(row.close))/3-lo/max(step,1e-12))))
+            ix=max(0,min(bins-1,int(((n(row.high)+n(row.low)+n(row.close))/3-lo)/max(step,1e-12))))
             vp[ix]+=n(row.volume)
         level=lo+(vp.index(max(vp))+0.5)*step if step>0 else (hi+lo)/2
         # Retest and rejection: closes near the volume concentration with candle directional body.
