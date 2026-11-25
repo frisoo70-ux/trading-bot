@@ -43,9 +43,9 @@ class RangeManipulationPaper:
         pos=next((p for p in s["positions"] if p["symbol"]==symbol),None)
         if pos:
             pos["current_price"]=price
-            if (pos["side"]=="LONG" and price<=pos["stop"]) or (pos["side"]=="SHORT" and price>=pos["stop"]):
+            if price<=pos["stop"]:
                 self.close(pos,pos["stop"],"STOP",execution)
-            elif (pos["side"]=="LONG" and price>=pos["target"]) or (pos["side"]=="SHORT" and price<=pos["target"]):
+            elif price>=pos["target"]:
                 self.close(pos,pos["target"],"TARGET",execution)
             else:
                 pos["unrealized_pnl"]=(price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-price*pos["qty"]*pos["fee_rate"]
@@ -62,8 +62,7 @@ class RangeManipulationPaper:
         diag={"symbol":symbol,"range_high":hi,"range_low":lo,"range_pct":width*100,"status":"NO_SETUP","last_candle":key}
         if width>0.035 or width<0.002: s["diagnostics"][symbol]=diag;self.save();return
         # Sweep + reclaim; require a recent excursion beyond range and closed back inside.
-        bearish_sweep= n(recent.low.min())<lo and n(last.close)>lo and n(last.close)<hi
-        bullish_sweep= n(recent.high.max())>hi and n(last.close)<hi and n(last.close)>lo
+        bullish_sweep= n(recent.low.min())<lo and n(last.close)>lo and n(last.close)<hi
         # VP approximation: bin range into 24 bins, assign candle volume to typical-price bins.
         typical=(base.high+base.low+base.close)/3
         bins=24; step=(hi-lo)/bins; vp=[0.0]*bins
@@ -73,39 +72,38 @@ class RangeManipulationPaper:
         level=lo+(vp.index(max(vp))+0.5)*step if step>0 else (hi+lo)/2
         # Retest and rejection: closes near the volume concentration with candle directional body.
         retest=abs(n(last.close)-level)<=max(step*1.5,price*0.0015)
-        bullish= bearish_sweep and retest and n(last.close)>n(last.open)
-        bearish= bullish_sweep and retest and n(last.close)<n(last.open)
-        diag.update({"volume_level":level,"bearish_sweep":bearish_sweep,"bullish_sweep":bullish_sweep,"retest":retest,"status":"SETUP" if bullish or bearish else "WAIT"})
+        bullish= bullish_sweep and retest and n(last.close)>n(last.open)
+        diag.update({"volume_level":level,"low_sweep_reclaim":bullish_sweep,"retest":retest,"status":"SETUP" if bullish else "WAIT"})
         s["diagnostics"][symbol]=diag
-        if not (bullish or bearish):self.save();return
-        side="LONG" if bullish else "SHORT"; entryref=price
-        manipulation_low=n(recent.low.min()); manipulation_high=n(recent.high.max())
-        stop=manipulation_low if bullish else manipulation_high
+        if not bullish:self.save();return
+        side="LONG"; entryref=price
+        manipulation_low=n(recent.low.min())
+        stop=manipulation_low
         risk=abs(entryref-stop)
         if risk<=0 or risk/entryref>0.025:self.save();return
-        # Structural liquidity target: opposite side of the prior range.
-        target=hi if bullish else lo
+        # Long-only structural liquidity target: prior range high.
+        target=hi
         reward=abs(target-entryref)
-        if reward<=0 or reward/risk<1.0 or (bullish and target<=entryref) or (bearish and target>=entryref):
+        if reward<=0 or reward/risk<1.0 or target<=entryref:
             diag["status"]="SKIP_LOW_RR";diag["risk_pct"]=risk/entryref*100;diag["target_rr"]=reward/risk if risk else None;self.save();return
         if len(s["positions"])>=self.max_positions or sum(p["notional"] for p in s["positions"])+self.size>self.max_exposure:self.save();return
         if any(p["symbol"]==symbol for p in s["positions"]):self.save();return
-        ex=execution(symbol,"BUY" if bullish else "SELL",self.size,entryref) or {}
+        ex=execution(symbol,"BUY",self.size,entryref) or {}
         fill=n(ex.get("fill_price"),entryref); fee=n(ex.get("fee_rate"),0.00045); qty=self.size/fill
         p={"symbol":symbol,"side":side,"entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,"entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"manipulation_low":manipulation_low,"manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,"entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None}
         s["positions"].append(p);diag["status"]="OPEN";diag["side"]=side;self.save()
     def close(self,p,reference,reason,execution):
-        s=self.load(); ex=execution(p["symbol"],"SELL" if p["side"]=="LONG" else "BUY",p["notional"],reference) or {}
-        fill=n(ex.get("fill_price"),reference); fee=n(ex.get("fee_rate"),p["fee_rate"]); direction=1 if p["side"]=="LONG" else -1
-        gross=direction*(fill-p["entry_price"])*p["qty"]; net=gross-p["entry_fee"]-abs(fill*p["qty"])*fee
+        s=self.load(); ex=execution(p["symbol"],"SELL",p["notional"],reference) or {}
+        fill=n(ex.get("fill_price"),reference); fee=n(ex.get("fee_rate"),p["fee_rate"]); direction=1
+        gross=direction*(fill-p["entry_price"])*p["qty"; net=gross-p["entry_fee"]-abs(fill*p["qty"])*fee
         trade={**p,"exit_price":fill,"exit_fee":abs(fill*p["qty"])*fee,"gross_pnl":gross,"net_pnl":net,"fees":p["entry_fee"]+abs(fill*p["qty"])*fee,"exit_reason":reason,"closed_at":datetime.now().isoformat()}
         s["trades"].append(trade);s["trades"]=s["trades"][-5000:];s["realized_pnl"]=n(s.get("realized_pnl"))+net
         s["positions"]=[x for x in s["positions"] if x["symbol"]!=p["symbol"]];self.save()
     def snapshot(self,default_fee_rate=0.00045):
         s=self.load();tr=s["trades"];pos=[];unreal=0
         for p in s["positions"]:
-            q=dict(p);price=n(q.get("current_price"),q["entry_price"]);d=1 if q.get("side")=="LONG" else -1
-            u=d*(price-q["entry_price"])*q["qty"]-q["entry_fee"]-price*q["qty"]*q["fee_rate"]
+            q=dict(p);price=n(q.get("current_price"),q["entry_price"]);d=1
+            u=d*(price-q["entry_price"])*q["qty"-q["entry_fee"]-price*q["qty"]*q["fee_rate"]
             q["unrealized_pnl"]=u;pos.append(q);unreal+=u
         wins=[t for t in tr if n(t.get("net_pnl"))>0]; losses=[t for t in tr if n(t.get("net_pnl"))<0]
         grosswin=sum(n(t.get("net_pnl")) for t in wins);grossloss=abs(sum(n(t.get("net_pnl")) for t in losses))
