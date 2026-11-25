@@ -95,7 +95,7 @@ class RangeManipulationPaper:
     def close(self,p,reference,reason,execution):
         s=self.load(); ex=execution(p["symbol"],"SELL",p["notional"],reference) or {}
         fill=n(ex.get("fill_price"),reference); fee=n(ex.get("fee_rate"),p["fee_rate"]); direction=1
-        gross=direction*(fill-p["entry_price"])*p["qty"; net=gross-p["entry_fee"]-abs(fill*p["qty"])*fee
+        gross=direction*(fill-p["entry_price"])*p["qty"]; net=gross-p["entry_fee"]-abs(fill*p["qty"])*fee
         trade={**p,"exit_price":fill,"exit_fee":abs(fill*p["qty"])*fee,"gross_pnl":gross,"net_pnl":net,"fees":p["entry_fee"]+abs(fill*p["qty"])*fee,"exit_reason":reason,"closed_at":datetime.now().isoformat()}
         s["trades"].append(trade);s["trades"]=s["trades"][-5000:];s["realized_pnl"]=n(s.get("realized_pnl"))+net
         s["positions"]=[x for x in s["positions"] if x["symbol"]!=p["symbol"]];self.save()
@@ -103,7 +103,7 @@ class RangeManipulationPaper:
         s=self.load();tr=s["trades"];pos=[];unreal=0
         for p in s["positions"]:
             q=dict(p);price=n(q.get("current_price"),q["entry_price"]);d=1
-            u=d*(price-q["entry_price"])*q["qty"-q["entry_fee"]-price*q["qty"]*q["fee_rate"]
+            u=d*(price-q["entry_price"])*q["qty"]-q["entry_fee"]-price*q["qty"]*q["fee_rate"]
             q["unrealized_pnl"]=u;pos.append(q);unreal+=u
         wins=[t for t in tr if n(t.get("net_pnl"))>0]; losses=[t for t in tr if n(t.get("net_pnl"))<0]
         grosswin=sum(n(t.get("net_pnl")) for t in wins);grossloss=abs(sum(n(t.get("net_pnl")) for t in losses))
