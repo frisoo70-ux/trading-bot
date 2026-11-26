@@ -2518,7 +2518,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <h3>📈 Range Manipulation · Volume Profile · PAPER</h3>
     <div class="muted">Graphique 5 minutes de la stratégie · plages candidates/confirmées, POC, sweep, entrée, SL et TP.</div>
     <div style="display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap"><label for="rangeChartSymbol">Token</label><select id="rangeChartSymbol" class="chartSelect" onchange="loadRangeChart()"><option>SOL</option><option>XRP</option><option>kSHIB</option><option>HYPE</option><option>ZEC</option></select><button type="button" onclick="loadRangeChart()">↻ Actualiser</button></div>
-    <div id="rangeChartStatus" class="muted">Chargement…</div><div id="rangeChart" style="height:440px;width:100%;margin-top:8px"></div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0"><label style="display:flex;gap:6px;align-items:center"><input id="rangeHistoryToggle" type="checkbox" onchange="loadRangeChart()"> Afficher un trade historique</label><select id="rangeHistoryTrade" class="chartSelect" onchange="loadRangeChart()" disabled><option value="">Sélectionner un trade</option></select></div><div id="rangeChartStatus" class="muted">Chargement…</div><div id="rangeChart" style="height:440px;width:100%;margin-top:8px"></div>
     <div id="rangeChartLegend" class="muted" style="margin-top:8px">Range · POC · sweep · entrée · SL · TP</div>
   </div>
 
@@ -2843,7 +2843,8 @@ function renderLiveTradeV48(live){
 }
 
 
-let rangeChartInstance=null,rangeCandleSeries=null,rangeChartBusy=false;
+let rangeChartInstance=null,rangeCandleSeries=null,rangeChartBusy=false,rangePriceLines=[];
+function rangeFmtPrice(value,decimals){return value==null||!Number.isFinite(Number(value))?'-':Number(value).toFixed(decimals);}
 async function loadRangeChart(){
  if(rangeChartBusy)return;rangeChartBusy=true;
  try{
@@ -2851,26 +2852,39 @@ async function loadRangeChart(){
   const r=await fetch('/api/range_manip_chart?symbol='+encodeURIComponent(sym)+(window.location.search?('&'+window.location.search.slice(1)):''));
   const d=await r.json();const status=document.getElementById('rangeChartStatus');
   if(!d.ready){status.textContent=d.message||'Bougies en attente du scan';return}
-  status.textContent=d.symbol+' · 5m · '+(d.candles||[]).length+' bougies · données PAPER · '+(d.updated_at||'');
+  const candles=d.candles||[],diag=d.diagnostics||{},positions=d.positions||[],closed=(d.trades||[]).filter(t=>t.symbol===sym);
+  const historyToggle=document.getElementById('rangeHistoryToggle'),historySelect=document.getElementById('rangeHistoryTrade');
+  const showHistory=!!historyToggle?.checked;
+  historySelect.disabled=!showHistory;
+  const previous=historySelect.value;
+  historySelect.innerHTML='<option value="">Sélectionner un trade</option>'+closed.slice().reverse().map((t,i)=>'<option value="'+i+'">'+(t.closed_at||t.entry_time||('Trade '+(i+1)))+' · '+(t.exit_reason||'CLOS')+'</option>').join('');
+  if(previous&&Array.from(historySelect.options).some(o=>o.value===previous))historySelect.value=previous;
+  const selectedHistory=showHistory&&historySelect.value!==''?closed.slice().reverse()[Number(historySelect.value)]:null;
+  status.textContent=d.symbol+' · '+(d.timeframe||'5m')+' · '+candles.length+' bougies PAPER · '+(d.updated_at||'');
   if(!window.LightweightCharts){status.textContent+=' · Bibliothèque graphique indisponible';return}
   const host=document.getElementById('rangeChart');
   if(!rangeChartInstance){rangeChartInstance=LightweightCharts.createChart(host,{height:440,layout:{background:{color:'#0b1220'},textColor:'#cbd5e1'},grid:{vertLines:{color:'#1e293b'},horzLines:{color:'#1e293b'}},rightPriceScale:{borderColor:'#334155'},timeScale:{borderColor:'#334155',timeVisible:true,secondsVisible:false},crosshair:{mode:1},handleScroll:{mouseWheel:true,pressedMouseMove:true},handleScale:{mouseWheel:true,pinch:true}});rangeCandleSeries=rangeChartInstance.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderUpColor:'#22c55e',borderDownColor:'#ef4444',wickUpColor:'#22c55e',wickDownColor:'#ef4444'});}
-  rangeCandleSeries.setData((d.candles||[]).map(b=>({time:Math.floor(Number(b.time)/1000),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close)})));
-  rangeCandleSeries.priceLines&&rangeCandleSeries.priceLines().forEach(x=>rangeCandleSeries.removePriceLine(x));
-  const addLine=(price,title,color,style)=>{if(price!=null&&isFinite(Number(price)))rangeCandleSeries.createPriceLine({price:Number(price),title:title,color:color,lineStyle:style||0,lineWidth:2});};
-  const diag=d.diagnostics||{},trade=(d.positions||[]).find(p=>p.symbol===sym),closed=(d.trades||[]).filter(t=>t.symbol===sym);
+  rangeCandleSeries.setData(candles.map(b=>({time:Math.floor(Number(b.time)/1000),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close)})));
+  rangePriceLines.forEach(line=>{try{rangeCandleSeries.removePriceLine(line)}catch(_){}});rangePriceLines=[];
+  const allPrices=candles.flatMap(b=>[Number(b.open),Number(b.high),Number(b.low),Number(b.close)]).filter(Number.isFinite);
+  const minPositive=Math.min(...allPrices.filter(x=>x>0));const decimals=minPositive<0.001?8:minPositive<0.1?6:minPositive<10?5:3;
+  const addLine=(price,title,color,style)=>{if(price!=null&&Number.isFinite(Number(price)))rangePriceLines.push(rangeCandleSeries.createPriceLine({price:Number(price),title:title+' '+rangeFmtPrice(price,decimals),color:color,lineStyle:style||0,lineWidth:2,axisLabelVisible:true}));};
+  addLine(diag.range_high,'Range High','#22c55e',2);
+  addLine(diag.range_low,'Range Low','#22c55e',2);
   addLine(diag.volume_level,'POC','#fbbf24',2);
-  if(trade){addLine(trade.entry_price,'ENTRÉE','#38bdf8',0);addLine(trade.stop,'SL','#f87171',2);addLine(trade.target,'TP','#34d399',2);}
-  (closed.slice(-20)).forEach(t=>{addLine(t.entry_price,'Entry historique','#60a5fa',2);addLine(t.stop,'SL historique','#fb7185',2);addLine(t.target,'TP historique','#4ade80',2);});
-  const markers=[];if(diag.sweep_low!=null&&diag.last_candle)markers.push({time:Math.floor(Number(diag.last_candle)/1000),position:'belowBar',color:'#f59e0b',shape:'arrowUp',text:'Sweep'});
-  if(trade&&trade.entry_candle_time)markers.push({time:Math.floor(Number(trade.entry_candle_time)/1000),position:'belowBar',color:'#38bdf8',shape:'arrowUp',text:'Entrée'});
-  rangeCandleSeries.setMarkers(markers);
+  const live=positions.find(p=>p.symbol===sym);
+  if(live){addLine(live.entry_price,'Entry actif','#38bdf8',0);addLine(live.stop,'SL actif','#fb7185',2);addLine(live.target,'TP actif','#34d399',2);}
+  if(selectedHistory){addLine(selectedHistory.entry_price,'Entry historique','#60a5fa',0);addLine(selectedHistory.stop,'SL historique','#fb7185',2);addLine(selectedHistory.target,'TP historique','#4ade80',2);}
+  const markers=[];
+  const audit=(diag.entry_audit_candidate||(live&&live.entry_audit)||(selectedHistory&&selectedHistory.entry_audit)||{});
+  const sweepRows=(audit.sweep&&audit.sweep.candidate_sweep_candles)||[];
+  sweepRows.forEach(row=>{if(row.time)markers.push({time:Math.floor(Number(row.time)/1000),position:'belowBar',color:'#f59e0b',shape:'arrowUp',text:'Sweep'});});
+  if(diag.last_candle&&diag.low_sweep_reclaim)markers.push({time:Math.floor(Number(diag.last_candle)/1000),position:'belowBar',color:'#f59e0b',shape:'circle',text:'Reclaim'});
+  if(live&&live.entry_candle_time)markers.push({time:Math.floor(Number(live.entry_candle_time)/1000),position:'belowBar',color:'#38bdf8',shape:'arrowUp',text:'Entrée'});
+  if(selectedHistory&&selectedHistory.entry_candle_time)markers.push({time:Math.floor(Number(selectedHistory.entry_candle_time)/1000),position:'belowBar',color:'#60a5fa',shape:'arrowUp',text:'Trade sélectionné'});
+  rangeCandleSeries.setMarkers(markers.filter(m=>Number.isFinite(m.time)));
   rangeChartInstance.timeScale().fitContent();
-  // Superposition SVG persistante pour matérialiser le range observé par le diagnostic courant.
-  let overlay=host.querySelector('svg.rangeOverlay');if(!overlay){overlay=document.createElementNS('http://www.w3.org/2000/svg','svg');overlay.setAttribute('class','rangeOverlay');overlay.style.cssText='position:absolute;inset:0;pointer-events:none;overflow:visible';host.style.position='relative';host.appendChild(overlay);}
-  const redraw=()=>{overlay.innerHTML='';const width=host.clientWidth,height=host.clientHeight;overlay.setAttribute('width',width);overlay.setAttribute('height',height);overlay.setAttribute('viewBox','0 0 '+width+' '+height);if(diag.range_high==null||diag.range_low==null)return;const y1=rangeCandleSeries.priceToCoordinate(Number(diag.range_high)),y2=rangeCandleSeries.priceToCoordinate(Number(diag.range_low));if(y1==null||y2==null)return;const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');rect.setAttribute('x','5');rect.setAttribute('y',Math.min(y1,y2));rect.setAttribute('width',Math.max(0,width-55));rect.setAttribute('height',Math.max(1,Math.abs(y2-y1)));rect.setAttribute('fill','#22c55e');rect.setAttribute('fill-opacity','.08');rect.setAttribute('stroke','#22c55e');rect.setAttribute('stroke-dasharray',diag.status==='SETUP'||diag.status==='OPEN'?'0':'5 5');overlay.appendChild(rect);};
-  redraw();rangeChartInstance.timeScale().subscribeVisibleTimeRangeChange(redraw);rangeChartInstance.subscribeSizeChange&&rangeChartInstance.subscribeSizeChange(redraw);
-  document.getElementById('rangeChartLegend').textContent='Range '+(diag.status||'')+' · '+(diag.range_low??'-')+' → '+(diag.range_high??'-')+' · POC '+(diag.volume_level??'-')+' · '+(trade?'position ouverte':'aucune position ouverte');
+  document.getElementById('rangeChartLegend').textContent='Range '+(diag.status||'')+' · Bas '+rangeFmtPrice(diag.range_low,decimals)+' · Haut '+rangeFmtPrice(diag.range_high,decimals)+' · POC '+rangeFmtPrice(diag.volume_level,decimals)+' · '+(live?'position active':selectedHistory?'historique sélectionné':'aucune position active')+' · '+(showHistory?'historique ciblé':'historique masqué');
  }catch(e){document.getElementById('rangeChartStatus').textContent='Graphique indisponible : '+e.message}
  finally{rangeChartBusy=false}
 }
