@@ -43,8 +43,8 @@ class RangeManipulationPaper:
         pos=next((p for p in s["positions"] if p["symbol"]==symbol),None)
         if pos:
             pos["current_price"]=price
-            if price<=pos["stop"]: self.close(pos,pos["stop"],"STOP",execution)
-            elif price>=pos["target"]: self.close(pos,pos["target"],"TARGET",execution)
+            if price<=pos["stop"]: self.close(pos,pos["stop"],"STOP",execution,ct)
+            elif price>=pos["target"]: self.close(pos,pos["target"],"TARGET",execution,ct)
             else:
                 pos["unrealized_pnl"]=(price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-price*pos["qty"]*pos["fee_rate"]
                 self.save()
@@ -123,11 +123,11 @@ class RangeManipulationPaper:
           "manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,
           "entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None,"entry_audit":audit}
         s["positions"].append(p);diag["status"]="OPEN";diag["side"]="LONG";self.save()
-    def close(self,p,reference,reason,execution):
+    def close(self,p,reference,reason,execution,exit_candle_time=None):
         s=self.load(); ex=execution(p["symbol"],"SELL",p["notional"],reference) or {}
         fill=n(ex.get("fill_price"),reference); fee=n(ex.get("fee_rate"),p["fee_rate"]); direction=1
         gross=direction*(fill-p["entry_price"])*p["qty"]; net=gross-p["entry_fee"]-abs(fill*p["qty"])*fee
-        trade={**p,"exit_price":fill,"exit_fee":abs(fill*p["qty"])*fee,"gross_pnl":gross,"net_pnl":net,"fees":p["entry_fee"]+abs(fill*p["qty"])*fee,"exit_reason":reason,"closed_at":datetime.now().isoformat()}
+        trade={**p,"exit_price":fill,"exit_fee":abs(fill*p["qty"])*fee,"gross_pnl":gross,"net_pnl":net,"fees":p["entry_fee"]+abs(fill*p["qty"])*fee,"exit_reason":reason,"closed_at":datetime.now().isoformat(),"exit_candle_time":str(exit_candle_time) if exit_candle_time is not None else None}
         s["trades"].append(trade);s["trades"]=s["trades"][-5000:];s["realized_pnl"]=n(s.get("realized_pnl"))+net
         s["positions"]=[x for x in s["positions"] if x["symbol"]!=p["symbol"]];self.save()
     def snapshot(self,default_fee_rate=0.00045):
