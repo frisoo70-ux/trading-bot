@@ -2843,8 +2843,20 @@ function renderLiveTradeV48(live){
 }
 
 
-let rangeChartInstance=null,rangeCandleSeries=null,rangeChartBusy=false,rangePriceLines=[];
+let rangeChartInstance=null,rangeCandleSeries=null,rangeChartBusy=false,rangePriceLines=[],rangeOverlaySvg=null,rangeOverlayState=null;
 function rangeFmtPrice(value,decimals){return value==null||!Number.isFinite(Number(value))?'-':Number(value).toFixed(decimals);}
+function rangeDrawOverlay(){
+ if(!rangeChartInstance||!rangeCandleSeries||!rangeOverlaySvg||!rangeOverlayState)return;
+ const host=document.getElementById('rangeChart'),w=host.clientWidth,h=host.clientHeight;
+ rangeOverlaySvg.setAttribute('viewBox','0 0 '+w+' '+h);rangeOverlaySvg.setAttribute('width',w);rangeOverlaySvg.setAttribute('height',h);
+ const ts=rangeChartInstance.timeScale(),els=[];
+ const coord=(time,price)=>({x:ts.timeToCoordinate(time),y:rangeCandleSeries.priceToCoordinate(price)});
+ const a=rangeOverlayState.range;
+ if(a){const p1=coord(a.start,a.high),p2=coord(a.end,a.low);if(p1.x!=null&&p2.x!=null&&p1.y!=null&&p2.y!=null){const x=Math.min(p1.x,p2.x),y=Math.min(p1.y,p2.y),rw=Math.max(1,Math.abs(p2.x-p1.x)),rh=Math.max(1,Math.abs(p2.y-p1.y));els.push('<rect x="'+x+'" y="'+y+'" width="'+rw+'" height="'+rh+'" fill="rgba(34,197,94,.07)" stroke="#22c55e" stroke-width="2"/>');}}
+ const t=rangeOverlayState.trade;
+ if(t){const x1=ts.timeToCoordinate(t.start),x2=ts.timeToCoordinate(t.end);if(x1!=null&&x2!=null){for(const [price,color,label] of [[t.stop,'#fb7185','SL'],[t.target,'#4ade80','TP']]){const y=rangeCandleSeries.priceToCoordinate(Number(price));if(y!=null)els.push('<line x1="'+x1+'" y1="'+y+'" x2="'+x2+'" y2="'+y+'" stroke="'+color+'" stroke-width="2" stroke-dasharray="6 5"/><text x="'+(Math.min(x1,x2)+4)+'" y="'+(y-5)+'" fill="'+color+'" font-size="12">'+label+'</text>');}}}
+ rangeOverlaySvg.innerHTML=els.join('');
+}
 async function loadRangeChart(){
  if(rangeChartBusy)return;rangeChartBusy=true;
  try{
@@ -2854,37 +2866,44 @@ async function loadRangeChart(){
   if(!d.ready){status.textContent=d.message||'Bougies en attente du scan';return}
   const candles=d.candles||[],diag=d.diagnostics||{},positions=d.positions||[],closed=(d.trades||[]).filter(t=>t.symbol===sym);
   const historyToggle=document.getElementById('rangeHistoryToggle'),historySelect=document.getElementById('rangeHistoryTrade');
-  const showHistory=!!historyToggle?.checked;
-  historySelect.disabled=!showHistory;
+  const showHistory=!!historyToggle?.checked;historySelect.disabled=!showHistory;
   const previous=historySelect.value;
   historySelect.innerHTML='<option value="">Sélectionner un trade</option>'+closed.slice().reverse().map((t,i)=>'<option value="'+i+'">'+(t.closed_at||t.entry_time||('Trade '+(i+1)))+' · '+(t.exit_reason||'CLOS')+'</option>').join('');
   if(previous&&Array.from(historySelect.options).some(o=>o.value===previous))historySelect.value=previous;
   const selectedHistory=showHistory&&historySelect.value!==''?closed.slice().reverse()[Number(historySelect.value)]:null;
   status.textContent=d.symbol+' · '+(d.timeframe||'5m')+' · '+candles.length+' bougies PAPER · '+(d.updated_at||'');
   if(!window.LightweightCharts){status.textContent+=' · Bibliothèque graphique indisponible';return}
-  const host=document.getElementById('rangeChart');
-  if(!rangeChartInstance){rangeChartInstance=LightweightCharts.createChart(host,{height:440,layout:{background:{color:'#0b1220'},textColor:'#cbd5e1'},grid:{vertLines:{color:'#1e293b'},horzLines:{color:'#1e293b'}},rightPriceScale:{borderColor:'#334155'},timeScale:{borderColor:'#334155',timeVisible:true,secondsVisible:false},crosshair:{mode:1},handleScroll:{mouseWheel:true,pressedMouseMove:true},handleScale:{mouseWheel:true,pinch:true}});rangeCandleSeries=rangeChartInstance.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderUpColor:'#22c55e',borderDownColor:'#ef4444',wickUpColor:'#22c55e',wickDownColor:'#ef4444'});}
+  const host=document.getElementById('rangeChart');host.style.position='relative';
+  if(!rangeChartInstance){rangeChartInstance=LightweightCharts.createChart(host,{height:440,layout:{background:{color:'#0b1220'},textColor:'#cbd5e1'},grid:{vertLines:{color:'#1e293b'},horzLines:{color:'#1e293b'}},rightPriceScale:{borderColor:'#334155'},timeScale:{borderColor:'#334155',timeVisible:true,secondsVisible:false},crosshair:{mode:1},handleScroll:{mouseWheel:true,pressedMouseMove:true},handleScale:{mouseWheel:true,pinch:true}});rangeCandleSeries=rangeChartInstance.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderUpColor:'#22c55e',borderDownColor:'#ef4444',wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
+   rangeOverlaySvg=document.createElementNS('http://www.w3.org/2000/svg','svg');rangeOverlaySvg.style.position='absolute';rangeOverlaySvg.style.inset='0';rangeOverlaySvg.style.width='100%';rangeOverlaySvg.style.height='100%';rangeOverlaySvg.style.pointerEvents='none';rangeOverlaySvg.style.zIndex='5';host.appendChild(rangeOverlaySvg);
+   rangeChartInstance.timeScale().subscribeVisibleTimeRangeChange(rangeDrawOverlay);
+   if(window.ResizeObserver){new ResizeObserver(()=>{rangeChartInstance.applyOptions({width:host.clientWidth});rangeDrawOverlay()}).observe(host);}
+  }
   rangeCandleSeries.setData(candles.map(b=>({time:Math.floor(Number(b.time)/1000),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close)})));
   rangePriceLines.forEach(line=>{try{rangeCandleSeries.removePriceLine(line)}catch(_){}});rangePriceLines=[];
   const allPrices=candles.flatMap(b=>[Number(b.open),Number(b.high),Number(b.low),Number(b.close)]).filter(Number.isFinite);
   const minPositive=Math.min(...allPrices.filter(x=>x>0));const decimals=minPositive<0.001?8:minPositive<0.1?6:minPositive<10?5:3;
   const addLine=(price,title,color,style)=>{if(price!=null&&Number.isFinite(Number(price)))rangePriceLines.push(rangeCandleSeries.createPriceLine({price:Number(price),title:title+' '+rangeFmtPrice(price,decimals),color:color,lineStyle:style||0,lineWidth:2,axisLabelVisible:true}));};
-  addLine(diag.range_high,'Range High','#22c55e',2);
-  addLine(diag.range_low,'Range Low','#22c55e',2);
   addLine(diag.volume_level,'POC','#fbbf24',2);
   const live=positions.find(p=>p.symbol===sym);
-  if(live){addLine(live.entry_price,'Entry actif','#38bdf8',0);addLine(live.stop,'SL actif','#fb7185',2);addLine(live.target,'TP actif','#34d399',2);}
-  if(selectedHistory){addLine(selectedHistory.entry_price,'Entry historique','#60a5fa',0);addLine(selectedHistory.stop,'SL historique','#fb7185',2);addLine(selectedHistory.target,'TP historique','#4ade80',2);}
+  const audit=(selectedHistory&&selectedHistory.entry_audit)||(live&&live.entry_audit)||diag.entry_audit_candidate||{};
+  const rangeCandles=(audit.range_window_candles||[]);
+  const rangeInfo=audit.range||{};
+  const rangeStart=rangeCandles.length?Math.floor(Number(rangeCandles[0].time)/1000):null;
+  const rangeEnd=rangeCandles.length?Math.floor(Number(rangeCandles[rangeCandles.length-1].time)/1000):null;
+  const rangeHigh=Number(rangeInfo.high??diag.range_high),rangeLow=Number(rangeInfo.low??diag.range_low);
+  const rangeBox=rangeStart&&rangeEnd&&Number.isFinite(rangeHigh)&&Number.isFinite(rangeLow)?{start:rangeStart,end:rangeEnd,high:rangeHigh,low:rangeLow}:null;
+  let tradeOverlay=null;
+  if(selectedHistory&&selectedHistory.entry_candle_time){const end=selectedHistory.exit_candle_time?Math.floor(Number(selectedHistory.exit_candle_time)/1000):Math.floor(Date.parse(selectedHistory.closed_at)/1000);const begin=Math.floor(Number(selectedHistory.entry_candle_time)/1000);if(Number.isFinite(begin)&&Number.isFinite(end)&&end>=begin)tradeOverlay={start:begin,end,stop:selectedHistory.stop,target:selectedHistory.target};}
+  rangeOverlayState={range:rangeBox,trade:tradeOverlay};
   const markers=[];
-  const audit=(diag.entry_audit_candidate||(live&&live.entry_audit)||(selectedHistory&&selectedHistory.entry_audit)||{});
   const sweepRows=(audit.sweep&&audit.sweep.candidate_sweep_candles)||[];
   sweepRows.forEach(row=>{if(row.time)markers.push({time:Math.floor(Number(row.time)/1000),position:'belowBar',color:'#f59e0b',shape:'arrowUp',text:'Sweep'});});
-  if(diag.last_candle&&diag.low_sweep_reclaim)markers.push({time:Math.floor(Number(diag.last_candle)/1000),position:'belowBar',color:'#f59e0b',shape:'circle',text:'Reclaim'});
-  if(live&&live.entry_candle_time)markers.push({time:Math.floor(Number(live.entry_candle_time)/1000),position:'belowBar',color:'#38bdf8',shape:'arrowUp',text:'Entrée'});
-  if(selectedHistory&&selectedHistory.entry_candle_time)markers.push({time:Math.floor(Number(selectedHistory.entry_candle_time)/1000),position:'belowBar',color:'#60a5fa',shape:'arrowUp',text:'Trade sélectionné'});
+  if(selectedHistory&&selectedHistory.entry_candle_time)markers.push({time:Math.floor(Number(selectedHistory.entry_candle_time)/1000),position:'belowBar',color:'#60a5fa',shape:'circle',text:'Entrée'});
+  else if(live&&live.entry_candle_time)markers.push({time:Math.floor(Number(live.entry_candle_time)/1000),position:'belowBar',color:'#38bdf8',shape:'circle',text:'Entrée'});
   rangeCandleSeries.setMarkers(markers.filter(m=>Number.isFinite(m.time)));
-  rangeChartInstance.timeScale().fitContent();
-  document.getElementById('rangeChartLegend').textContent='Range '+(diag.status||'')+' · Bas '+rangeFmtPrice(diag.range_low,decimals)+' · Haut '+rangeFmtPrice(diag.range_high,decimals)+' · POC '+rangeFmtPrice(diag.volume_level,decimals)+' · '+(live?'position active':selectedHistory?'historique sélectionné':'aucune position active')+' · '+(showHistory?'historique ciblé':'historique masqué');
+  rangeChartInstance.timeScale().fitContent();requestAnimationFrame(rangeDrawOverlay);
+  document.getElementById('rangeChartLegend').textContent='Range '+(diag.status||'')+' · Bas '+rangeFmtPrice(rangeLow,decimals)+' · Haut '+rangeFmtPrice(rangeHigh,decimals)+' · POC '+rangeFmtPrice(diag.volume_level,decimals)+' · '+(live?'position active':selectedHistory?'historique sélectionné':'aucune position active')+' · rectangle = durée du range · entrée = point · SL/TP = segments du trade clôturé';
  }catch(e){document.getElementById('rangeChartStatus').textContent='Graphique indisponible : '+e.message}
  finally{rangeChartBusy=false}
 }
