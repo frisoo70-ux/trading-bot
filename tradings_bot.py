@@ -3043,7 +3043,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/paper_range_manipulation":
             return self._json(RANGE_MANIPULATION_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE))
-\n        if parsed.path == "/api/range_manip_chart":
+
+        if parsed.path == "/api/range_manip_chart":
             params = parse_qs(parsed.query)
             requested_symbol = str((params.get("symbol") or [""])[0]).strip()
             allowed = ["SOL", "XRP", "kSHIB", "HYPE", "ZEC"]
