@@ -3155,6 +3155,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             seen_ranges = set()
 
             def chart_time_ms(value):
+
                 try:
                     return int(float(value))
                 except (TypeError, ValueError):
@@ -3189,6 +3190,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     entry_price = None
                 if entry_time is not None and entry_price is not None:
                     entries.append({"time": entry_time // 1000, "price": entry_price})
+
+            # Toutes les plages détectées sont conservées dans le moteur, même sans trade.
+            for item in (state.get("range_history") or []):
+                if item.get("symbol") != symbol:
+                    continue
+                start_ms = chart_time_ms(item.get("start"))
+                end_ms = chart_time_ms(item.get("end"))
+                try:
+                    high, low = float(item.get("high")), float(item.get("low"))
+                except (TypeError, ValueError):
+                    continue
+                if start_ms is None or end_ms is None:
+                    continue
+                key = (start_ms, end_ms, high, low)
+                if key not in seen_ranges:
+                    seen_ranges.add(key)
+                    ranges.append({
+                        "start": start_ms // 1000, "end": end_ms // 1000,
+                        "high": high, "low": low,
+                    })
 
             for trade in trades:
                 add_range_and_entry(trade)
