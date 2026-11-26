@@ -2516,10 +2516,10 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div class="card" id="rangeChartPanel" style="margin-top:12px;border-color:#0891b2">
     <h3>📈 Range Manipulation · Volume Profile · PAPER</h3>
-    <div class="muted">Graphique 5 minutes de la stratégie · plages candidates/confirmées, POC, sweep, entrée, SL et TP.</div>
+    <div class="muted">Historique 5 minutes continu · un rectangle par range utilisé par la stratégie, un point bleu par achat. Glisse vers la gauche pour charger le passé.</div>
     <div style="display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap"><label for="rangeChartSymbol">Token</label><select id="rangeChartSymbol" class="chartSelect" onchange="loadRangeChart()"><option>SOL</option><option>XRP</option><option>kSHIB</option><option>HYPE</option><option>ZEC</option></select><button type="button" onclick="loadRangeChart()">↻ Actualiser</button></div>
-    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0"><label style="display:flex;gap:6px;align-items:center"><input id="rangeHistoryToggle" type="checkbox" onchange="loadRangeChart()"> Afficher un trade historique</label><select id="rangeHistoryTrade" class="chartSelect" onchange="loadRangeChart()" disabled><option value="">Sélectionner un trade</option></select></div><div id="rangeChartStatus" class="muted">Chargement…</div><div id="rangeChart" style="height:440px;width:100%;margin-top:8px"></div>
-    <div id="rangeChartLegend" class="muted" style="margin-top:8px">Range · POC · sweep · entrée · SL · TP</div>
+    <div id="rangeChartStatus" class="muted">Chargement de l’historique 5 minutes…</div><div id="rangeChart" style="height:440px;width:100%;margin-top:8px"></div>
+    <div id="rangeChartLegend" class="muted" style="margin-top:8px">Rectangles verts = ranges · points bleus = achats</div>
   </div>
 
   <div class="grid two" style="margin-top:12px">
@@ -2843,67 +2843,100 @@ function renderLiveTradeV48(live){
 }
 
 
-let rangeChartInstance=null,rangeCandleSeries=null,rangeChartBusy=false,rangePriceLines=[],rangeOverlaySvg=null,rangeOverlayState=null;
-function rangeFmtPrice(value,decimals){return value==null||!Number.isFinite(Number(value))?'-':Number(value).toFixed(decimals);}
+let rangeChartInstance=null,rangeCandleSeries=null,rangeChartBusy=false,rangeOverlaySvg=null;
+let rangeChartSymbol=null,rangeChartCandles=[],rangeOldestTime=null,rangeOlderLoading=false,rangeHasMore=true;
+let rangeOverlayState={ranges:[],entries:[]},rangeChartInitialized=false,rangeResizeObserver=null;
 function rangeDrawOverlay(){
- if(!rangeChartInstance||!rangeCandleSeries||!rangeOverlaySvg||!rangeOverlayState)return;
+ if(!rangeChartInstance||!rangeCandleSeries||!rangeOverlaySvg)return;
  const host=document.getElementById('rangeChart'),w=host.clientWidth,h=host.clientHeight;
+ if(!w||!h)return;
  rangeOverlaySvg.setAttribute('viewBox','0 0 '+w+' '+h);rangeOverlaySvg.setAttribute('width',w);rangeOverlaySvg.setAttribute('height',h);
  const ts=rangeChartInstance.timeScale(),els=[];
- const coord=(time,price)=>({x:ts.timeToCoordinate(time),y:rangeCandleSeries.priceToCoordinate(price)});
- const a=rangeOverlayState.range;
- if(a){const p1=coord(a.start,a.high),p2=coord(a.end,a.low);if(p1.x!=null&&p2.x!=null&&p1.y!=null&&p2.y!=null){const x=Math.min(p1.x,p2.x),y=Math.min(p1.y,p2.y),rw=Math.max(1,Math.abs(p2.x-p1.x)),rh=Math.max(1,Math.abs(p2.y-p1.y));els.push('<rect x="'+x+'" y="'+y+'" width="'+rw+'" height="'+rh+'" fill="rgba(34,197,94,.07)" stroke="#22c55e" stroke-width="2"/>');}}
- const t=rangeOverlayState.trade;
- if(t){const x1=ts.timeToCoordinate(t.start),x2=ts.timeToCoordinate(t.end);if(x1!=null&&x2!=null){for(const [price,color,label] of [[t.stop,'#fb7185','SL'],[t.target,'#4ade80','TP']]){const y=rangeCandleSeries.priceToCoordinate(Number(price));if(y!=null)els.push('<line x1="'+x1+'" y1="'+y+'" x2="'+x2+'" y2="'+y+'" stroke="'+color+'" stroke-width="2" stroke-dasharray="6 5"/><text x="'+(Math.min(x1,x2)+4)+'" y="'+(y-5)+'" fill="'+color+'" font-size="12">'+label+'</text>');}}}
+ const xAt=t=>ts.timeToCoordinate(Number(t));
+ const yAt=p=>rangeCandleSeries.priceToCoordinate(Number(p));
+ (rangeOverlayState.ranges||[]).forEach(a=>{
+  const x1=xAt(a.start),x2=xAt(a.end),y1=yAt(a.high),y2=yAt(a.low);
+  if(x1==null||x2==null||y1==null||y2==null)return;
+  const x=Math.min(x1,x2),y=Math.min(y1,y2),rw=Math.max(1,Math.abs(x2-x1)),rh=Math.max(1,Math.abs(y2-y1));
+  els.push('<rect x="'+x+'" y="'+y+'" width="'+rw+'" height="'+rh+'" rx="2" fill="rgba(34,197,94,.055)" stroke="#22c55e" stroke-width="1.5"/>');
+ });
+ (rangeOverlayState.entries||[]).forEach(p=>{
+  const x=xAt(p.time),y=yAt(p.price);
+  if(x==null||y==null)return;
+  els.push('<circle cx="'+x+'" cy="'+y+'" r="5" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.5"><title>Achat '+String(p.price)+'</title></circle>');
+ });
  rangeOverlaySvg.innerHTML=els.join('');
+}
+function rangeMergeCandles(a,b){
+ const byTime=new Map();
+ (a||[]).concat(b||[]).forEach(c=>byTime.set(Number(c.time),c));
+ return Array.from(byTime.values()).sort((x,y)=>Number(x.time)-Number(y.time));
+}
+async function rangeFetchChunk(symbol,before){
+ const url='/api/range_manip_chart?symbol='+encodeURIComponent(symbol)+(before?'&before='+encodeURIComponent(before):'')+(window.location.search?('&'+window.location.search.slice(1)):'');
+ const r=await fetch(url),d=await r.json();
+ if(!r.ok||!d.ready)throw new Error(d.message||'Données graphiques indisponibles');
+ return d;
+}
+function rangeApplyPayload(d,mode){
+ const oldRange=rangeChartInstance.timeScale().getVisibleLogicalRange();
+ const oldCount=rangeChartCandles.length;
+ rangeChartCandles=mode==='older'?rangeMergeCandles(d.candles,rangeChartCandles):rangeMergeCandles(rangeChartCandles,d.candles);
+ rangeOldestTime=rangeChartCandles.length?Math.floor(Number(rangeChartCandles[0].time)/1000):null;
+ if(mode==='older'&&(!d.candles||d.candles.length<450))rangeHasMore=false;
+ rangeOverlayState={ranges:d.ranges||[],entries:d.entries||[]};
+ rangeCandleSeries.setData(rangeChartCandles.map(b=>({time:Math.floor(Number(b.time)/1000),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close)})));
+ if(mode==='older'&&oldRange&&rangeChartCandles.length>oldCount){
+  const added=rangeChartCandles.length-oldCount;
+  rangeChartInstance.timeScale().setVisibleLogicalRange({from:oldRange.from+added,to:oldRange.to+added});
+ }else if(!rangeChartInitialized){
+  rangeChartInstance.timeScale().fitContent();rangeChartInitialized=true;
+ }else if(oldRange){
+  rangeChartInstance.timeScale().setVisibleLogicalRange(oldRange);
+ }
+ document.getElementById('rangeChartStatus').textContent=d.symbol+' · 5m · '+rangeChartCandles.length+' bougies chargées · '+(rangeOverlayState.ranges.length)+' ranges · '+(rangeOverlayState.entries.length)+' achats · glisser vers la gauche pour remonter';
+ requestAnimationFrame(rangeDrawOverlay);
+}
+async function rangeLoadOlder(){
+ if(rangeOlderLoading||!rangeHasMore||!rangeOldestTime||!rangeChartSymbol)return;
+ rangeOlderLoading=true;
+ try{
+  const d=await rangeFetchChunk(rangeChartSymbol,rangeOldestTime);
+  if(!d.candles||!d.candles.length){rangeHasMore=false;return;}
+  rangeApplyPayload(d,'older');
+ }catch(e){document.getElementById('rangeChartStatus').textContent='Chargement historique interrompu : '+e.message}
+ finally{rangeOlderLoading=false}
+}
+function rangeOnVisibleRangeChanged(){
+ if(!rangeChartInstance)return;
+ const r=rangeChartInstance.timeScale().getVisibleLogicalRange();
+ if(r&&r.from<45)rangeLoadOlder();
+ rangeDrawOverlay();
 }
 async function loadRangeChart(){
  if(rangeChartBusy)return;rangeChartBusy=true;
  try{
   const sym=document.getElementById('rangeChartSymbol').value;
-  const r=await fetch('/api/range_manip_chart?symbol='+encodeURIComponent(sym)+(window.location.search?('&'+window.location.search.slice(1)):''));
-  const d=await r.json();const status=document.getElementById('rangeChartStatus');
-  if(!d.ready){status.textContent=d.message||'Bougies en attente du scan';return}
-  const candles=d.candles||[],diag=d.diagnostics||{},positions=d.positions||[],closed=(d.trades||[]).filter(t=>t.symbol===sym);
-  const historyToggle=document.getElementById('rangeHistoryToggle'),historySelect=document.getElementById('rangeHistoryTrade');
-  const showHistory=!!historyToggle?.checked;historySelect.disabled=!showHistory;
-  const previous=historySelect.value;
-  historySelect.innerHTML='<option value="">Sélectionner un trade</option>'+closed.slice().reverse().map((t,i)=>'<option value="'+i+'">'+(t.closed_at||t.entry_time||('Trade '+(i+1)))+' · '+(t.exit_reason||'CLOS')+'</option>').join('');
-  if(previous&&Array.from(historySelect.options).some(o=>o.value===previous))historySelect.value=previous;
-  const selectedHistory=showHistory&&historySelect.value!==''?closed.slice().reverse()[Number(historySelect.value)]:null;
-  status.textContent=d.symbol+' · '+(d.timeframe||'5m')+' · '+candles.length+' bougies PAPER · '+(d.updated_at||'');
-  if(!window.LightweightCharts){status.textContent+=' · Bibliothèque graphique indisponible';return}
+  const status=document.getElementById('rangeChartStatus');
+  if(!window.LightweightCharts){status.textContent='Bibliothèque graphique indisponible';return}
   const host=document.getElementById('rangeChart');host.style.position='relative';
-  if(!rangeChartInstance){rangeChartInstance=LightweightCharts.createChart(host,{height:440,layout:{background:{color:'#0b1220'},textColor:'#cbd5e1'},grid:{vertLines:{color:'#1e293b'},horzLines:{color:'#1e293b'}},rightPriceScale:{borderColor:'#334155'},timeScale:{borderColor:'#334155',timeVisible:true,secondsVisible:false},crosshair:{mode:1},handleScroll:{mouseWheel:true,pressedMouseMove:true},handleScale:{mouseWheel:true,pinch:true}});rangeCandleSeries=rangeChartInstance.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderUpColor:'#22c55e',borderDownColor:'#ef4444',wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
+  const symbolChanged=rangeChartSymbol!==sym;
+  if(!rangeChartInstance){
+   rangeChartInstance=LightweightCharts.createChart(host,{height:440,layout:{background:{color:'#0b1220'},textColor:'#cbd5e1'},grid:{vertLines:{color:'#1e293b'},horzLines:{color:'#1e293b'}},rightPriceScale:{borderColor:'#334155'},timeScale:{borderColor:'#334155',timeVisible:true,secondsVisible:false,rightOffset:8,barSpacing:7},crosshair:{mode:1},handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true},handleScale:{mouseWheel:true,pinch:true}});
+   rangeCandleSeries=rangeChartInstance.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderUpColor:'#22c55e',borderDownColor:'#ef4444',wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
    rangeOverlaySvg=document.createElementNS('http://www.w3.org/2000/svg','svg');rangeOverlaySvg.style.position='absolute';rangeOverlaySvg.style.inset='0';rangeOverlaySvg.style.width='100%';rangeOverlaySvg.style.height='100%';rangeOverlaySvg.style.pointerEvents='none';rangeOverlaySvg.style.zIndex='5';host.appendChild(rangeOverlaySvg);
    rangeChartInstance.timeScale().subscribeVisibleTimeRangeChange(rangeDrawOverlay);
-   if(window.ResizeObserver){new ResizeObserver(()=>{rangeChartInstance.applyOptions({width:host.clientWidth});rangeDrawOverlay()}).observe(host);}
+   rangeChartInstance.timeScale().subscribeVisibleLogicalRangeChange(rangeOnVisibleRangeChanged);
+   if(window.ResizeObserver){rangeResizeObserver=new ResizeObserver(()=>{rangeChartInstance.applyOptions({width:host.clientWidth});rangeDrawOverlay()});rangeResizeObserver.observe(host);}
   }
-  rangeCandleSeries.setData(candles.map(b=>({time:Math.floor(Number(b.time)/1000),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close)})));
-  rangePriceLines.forEach(line=>{try{rangeCandleSeries.removePriceLine(line)}catch(_){}});rangePriceLines=[];
-  const allPrices=candles.flatMap(b=>[Number(b.open),Number(b.high),Number(b.low),Number(b.close)]).filter(Number.isFinite);
-  const minPositive=Math.min(...allPrices.filter(x=>x>0));const decimals=minPositive<0.001?8:minPositive<0.1?6:minPositive<10?5:3;
-  const addLine=(price,title,color,style)=>{if(price!=null&&Number.isFinite(Number(price)))rangePriceLines.push(rangeCandleSeries.createPriceLine({price:Number(price),title:title+' '+rangeFmtPrice(price,decimals),color:color,lineStyle:style||0,lineWidth:2,axisLabelVisible:true}));};
-  addLine(diag.volume_level,'POC','#fbbf24',2);
-  const live=positions.find(p=>p.symbol===sym);
-  const audit=(selectedHistory&&selectedHistory.entry_audit)||(live&&live.entry_audit)||diag.entry_audit_candidate||{};
-  const rangeCandles=(audit.range_window_candles||[]);
-  const rangeInfo=audit.range||{};
-  const rangeStart=rangeCandles.length?Math.floor(Number(rangeCandles[0].time)/1000):null;
-  const rangeEnd=rangeCandles.length?Math.floor(Number(rangeCandles[rangeCandles.length-1].time)/1000):null;
-  const rangeHigh=Number(rangeInfo.high??diag.range_high),rangeLow=Number(rangeInfo.low??diag.range_low);
-  const rangeBox=rangeStart&&rangeEnd&&Number.isFinite(rangeHigh)&&Number.isFinite(rangeLow)?{start:rangeStart,end:rangeEnd,high:rangeHigh,low:rangeLow}:null;
-  let tradeOverlay=null;
-  if(selectedHistory&&selectedHistory.entry_candle_time){const end=selectedHistory.exit_candle_time?Math.floor(Number(selectedHistory.exit_candle_time)/1000):Math.floor(Date.parse(selectedHistory.closed_at)/1000);const begin=Math.floor(Number(selectedHistory.entry_candle_time)/1000);if(Number.isFinite(begin)&&Number.isFinite(end)&&end>=begin)tradeOverlay={start:begin,end,stop:selectedHistory.stop,target:selectedHistory.target};}
-  rangeOverlayState={range:rangeBox,trade:tradeOverlay};
-  const markers=[];
-  const sweepRows=(audit.sweep&&audit.sweep.candidate_sweep_candles)||[];
-  sweepRows.forEach(row=>{if(row.time)markers.push({time:Math.floor(Number(row.time)/1000),position:'belowBar',color:'#f59e0b',shape:'arrowUp',text:'Sweep'});});
-  if(selectedHistory&&selectedHistory.entry_candle_time)markers.push({time:Math.floor(Number(selectedHistory.entry_candle_time)/1000),position:'belowBar',color:'#60a5fa',shape:'circle',text:'Entrée'});
-  else if(live&&live.entry_candle_time)markers.push({time:Math.floor(Number(live.entry_candle_time)/1000),position:'belowBar',color:'#38bdf8',shape:'circle',text:'Entrée'});
-  rangeCandleSeries.setMarkers(markers.filter(m=>Number.isFinite(m.time)));
-  rangeChartInstance.timeScale().fitContent();requestAnimationFrame(rangeDrawOverlay);
-  document.getElementById('rangeChartLegend').textContent='Range '+(diag.status||'')+' · Bas '+rangeFmtPrice(rangeLow,decimals)+' · Haut '+rangeFmtPrice(rangeHigh,decimals)+' · POC '+rangeFmtPrice(diag.volume_level,decimals)+' · '+(live?'position active':selectedHistory?'historique sélectionné':'aucune position active')+' · rectangle = durée du range · entrée = point · SL/TP = segments du trade clôturé';
+  if(symbolChanged){
+   rangeChartSymbol=sym;rangeChartCandles=[];rangeOldestTime=null;rangeHasMore=true;rangeChartInitialized=false;
+   rangeCandleSeries.setData([]);rangeOverlayState={ranges:[],entries:[]};
+  }
+  status.textContent='Chargement des bougies 5 minutes…';
+  const d=await rangeFetchChunk(sym,null);
+  rangeHasMore=!!d.has_more;
+  rangeApplyPayload(d,'latest');
  }catch(e){document.getElementById('rangeChartStatus').textContent='Graphique indisponible : '+e.message}
  finally{rangeChartBusy=false}
 }
@@ -3084,16 +3117,103 @@ class DashboardHandler(BaseHTTPRequestHandler):
             symbol = next((x for x in allowed if x.lower() == requested_symbol.lower()), "")
             if not symbol:
                 return self._json({"ready": False, "message": "Token non autorisé."})
-            with DASHBOARD_CHART_LOCK:
-                snap = DASHBOARD_CHART_CACHE.get(symbol)
-                snap = dict(snap) if snap else None
-            if not snap:
-                return self._json({"ready": False, "symbol": symbol, "message": "Bougies 5m en attente du prochain scan."})
+
+            # Chargement par pages de 500 bougies 5m : le graphique peut remonter
+            # dans l'historique sans charger des dizaines de milliers de bougies d'un coup.
+            now_ms = int(time.time() * 1000)
+            try:
+                before_value = (params.get("before") or [None])[0]
+                end_ms = int(float(before_value) * 1000) - 1 if before_value else now_ms
+            except (TypeError, ValueError):
+                end_ms = now_ms
+            interval_ms = 5 * 60 * 1000
+            start_ms = max(0, end_ms - 500 * interval_ms)
+            try:
+                raw_candles = info_post(
+                    {"type": "candleSnapshot", "req": {
+                        "coin": symbol, "interval": "5m",
+                        "startTime": start_ms, "endTime": end_ms,
+                    }},
+                    cache_key=f"range_manip_chart_5m:{symbol}:{start_ms}:{end_ms}",
+                    cache_ttl=30,
+                    max_retries=1,
+                )
+                candles = [{
+                    "time": int(c["t"]), "open": float(c["o"]), "high": float(c["h"]),
+                    "low": float(c["l"]), "close": float(c["c"]), "volume": float(c.get("v", 0)),
+                } for c in (raw_candles if isinstance(raw_candles, list) else [])]
+            except Exception as exc:
+                print("[RANGE MANIP CHART HISTORY ERROR]", symbol, str(exc)[:180])
+                candles = []
+
             state = RANGE_MANIPULATION_PAPER_ENGINE.load()
-            diag = dict((state.get("diagnostics") or {}).get(symbol) or {})
-            positions = [dict(p) for p in (state.get("positions") or []) if p.get("symbol") == symbol]
+            diagnostics = dict((state.get("diagnostics") or {}).get(symbol) or {})
             trades = [dict(t) for t in (state.get("trades") or []) if t.get("symbol") == symbol]
-            return self._json({"ready": True, "symbol": symbol, "timeframe": "5m", "candles": snap.get("candles", []), "diagnostics": diag, "positions": positions, "trades": trades[-200:], "updated_at": snap.get("updated_at")})
+            positions = [dict(p) for p in (state.get("positions") or []) if p.get("symbol") == symbol]
+            ranges = []
+            entries = []
+            seen_ranges = set()
+
+            def chart_time_ms(value):
+                try:
+                    return int(float(value))
+                except (TypeError, ValueError):
+                    return None
+
+            def add_range_and_entry(record):
+                audit = record.get("entry_audit") or {}
+                window = audit.get("range_window_candles") or []
+                info = audit.get("range") or {}
+                if window:
+                    first_time = chart_time_ms(window[0].get("time"))
+                    last_time = chart_time_ms(window[-1].get("time"))
+                    high = info.get("high")
+                    low = info.get("low")
+                    try:
+                        high, low = float(high), float(low)
+                    except (TypeError, ValueError):
+                        high = low = None
+                    if first_time is not None and last_time is not None and high is not None and low is not None:
+                        key = (first_time, last_time, high, low)
+                        if key not in seen_ranges:
+                            seen_ranges.add(key)
+                            ranges.append({
+                                "start": first_time // 1000,
+                                "end": (last_time + interval_ms) // 1000,
+                                "high": high, "low": low,
+                            })
+                entry_time = chart_time_ms(record.get("entry_candle_time"))
+                try:
+                    entry_price = float(record.get("entry_price"))
+                except (TypeError, ValueError):
+                    entry_price = None
+                if entry_time is not None and entry_price is not None:
+                    entries.append({"time": entry_time // 1000, "price": entry_price})
+
+            for trade in trades:
+                add_range_and_entry(trade)
+            for position in positions:
+                add_range_and_entry(position)
+
+            # Le dernier range candidat est également visible, même s'il n'a pas encore déclenché d'achat.
+            candidate = diagnostics.get("entry_audit_candidate") or {}
+            candidate_record = {"entry_audit": candidate}
+            add_range_and_entry(candidate_record)
+
+            ranges.sort(key=lambda item: item["start"])
+            entries.sort(key=lambda item: item["time"])
+            candles.sort(key=lambda item: item["time"])
+            return self._json({
+                "ready": bool(candles),
+                "symbol": symbol,
+                "timeframe": "5m",
+                "candles": candles,
+                "ranges": ranges,
+                "entries": entries,
+                "has_more": len(candles) >= 450,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "message": "Historique 5m indisponible." if not candles else "",
+            })
 
         if parsed.path == "/api/chart":
             params = parse_qs(parsed.query)
