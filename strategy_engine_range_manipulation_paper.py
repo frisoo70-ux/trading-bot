@@ -16,7 +16,7 @@ class RangeManipulationPaper:
         self.max_positions=int(max_positions); self.max_exposure=float(max_exposure); self.on_save=on_save
         self.lock=threading.RLock(); self.state=None
     def empty(self):
-        return {"engine_version":VERSION,"initial_balance":self.initial,"realized_pnl":0.0,"positions":[],"trades":[],"diagnostics":{},"last_evaluated_candle_by_symbol":{},"updated_at":None}
+        return {"engine_version":VERSION,"initial_balance":self.initial,"realized_pnl":0.0,"positions":[],"trades":[],"diagnostics":{},"last_evaluated_candle_by_symbol":{},"range_history":[],"active_range_by_symbol":{},"updated_at":None}
     def load(self):
         with self.lock:
             if self.state is None:
@@ -28,6 +28,8 @@ class RangeManipulationPaper:
                 if not isinstance(s.get("trades"),list): s["trades"]=[]
                 if not isinstance(s.get("diagnostics"),dict): s["diagnostics"]={}
                 if not isinstance(s.get("last_evaluated_candle_by_symbol"),dict): s["last_evaluated_candle_by_symbol"]={}
+                if not isinstance(s.get("range_history"),list): s["range_history"]=[]
+                if not isinstance(s.get("active_range_by_symbol"),dict): s["active_range_by_symbol"]={}
                 self.state=s
             return self.state
     def save(self):
@@ -37,6 +39,47 @@ class RangeManipulationPaper:
         if callable(self.on_save):
             try:self.on_save()
             except Exception:pass
+    def close_active_range(self,s,symbol):
+        active=s.setdefault("active_range_by_symbol",{})
+        range_id=active.pop(symbol,None)
+        if range_id:
+            for item in s.setdefault("range_history",[]):
+                if item.get("id")==range_id:
+                    item["status"]="CLOSED"
+                    break
+    def record_range(self,s,symbol,base,hi,lo,ct):
+        """Persist a consolidated range episode for chart audit only; never affects entries."""
+        try:
+            start_ms=int(float(base.iloc[0]["time"]))
+            end_ms=int(float(base.iloc[-1]["time"]))+300000
+            eval_ms=int(float(ct))
+        except (TypeError,ValueError,KeyError,IndexError):
+            return
+        history=s.setdefault("range_history",[])
+        active=s.setdefault("active_range_by_symbol",{})
+        current_id=active.get(symbol)
+        current=next((x for x in history if x.get("id")==current_id),None) if current_id else None
+        if current:
+            previous_eval=int(n(current.get("last_seen_eval")))
+            previous_high=n(current.get("high")); previous_low=n(current.get("low"))
+            overlap=max(0.0,min(previous_high,hi)-max(previous_low,lo))
+            denominator=max(1e-12,min(previous_high-previous_low,hi-lo))
+            overlap_ratio=overlap/denominator
+            if eval_ms-previous_eval<=600000 and eval_ms>=previous_eval and overlap_ratio>=0.55:
+                current["high"]=max(previous_high,hi)
+                current["low"]=min(previous_low,lo)
+                current["end"]=max(int(current.get("end",end_ms)),end_ms)
+                current["last_seen_eval"]=eval_ms
+                current["samples"]=int(current.get("samples",1))+1
+                return
+            current["status"]="CLOSED"
+        range_id=f"{symbol}:{start_ms}:{eval_ms}"
+        history.append({"id":range_id,"symbol":symbol,"start":start_ms,"end":end_ms,
+                        "high":float(hi),"low":float(lo),"last_seen_eval":eval_ms,
+                        "samples":1,"status":"ACTIVE"})
+        active[symbol]=range_id
+        if len(history)>2000:
+            s["range_history"]=history[-2000:]
     def process_symbol(self,symbol,df,current_price,ct,execution):
         if df is None or len(df)<25 or not all(c in df.columns for c in ("time","open","high","low","close","volume")):return
         s=self.load(); symbol=str(symbol); price=n(current_price)
@@ -59,7 +102,9 @@ class RangeManipulationPaper:
         diag={"symbol":symbol,"range_high":hi,"range_low":lo,"range_pct":width*100,"status":"WAIT","last_candle":key,"rejection_reasons":[]}
         # More tolerant range envelope, still reject excessively volatile / trivial ranges.
         if width>0.05 or width<0.0015:
+            self.close_active_range(s,symbol)
             diag["status"]="NO_SETUP";diag["rejection_reasons"]=["RANGE_OUTSIDE_0_15_TO_5_PERCENT"];s["diagnostics"][symbol]=diag;self.save();return
+        self.record_range(s,symbol,base,hi,lo,ct)
         lows=recent.low.astype(float); closes=recent.close.astype(float)
         sweep_idx=[i for i in range(len(recent)) if n(recent.iloc[i].low)<lo and n(recent.iloc[i].close)>lo]
         # Allow the sweep/reclaim to occur on any of the last five bars; entry confirmation may follow it.
