@@ -43,6 +43,12 @@ class RangeManipPaperTests(unittest.TestCase):
         e.process_symbol("SOL",df,100,25,execution)
         self.assertEqual(len(e.load()["positions"]),1)
         self.assertEqual(e.load()["positions"][0]["side"],"LONG")
+        audit=e.load()["positions"][0].get("entry_audit")
+        self.assertIsNotNone(audit)
+        self.assertTrue(audit["decision"]["setup"])
+        self.assertEqual(audit["volume_profile"]["bins"],24)
+        self.assertEqual(len(audit["range_window_candles"]),20)
+        self.assertEqual(len(audit["confirmation_window_candles"]),5)
         self.tmp.cleanup()
 
     def test_long_stop(self):

@@ -92,6 +92,21 @@ class RangeManipulationPaper:
         if not confirmation:diag["rejection_reasons"].append("NO_BULLISH_CONFIRMATION")
         diag["status"]="SETUP" if bullish else "WAIT";s["diagnostics"][symbol]=diag
         if not bullish:self.save();return
+        # Frozen audit record for this entry decision (stored with the position and trade).
+        def candle_record(row):
+            return {k: (str(row[k]) if k == "time" else n(row[k])) for k in ("time","open","high","low","close","volume")}
+        audit={
+          "audit_version":1,"strategy_version":VERSION,"symbol":symbol,"evaluated_at":datetime.now().isoformat(),
+          "evaluation_candle":candle_record(last),"range_window_candles":[candle_record(r) for _,r in base.iterrows()],
+          "confirmation_window_candles":[candle_record(r) for _,r in recent.iterrows()],
+          "range":{"high":hi,"low":lo,"width_pct":width*100},
+          "volume_profile":{"method":"24 bins; typical_price=(high+low+close)/3; volume summed over base window","bins":bins,"bin_step":step,"level":level,"max_bin_volume":max(vp) if vp else 0.0,"bin_volumes":vp},
+          "sweep":{"detected":sweep,"sweep_low":sweep_low,"range_low":lo,"candidate_sweep_candles":[candle_record(recent.iloc[i]) for i in sweep_idx]},
+          "retest":{"vp_retest":vp_retest,"range_low_retest":range_retest,"any_retest":retest,"distance_close_to_vp":abs(n(last.close)-level),"tolerance":tolerance},
+          "confirmation":{"bullish_body":bullish_body,"higher_close":higher_close,"wick_rejection":rejection_wick,"confirmation":confirmation,"close":n(last.close)},
+          "decision":{"setup":bullish,"rejection_reasons":list(diag["rejection_reasons"])}
+        }
+        diag["entry_audit_candidate"]=audit
         entryref=price; manipulation_low=sweep_low; manipulation_high=n(recent.high.max())
         stop=manipulation_low; risk=entryref-stop
         if risk<=0 or risk/entryref>0.025:
@@ -106,7 +121,7 @@ class RangeManipulationPaper:
         p={"symbol":symbol,"side":"LONG","entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,
           "entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"manipulation_low":manipulation_low,
           "manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,
-          "entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None}
+          "entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None,"entry_audit":audit}
         s["positions"].append(p);diag["status"]="OPEN";diag["side"]="LONG";self.save()
     def close(self,p,reference,reason,execution):
         s=self.load(); ex=execution(p["symbol"],"SELL",p["notional"],reference) or {}
