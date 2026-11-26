@@ -51,6 +51,21 @@ class RangeManipPaperTests(unittest.TestCase):
         self.assertEqual(len(audit["confirmation_window_candles"]),5)
         self.tmp.cleanup()
 
+    def test_range_history_coalesces_overlapping_windows_and_starts_new_on_break(self):
+        e=self.make_engine();s=e.load()
+        first=pd.DataFrame([{"time":i*300000,"high":103.0,"low":99.0} for i in range(20)])
+        e.record_range(s,"SOL",first,103.0,99.0,20*300000)
+        shifted=pd.DataFrame([{"time":(i+1)*300000,"high":103.2,"low":98.8} for i in range(20)])
+        e.record_range(s,"SOL",shifted,103.2,98.8,21*300000)
+        self.assertEqual(len(s["range_history"]),1)
+        self.assertEqual(s["range_history"][0]["samples"],2)
+        separated=pd.DataFrame([{"time":(i+2)*300000,"high":110.0,"low":106.0} for i in range(20)])
+        e.record_range(s,"SOL",separated,110.0,106.0,22*300000)
+        self.assertEqual(len(s["range_history"]),2)
+        self.assertEqual(s["range_history"][0]["status"],"CLOSED")
+        self.assertEqual(s["range_history"][1]["status"],"ACTIVE")
+        self.tmp.cleanup()
+
     def test_long_stop(self):
         e=self.make_engine();s=e.load()
         s["positions"]=[{"symbol":"BTC","side":"LONG","entry_price":100,"qty":1,"notional":100,"entry_fee":0,"fee_rate":0,"stop":95,"target":105,"current_price":100}]
