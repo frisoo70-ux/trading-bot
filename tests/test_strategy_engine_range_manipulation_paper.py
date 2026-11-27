@@ -15,6 +15,22 @@ class RangeManipPaperTests(unittest.TestCase):
     def frame(self, price):
         return pd.DataFrame([{"time":i,"open":price,"high":price+1,"low":price-1,"close":price,"volume":10} for i in range(30)])
 
+    def test_directional_base_is_rejected_as_not_a_consolidation(self):
+        e=self.make_engine()
+        rows=[]
+        # Directional drift across a broad envelope, despite acceptable envelope width.
+        for i in range(20):
+            close=100+i*0.10
+            rows.append({"time":i,"open":close,"high":close+0.8,"low":close-0.8,"close":close,"volume":10})
+        rows.extend([{"time":i,"open":102,"high":103,"low":101,"close":102,"volume":10} for i in range(20,26)])
+        e.process_symbol("XRP",pd.DataFrame(rows),102,25,execution)
+        diag=e.load()["diagnostics"].get("XRP")
+        self.assertIsNotNone(diag)
+        self.assertFalse(diag["range_quality"]["quality_pass"])
+        self.assertIn("RANGE_DIRECTIONAL_DRIFT_TOO_HIGH",diag["range_quality_reasons"])
+        self.assertEqual(diag["status"],"NO_SETUP")
+        self.tmp.cleanup()
+
     def test_diagnostic_records_no_setup_reasons(self):
         e=self.make_engine()
         df=self.frame(100)
