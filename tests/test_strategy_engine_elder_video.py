@@ -1,6 +1,8 @@
 import unittest
+import tempfile
+from pathlib import Path
 import pandas as pd
-from strategy_engine_elder_video import _bullish_direction, _setup, _break_and_order_block
+from strategy_engine_elder_video import _bullish_direction, _setup, _break_and_order_block, ElderVideoPaperEngine, STRATEGY_ID
 
 
 def candles(closes, lows=None, opens=None, highs=None, step=60000):
@@ -47,6 +49,72 @@ class ElderVideoStrategyTests(unittest.TestCase):
         df=candles([10,10.1,10,10.2,10.1,10,10.1,10.2],step=900000)
         self.assertFalse(_break_and_order_block(df)["valid"])
 
+
+
+    def _engine_with_video_position(self, tmpdir):
+        engine = ElderVideoPaperEngine(Path(tmpdir) / "state.json")
+        state = engine.load()
+        state["positions"] = [{
+            "position_id": "test-video-position", "symbol": "SOL", "side": "LONG",
+            "strategy_id": STRATEGY_ID, "strategy_version": "test",
+            "entry_candle_time": 1000, "last_processed_candle_time": 1000,
+            "entry_price": 100.0, "qty": 1.0, "notional": 100.0,
+            "entry_fee": 0.0, "entry_fee_rate": 0.0, "fee_rate": 0.0,
+            "entry_fee_source": "TEST", "entry_slippage_rate": 0.0,
+            "entry_slippage_source": "TEST", "entry_book_status": "OK",
+            "stop": 95.0, "tp1": 110.0, "target": 120.0,
+            "tp1_reached": False, "setup_score": 100, "risk_reward_gross": 2.0,
+            "regime": "TEST", "reason_codes": []
+        }]
+        return engine
+
+    def _run_position(self, engine, bars):
+        df = pd.DataFrame(bars)
+        return engine.process_symbol("SOL", None, None, None, None, None, df,
+                                    df.iloc[-1]["time"], float(df.iloc[-1]["close"]),
+                                    lambda symbol, side, notional, reference: {
+                                        "fill_price": reference, "fee_rate": 0.0,
+                                        "fee_source": "TEST", "slippage_rate": 0.0,
+                                        "slippage_source": "TEST", "book_status": "OK"
+                                    })
+
+    def test_stop_before_tp1_cannot_be_retroactively_moved_to_breakeven(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine_with_video_position(tmp)
+            bars = [
+                {"time": 1000, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+                {"time": 2000, "open": 99, "high": 111, "low": 94, "close": 105, "volume": 10},
+            ]
+            self._run_position(engine, bars)
+            trade = engine.load()["trades"][-1]
+            self.assertEqual(trade["exit_reason"], "ELDER_VIDEO_STOP")
+            self.assertAlmostEqual(trade["exit"], 95.0)
+
+    def test_tp1_then_breakeven_stop_is_processed_chronologically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine_with_video_position(tmp)
+            bars = [
+                {"time": 1000, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+                {"time": 2000, "open": 101, "high": 111, "low": 101, "close": 109, "volume": 10},
+                {"time": 3000, "open": 105, "high": 109, "low": 99, "close": 101, "volume": 10},
+            ]
+            self._run_position(engine, bars)
+            trade = engine.load()["trades"][-1]
+            self.assertEqual(trade["exit_reason"], "ELDER_VIDEO_BREAKEVEN_STOP")
+            self.assertAlmostEqual(trade["exit"], 100.0)
+
+    def test_tp2_after_tp1_closes_at_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine_with_video_position(tmp)
+            bars = [
+                {"time": 1000, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+                {"time": 2000, "open": 101, "high": 111, "low": 101, "close": 109, "volume": 10},
+                {"time": 3000, "open": 110, "high": 121, "low": 110, "close": 120, "volume": 10},
+            ]
+            self._run_position(engine, bars)
+            trade = engine.load()["trades"][-1]
+            self.assertEqual(trade["exit_reason"], "ELDER_VIDEO_TARGET")
+            self.assertAlmostEqual(trade["exit"], 120.0)
 
 if __name__ == "__main__":
     unittest.main()
