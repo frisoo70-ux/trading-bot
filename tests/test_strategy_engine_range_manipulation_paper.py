@@ -29,7 +29,7 @@ class RangeManipPaperTests(unittest.TestCase):
         rows=[]
         # Twenty-bar compact base with prior range liquidity above.
         for i in range(20):
-            rows.append({"time":i,"open":101,"high":103,"low":99,"close":101,"volume":10})
+            rows.append({"time":i,"open":101,"high":104,"low":99,"close":101,"volume":10})
         # Sweep below range, reclaim and a retest/rejection in subsequent candles.
         rows.extend([
             {"time":20,"open":100,"high":101,"low":98.6,"close":100,"volume":12},
