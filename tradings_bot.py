@@ -2869,11 +2869,7 @@ async function loadRangeChart(){
 function applyPaperDashboardView(mode){
  const isPaper=mode==="PAPER";
  const legacy=document.getElementById("legacyPaperResults");
- const v2=document.getElementById("v2PaperPanel");
  if(legacy) legacy.style.display="block";
- if(v2) v2.style.display=isPaper?"block":"none";
- const elder=document.getElementById("elderPaperPanel");
- if(elder) elder.style.display=isPaper?"block":"none";
  const rangePanel=document.getElementById("rangeManipPaperPanel");
  if(rangePanel) rangePanel.style.display=isPaper?"block":"none";
 }
