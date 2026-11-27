@@ -66,6 +66,17 @@ class RangeManipPaperTests(unittest.TestCase):
         self.assertEqual(s["range_history"][1]["status"],"ACTIVE")
         self.tmp.cleanup()
 
+    def test_stop_first_when_closed_candle_touches_stop_and_target(self):
+        e=self.make_engine();s=e.load()
+        s["positions"]=[{"symbol":"BTC","side":"LONG","entry_price":100,"qty":1,"notional":100,"entry_fee":0,"fee_rate":0,"stop":95,"target":105,"current_price":100}]
+        df=self.frame(100)
+        df.loc[df.index[-1],["time","open","high","low","close","volume"]]=[123,100,106,94,101,10]
+        e.process_symbol("BTC",df,999,123,execution)
+        self.assertEqual(len(e.load()["positions"]),0)
+        self.assertEqual(e.load()["trades"][-1]["exit_reason"],"STOP")
+        self.assertEqual(e.load()["trades"][-1]["exit_price"],95)
+        self.tmp.cleanup()
+
     def test_long_stop(self):
         e=self.make_engine();s=e.load()
         s["positions"]=[{"symbol":"BTC","side":"LONG","entry_price":100,"qty":1,"notional":100,"entry_fee":0,"fee_rate":0,"stop":95,"target":105,"current_price":100}]

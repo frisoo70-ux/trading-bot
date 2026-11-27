@@ -83,15 +83,26 @@ class RangeManipulationPaper:
     def process_symbol(self,symbol,df,current_price,ct,execution):
         if df is None or len(df)<25 or not all(c in df.columns for c in ("time","open","high","low","close","volume")):return
         s=self.load(); symbol=str(symbol); price=n(current_price)
+        # Use the last CLOSED 5m candle exclusively for PAPER decisions.
+        last_closed=df.iloc[-1]
+        closed_price=n(last_closed.get("close"),price)
+        closed_time=str(last_closed.get("time",ct))
         pos=next((p for p in s["positions"] if p["symbol"]==symbol),None)
         if pos:
-            pos["current_price"]=price
-            if price<=pos["stop"]: self.close(pos,pos["stop"],"STOP",execution,ct)
-            elif price>=pos["target"]: self.close(pos,pos["target"],"TARGET",execution,ct)
+            pos["current_price"]=closed_price
+            candle_low=n(last_closed.get("low"),closed_price)
+            candle_high=n(last_closed.get("high"),closed_price)
+            # Conservative OHLC handling: if both levels are touched, stop wins.
+            if candle_low<=n(pos.get("stop")):
+                self.close(pos,pos["stop"],"STOP",execution,closed_time)
+            elif candle_high>=n(pos.get("target")):
+                self.close(pos,pos["target"],"TARGET",execution,closed_time)
             else:
-                pos["unrealized_pnl"]=(price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-price*pos["qty"]*pos["fee_rate"]
+                pos["unrealized_pnl"]=(closed_price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-closed_price*pos["qty"]*pos["fee_rate"]
                 self.save()
             return
+        price=closed_price
+        ct=closed_time
         key=str(ct)
         if s["last_evaluated_candle_by_symbol"].get(symbol)==key:return
         s["last_evaluated_candle_by_symbol"][symbol]=key
@@ -153,7 +164,8 @@ class RangeManipulationPaper:
         }
         diag["entry_audit_candidate"]=audit
         entryref=price; manipulation_low=sweep_low; manipulation_high=n(recent.high.max())
-        stop=manipulation_low; risk=entryref-stop
+        # Place the stop a small buffer below the sweep extreme to avoid an exact-low stop.
+        stop=manipulation_low*(1.0-0.001); risk=entryref-stop
         if risk<=0 or risk/entryref>0.025:
             diag["status"]="SKIP_RISK";diag["risk_pct"]=risk/entryref*100 if entryref else None;diag["rejection_reasons"]=["INVALID_OR_OVER_2_5_PERCENT_RISK"];self.save();return
         target=hi; reward=target-entryref
