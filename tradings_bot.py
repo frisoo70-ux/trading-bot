@@ -2414,10 +2414,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="card" id="rangeManipPaperPanel" style="margin-top:12px;border-color:#0891b2;display:none"><h3>🧪 Range / Manipulation / Volume Profile — PAPER</h3><div class="muted">Range → sweep sous le range → reclaim → retest du niveau Volume Profile → rejet haussier. LONG uniquement. SL sous le plus bas de la manipulation; TP sur le high du range (liquidité). 5m · PAPER uniquement.</div><div class="liveGrid" style="margin-top:10px"><div class="liveBox"><div class="liveLabel">Equity</div><div class="liveVal" id="rangeManipEquity">-</div></div><div class="liveBox"><div class="liveLabel">PnL réalisé</div><div class="liveVal" id="rangeManipPnl">-</div></div><div class="liveBox"><div class="liveLabel">Winrate</div><div class="liveVal" id="rangeManipWinrate">-</div></div><div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="rangeManipTrades">-</div></div><div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="rangeManipPF">-</div></div><div class="liveBox"><div class="liveLabel">Positions ouvertes</div><div class="liveVal" id="rangeManipOpen">-</div></div></div><div class="muted" id="rangeManipPositions" style="margin-top:8px">Aucune position.</div><div class="muted" id="rangeManipDiagnostics" style="margin-top:8px">Diagnostics : en attente.</div><div class="scroll" style="margin-top:10px"><table id="rangeManipTradesTable"></table></div></div>
   <div class="card" id="rangeChartPanel" style="margin-top:12px;border-color:#0891b2">
     <h3>📈 Range Manipulation · Volume Profile · PAPER</h3>
-    <div class="muted">Historique 5 minutes continu · un rectangle par range utilisé par la stratégie, un point bleu par achat. Glisse vers la gauche pour charger le passé.</div>
+    <div class="muted">Historique 5 minutes continu · un rectangle par range validé, point orange au POC dès détection, point bleu par achat. Glisse vers la gauche pour charger le passé.</div>
     <div style="display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap"><label for="rangeChartSymbol">Token</label><select id="rangeChartSymbol" class="chartSelect" onchange="loadRangeChart()"><option>SOL</option><option>XRP</option><option>kSHIB</option><option>HYPE</option><option>ZEC</option></select><button type="button" onclick="loadRangeChart()">↻ Actualiser</button></div>
     <div id="rangeChartStatus" class="muted">Chargement de l’historique 5 minutes…</div><div id="rangeChart" style="height:440px;width:100%;margin-top:8px"></div>
-    <div id="rangeChartLegend" class="muted" style="margin-top:8px">Rectangles verts = ranges · points bleus = achats</div>
+    <div id="rangeChartLegend" class="muted" style="margin-top:8px">Rectangles verts = ranges · points orange = POC · points bleus = achats</div>
   </div>
 
 
@@ -3029,11 +3029,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     ranges.append({"start": start_ms // 1000, "end": end_ms // 1000, "high": high, "low": low})
 
             def chart_time_ms(value):
-
                 try:
                     return int(float(value))
                 except (TypeError, ValueError):
                     return None
+
+            # POC du range actuellement évalué: l'afficher dès sa détection,
+            # indépendamment de l'existence d'une position/trade.
+            diag_poc = diagnostics.get("volume_level")
+            diag_time = chart_time_ms(diagnostics.get("last_candle"))
+            if diag_poc is not None and diag_time is not None and diagnostics.get("status") not in ("NO_SETUP",)::
+                try:
+                    pocs.append({"time": diag_time // 1000, "price": float(diag_poc), "kind": "DETECTED_RANGE"})
+                except (TypeError, ValueError):
+                    pass
 
             def add_range_and_entry(record):
                 audit = record.get("entry_audit") or {}
