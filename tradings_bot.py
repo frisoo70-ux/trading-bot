@@ -3038,7 +3038,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # indépendamment de l'existence d'une position/trade.
             diag_poc = diagnostics.get("volume_level")
             diag_time = chart_time_ms(diagnostics.get("last_candle"))
-            if diag_poc is not None and diag_time is not None and diagnostics.get("status") not in ("NO_SETUP",)::
+            if diag_poc is not None and diag_time is not None and diagnostics.get("status") not in ("NO_SETUP",):
                 try:
                     pocs.append({"time": diag_time // 1000, "price": float(diag_poc), "kind": "DETECTED_RANGE"})
                 except (TypeError, ValueError):
