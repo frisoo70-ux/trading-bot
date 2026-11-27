@@ -3017,7 +3017,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             for item in (state.get("range_history") or []):
                 if item.get("symbol") != symbol or item.get("validated") is not True:
                     continue
-                start_ms = chart_time_ms(item.get("start")) if "chart_time_ms" in locals() else None
                 try:
                     start_ms = int(float(item.get("start")))
                     end_ms = int(float(item.get("end")))
@@ -3086,6 +3085,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             ranges.sort(key=lambda item: item["start"])
             entries.sort(key=lambda item: item["time"])
+            pocs.sort(key=lambda item: item["time"])
+            exits.sort(key=lambda item: item["time"])
             candles.sort(key=lambda item: item["time"])
             return self._json({
                 "ready": bool(candles),
