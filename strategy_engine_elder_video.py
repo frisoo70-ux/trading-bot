@@ -5,7 +5,7 @@ rather than numerically prescriptive. Closed candles only; no exchange orders.
 """
 from __future__ import annotations
 import math
-from strategy_engine_v2_paper import V2PaperEngine, _num, _ms
+from strategy_engine_v2_paper import V2PaperEngine, _num, _ms, candle_exit
 
 ENGINE_VERSION = "elder-video-paper-1.0"
 STRATEGY_ID = "ELDER_VIDEO_LIQUIDITY_OB_RETEST"
@@ -88,6 +88,60 @@ class ElderVideoPaperEngine(V2PaperEngine):
         if not isinstance(s.get("last_video_diagnostics"), dict): s["last_video_diagnostics"] = {}
         return s
 
+    def _manage_video_position(self, pos, minute_df, current_price, execution_estimator):
+        """Process video-position protection in candle order; never scan ahead for TP1."""
+        if "time" not in minute_df.columns:
+            pos["last_price"] = _num(current_price, pos.get("entry_price"))
+            self.save()
+            return
+        entry_t = _ms(pos.get("entry_candle_time")) or 0
+        last_t = _ms(pos.get("last_processed_candle_time")) or entry_t
+        rows = minute_df[minute_df["time"].astype("int64") > max(entry_t, last_t)]
+        for _, bar in rows.iterrows():
+            ct = _ms(bar.get("time"))
+            if ct is None:
+                continue
+            op, high, low = float(bar["open"]), float(bar["high"]), float(bar["low"])
+            stop = _num(pos.get("stop"))
+            entry = _num(pos.get("entry_price"))
+            target = _num(pos.get("target"))
+            tp1 = _num(pos.get("tp1"), float("inf"))
+
+            # Before TP1, the original stop is evaluated first. If it is hit,
+            # the trade exits before any later TP1 candle can move it to BE.
+            if not pos.get("tp1_reached"):
+                if low <= stop:
+                    fill = op if 0 < op < stop else stop
+                    self._close(pos, fill, "ELDER_VIDEO_STOP", execution_estimator, ct)
+                    return
+                if not math.isfinite(tp1):
+                    reason, price = candle_exit(pos, bar)
+                    if reason:
+                        self._close(pos, price, "ELDER_VIDEO_" + reason, execution_estimator, ct)
+                        return
+                elif high >= tp1:
+                    pos["tp1_reached"] = True
+                    pos["stop"] = max(stop, entry)
+                    # Conservative same-candle ambiguity: after TP1, a return
+                    # to entry is treated as a breakeven exit before TP2.
+                    if low <= entry:
+                        self._close(pos, entry, "ELDER_VIDEO_BREAKEVEN_STOP", execution_estimator, ct)
+                        return
+                    if high >= target:
+                        self._close(pos, target, "ELDER_VIDEO_TARGET", execution_estimator, ct)
+                        return
+            else:
+                reason, price = candle_exit(pos, bar)
+                if reason:
+                    label = "ELDER_VIDEO_BREAKEVEN_STOP" if reason == "STOP" and _num(pos.get("stop")) >= entry else "ELDER_VIDEO_" + reason
+                    self._close(pos, price, label, execution_estimator, ct)
+                    return
+
+            pos["last_processed_candle_time"] = ct
+            pos["last_price"] = _num(bar.get("close"), current_price)
+        pos["last_price"] = _num(current_price, pos.get("entry_price"))
+        self.save()
+
     def process_symbol(self, symbol, daily_df, four_hour_df, hourly_df, half_hour_df,
                        fifteen_df, minute_df, candle_time, current_price, execution_estimator):
         symbol = str(symbol)
@@ -96,8 +150,8 @@ class ElderVideoPaperEngine(V2PaperEngine):
         s = self.load()
         pos = next((p for p in list(s["positions"]) if p.get("symbol") == symbol), None)
         if pos:
-            # Migrate/manage pre-existing Triple Screen positions safely: they
-            # have no TP field, so only their original protective stop applies.
+            # Preserve the old Triple Screen position handling while isolating the
+            # video strategy's TP1/BE state from historical bars.
             if pos.get("strategy_id") != STRATEGY_ID:
                 entry_t = _ms(pos.get("entry_candle_time")) or 0
                 last_t = _ms(pos.get("last_processed_candle_time")) or entry_t
@@ -113,19 +167,8 @@ class ElderVideoPaperEngine(V2PaperEngine):
                     pos["last_price"] = _num(current_price, pos.get("entry_price"))
                     self.save()
                 return {"status": "LEGACY_POSITION_MANAGED"}
-            # TP1 is a first protection checkpoint. The existing portfolio
-            # ledger supports full closes only: TP1 moves the stop to breakeven;
-            # TP2 remains the final full-exit target.
-            if not pos.get("tp1_reached"):
-                for _, bar in minute_df[minute_df["time"].astype("int64") > (_ms(pos.get("entry_candle_time")) or 0)].iterrows():
-                    if float(bar["high"]) >= _num(pos.get("tp1"), float("inf")):
-                        pos["tp1_reached"] = True
-                        pos["stop"] = max(_num(pos.get("stop")), _num(pos.get("entry_price")))
-                        self.save()
-                        break
-            self._manage(pos, minute_df, current_price, execution_estimator)
+            self._manage_video_position(pos, minute_df, current_price, execution_estimator)
             return {"status": "POSITION_MANAGED"}
-
         ct = _ms(candle_time)
         if ct is None: return {"status": "INVALID_CANDLE_TIME"}
         if _ms(s["last_evaluated_candle_by_symbol"].get(symbol)) == ct:
