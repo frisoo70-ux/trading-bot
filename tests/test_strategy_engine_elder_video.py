@@ -116,5 +116,18 @@ class ElderVideoStrategyTests(unittest.TestCase):
             self.assertEqual(trade["exit_reason"], "ELDER_VIDEO_TARGET")
             self.assertAlmostEqual(trade["exit"], 120.0)
 
+    def test_earlier_stop_bar_prevents_later_tp1_lookahead(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = self._engine_with_video_position(tmp)
+            bars = [
+                {"time": 1000, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10},
+                {"time": 2000, "open": 99, "high": 105, "low": 94, "close": 96, "volume": 10},
+                {"time": 3000, "open": 101, "high": 111, "low": 101, "close": 110, "volume": 10},
+            ]
+            self._run_position(engine, bars)
+            trade = engine.load()["trades"][-1]
+            self.assertEqual(trade["exit_reason"], "ELDER_VIDEO_STOP")
+            self.assertAlmostEqual(trade["exit"], 95.0)
+
 if __name__ == "__main__":
     unittest.main()
