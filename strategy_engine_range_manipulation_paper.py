@@ -145,10 +145,13 @@ class RangeManipulationPaper:
         if width>0.05 or width<0.0015:
             self.close_active_range(s,symbol)
             diag["status"]="NO_SETUP";diag["rejection_reasons"]=["RANGE_OUTSIDE_0_15_TO_5_PERCENT"];s["diagnostics"][symbol]=diag;self.save();return
-        self.record_range(s,symbol,base,hi,lo,ct)
         if quality_reasons:
+            # Rejected candidates must never appear on the dashboard as validated ranges.
+            self.close_active_range(s,symbol)
             diag["status"]="NO_SETUP";diag["rejection_reasons"]=quality_reasons
             s["diagnostics"][symbol]=diag;self.save();return
+        # Record only structurally validated ranges, after quality filters pass.
+        self.record_range(s,symbol,base,hi,lo,ct)
         lows=recent.low.astype(float); closes=recent.close.astype(float)
         sweep_idx=[i for i in range(len(recent)) if n(recent.iloc[i].low)<lo and n(recent.iloc[i].close)>lo]
         # Allow the sweep/reclaim to occur on any of the last five bars; entry confirmation may follow it.
