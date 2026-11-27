@@ -188,7 +188,7 @@ class RangeManipulationPaper:
           "audit_version":1,"strategy_version":VERSION,"symbol":symbol,"evaluated_at":datetime.now().isoformat(),
           "evaluation_candle":candle_record(last),"range_window_candles":[candle_record(r) for _,r in base.iterrows()],
           "confirmation_window_candles":[candle_record(r) for _,r in recent.iterrows()],
-          "range":{"high":hi,"low":lo,"width_pct":width*100},
+          "range":{"high":hi,"low":lo,"width_pct":width*100,"quality":dict(range_quality)},
           "volume_profile":{"method":"24 bins; typical_price=(high+low+close)/3; volume summed over base window","bins":bins,"bin_step":step,"level":level,"max_bin_volume":max(vp) if vp else 0.0,"bin_volumes":vp},
           "sweep":{"detected":sweep,"sweep_low":sweep_low,"range_low":lo,"candidate_sweep_candles":[candle_record(recent.iloc[i]) for i in sweep_idx]},
           "retest":{"vp_retest":vp_retest,"range_low_retest":range_retest,"any_retest":retest,"distance_close_to_vp":abs(n(last.close)-level),"tolerance":tolerance},
