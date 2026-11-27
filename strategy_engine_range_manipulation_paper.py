@@ -76,7 +76,7 @@ class RangeManipulationPaper:
         range_id=f"{symbol}:{start_ms}:{eval_ms}"
         history.append({"id":range_id,"symbol":symbol,"start":start_ms,"end":end_ms,
                         "high":float(hi),"low":float(lo),"last_seen_eval":eval_ms,
-                        "samples":1,"status":"ACTIVE"})
+                        "samples":1,"status":"ACTIVE","validated":True})
         active[symbol]=range_id
         if len(history)>2000:
             s["range_history"]=history[-2000:]
