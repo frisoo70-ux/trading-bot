@@ -16,7 +16,7 @@ class RangeManipulationPaper:
         self.max_positions=int(max_positions); self.max_exposure=float(max_exposure); self.on_save=on_save
         self.lock=threading.RLock(); self.state=None
     def empty(self):
-        return {"engine_version":VERSION,"initial_balance":self.initial,"realized_pnl":0.0,"positions":[],"trades":[],"diagnostics":{},"last_evaluated_candle_by_symbol":{},"range_history":[],"active_range_by_symbol":{},"updated_at":None}
+        return {"engine_version":VERSION,"initial_balance":self.initial,"realized_pnl":0.0,"positions":[],"trades":[],"diagnostics":{},"last_evaluated_candle_by_symbol":{},"range_history":[],"active_range_by_symbol":{},"setup_by_symbol":{},"updated_at":None}
     def load(self):
         with self.lock:
             if self.state is None:
@@ -30,6 +30,7 @@ class RangeManipulationPaper:
                 if not isinstance(s.get("last_evaluated_candle_by_symbol"),dict): s["last_evaluated_candle_by_symbol"]={}
                 if not isinstance(s.get("range_history"),list): s["range_history"]=[]
                 if not isinstance(s.get("active_range_by_symbol"),dict): s["active_range_by_symbol"]={}
+                if not isinstance(s.get("setup_by_symbol"),dict): s["setup_by_symbol"]={}
                 self.state=s
             return self.state
     def save(self):
@@ -83,27 +84,16 @@ class RangeManipulationPaper:
     def process_symbol(self,symbol,df,current_price,ct,execution):
         if df is None or len(df)<25 or not all(c in df.columns for c in ("time","open","high","low","close","volume")):return
         s=self.load(); symbol=str(symbol); price=n(current_price)
-        # Use the last CLOSED 5m candle exclusively for PAPER decisions.
-        last_closed=df.iloc[-1]
-        closed_price=n(last_closed.get("close"),price)
-        closed_time=str(last_closed.get("time",ct))
+        last=df.iloc[-1]; closed_price=n(last.get("close"),price); key=str(last.get("time",ct))
         pos=next((p for p in s["positions"] if p["symbol"]==symbol),None)
         if pos:
             pos["current_price"]=closed_price
-            candle_low=n(last_closed.get("low"),closed_price)
-            candle_high=n(last_closed.get("high"),closed_price)
-            # Conservative OHLC handling: if both levels are touched, stop wins.
-            if candle_low<=n(pos.get("stop")):
-                self.close(pos,pos["stop"],"STOP",execution,closed_time)
-            elif candle_high>=n(pos.get("target")):
-                self.close(pos,pos["target"],"TARGET",execution,closed_time)
+            candle_low=n(last.get("low"),closed_price); candle_high=n(last.get("high"),closed_price)
+            if candle_low<=n(pos.get("stop")): self.close(pos,pos["stop"],"STOP",execution,key)
+            elif candle_high>=n(pos.get("target")): self.close(pos,pos["target"],"TARGET",execution,key)
             else:
-                pos["unrealized_pnl"]=(closed_price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-closed_price*pos["qty"]*pos["fee_rate"]
-                self.save()
+                pos["unrealized_pnl"]=(closed_price-pos["entry_price"])*pos["qty"]-pos["entry_fee"]-closed_price*pos["qty"]*pos["fee_rate"]; self.save()
             return
-        price=closed_price
-        ct=closed_time
-        key=str(ct)
         if s["last_evaluated_candle_by_symbol"].get(symbol)==key:return
         s["last_evaluated_candle_by_symbol"][symbol]=key
         rows=df.tail(26).copy()
@@ -111,12 +101,8 @@ class RangeManipulationPaper:
         base=rows.iloc[-26:-6]; recent=rows.iloc[-6:-1]; last=rows.iloc[-1]
         hi=n(base.high.max()); lo=n(base.low.min()); width=(hi-lo)/max((hi+lo)/2,1e-12)
         diag={"symbol":symbol,"range_high":hi,"range_low":lo,"range_pct":width*100,"status":"WAIT","last_candle":key,"rejection_reasons":[]}
-        # Consolidation quality: envelope size alone does not establish a sideways range.
-        closes_base=[n(x) for x in base.close.tolist()]
-        highs_base=[n(x) for x in base.high.tolist()]
-        lows_base=[n(x) for x in base.low.tolist()]
-        span=max(hi-lo,1e-12)
-        xvals=list(range(len(closes_base))); xmean=sum(xvals)/len(xvals); ymean=sum(closes_base)/len(closes_base)
+        closes_base=[n(x) for x in base.close.tolist()]; highs_base=[n(x) for x in base.high.tolist()]; lows_base=[n(x) for x in base.low.tolist()]
+        span=max(hi-lo,1e-12); xvals=list(range(len(closes_base))); xmean=sum(xvals)/len(xvals); ymean=sum(closes_base)/len(closes_base)
         denom=sum((x-xmean)**2 for x in xvals) or 1.0
         slope=sum((x-xmean)*(y-ymean) for x,y in zip(xvals,closes_base))/denom
         drift_pct_range=abs(slope*(len(closes_base)-1))/span
@@ -126,96 +112,90 @@ class RangeManipulationPaper:
             inter=max(0.0,min(n(prev.high),n(cur.high))-max(n(prev.low),n(cur.low)))
             union=max(n(prev.high),n(cur.high))-min(n(prev.low),n(cur.low))
             overlap_scores.append(inter/max(union,1e-12))
-        overlap_mean=sum(overlap_scores)/max(len(overlap_scores),1)
-        touch_band=span*0.20
-        upper_touches=sum(1 for h in highs_base if h>=hi-touch_band)
-        lower_touches=sum(1 for l in lows_base if l<=lo+touch_band)
-        range_quality={"normalized_close_drift":drift_pct_range,"mean_candle_overlap":overlap_mean,
-                       "upper_boundary_touches":upper_touches,"lower_boundary_touches":lower_touches,
-                       "base_candles":len(base),"quality_pass":False}
-        diag["range_quality"]=range_quality
-        quality_reasons=[]
-        if drift_pct_range>0.40: quality_reasons.append("RANGE_DIRECTIONAL_DRIFT_TOO_HIGH")
-        if overlap_mean<0.35: quality_reasons.append("RANGE_CANDLE_OVERLAP_TOO_LOW")
-        if upper_touches<2: quality_reasons.append("INSUFFICIENT_UPPER_BOUNDARY_REACTIONS")
-        if lower_touches<2: quality_reasons.append("INSUFFICIENT_LOWER_BOUNDARY_REACTIONS")
-        range_quality["quality_pass"]=not quality_reasons
-        diag["range_quality_reasons"]=quality_reasons
-        # Envelope bounds remain unchanged; quality checks now gate entry setups.
+        overlap_mean=sum(overlap_scores)/max(len(overlap_scores),1); touch_band=span*0.20
+        upper_touches=sum(1 for h in highs_base if h>=hi-touch_band); lower_touches=sum(1 for l in lows_base if l<=lo+touch_band)
+        quality={"normalized_close_drift":drift_pct_range,"mean_candle_overlap":overlap_mean,"upper_boundary_touches":upper_touches,"lower_boundary_touches":lower_touches,"base_candles":len(base),"quality_pass":False}
+        diag["range_quality"]=quality; quality_reasons=[]
+        if drift_pct_range>0.40:quality_reasons.append("RANGE_DIRECTIONAL_DRIFT_TOO_HIGH")
+        if overlap_mean<0.35:quality_reasons.append("RANGE_CANDLE_OVERLAP_TOO_LOW")
+        if upper_touches<2:quality_reasons.append("INSUFFICIENT_UPPER_BOUNDARY_REACTIONS")
+        if lower_touches<2:quality_reasons.append("INSUFFICIENT_LOWER_BOUNDARY_REACTIONS")
+        quality["quality_pass"]=not quality_reasons;diag["range_quality_reasons"]=quality_reasons
         if width>0.05 or width<0.0015:
-            self.close_active_range(s,symbol)
+            self.close_active_range(s,symbol);s.setdefault("setup_by_symbol",{}).pop(symbol,None)
             diag["status"]="NO_SETUP";diag["rejection_reasons"]=["RANGE_OUTSIDE_0_15_TO_5_PERCENT"];s["diagnostics"][symbol]=diag;self.save();return
         if quality_reasons:
-            # Rejected candidates must never appear on the dashboard as validated ranges.
-            self.close_active_range(s,symbol)
-            diag["status"]="NO_SETUP";diag["rejection_reasons"]=quality_reasons
-            s["diagnostics"][symbol]=diag;self.save();return
-        # Record only structurally validated ranges, after quality filters pass.
-        self.record_range(s,symbol,base,hi,lo,ct)
-        lows=recent.low.astype(float); closes=recent.close.astype(float)
-        sweep_idx=[i for i in range(len(recent)) if n(recent.iloc[i].low)<lo and n(recent.iloc[i].close)>lo]
-        # Allow the sweep/reclaim to occur on any of the last five bars; entry confirmation may follow it.
-        sweep=bool(sweep_idx) or (n(last.low)<lo and n(last.close)>lo)
-        sweep_low=min([n(recent.iloc[i].low) for i in sweep_idx]+([n(last.low)] if n(last.low)<lo and n(last.close)>lo else [])) if sweep else n(recent.low.min())
-        bins=24; step=(hi-lo)/bins; vp=[0.0]*bins
+            self.close_active_range(s,symbol);s.setdefault("setup_by_symbol",{}).pop(symbol,None)
+            diag["status"]="NO_SETUP";diag["rejection_reasons"]=quality_reasons;s["diagnostics"][symbol]=diag;self.save();return
+        self.record_range(s,symbol,base,hi,lo,key)
+        bins=24;step=(hi-lo)/bins;vp=[0.0]*bins
         for _,row in base.iterrows():
-            typ=(n(row.high)+n(row.low)+n(row.close))/3
-            ix=max(0,min(bins-1,int((typ-lo)/max(step,1e-12))))
+            typ=(n(row.high)+n(row.low)+n(row.close))/3; ix=max(0,min(bins-1,int((typ-lo)/max(step,1e-12))))
             vp[ix]+=n(row.volume)
         level=lo+(vp.index(max(vp))+0.5)*step if step>0 else (hi+lo)/2
-        tolerance=max(step*2.5,price*0.003)
-        # Flexible retest: VP zone OR reclaimed range-low zone. A subsequent bullish close,
-        # higher close, or wick rejection can confirm rather than demanding one candle shape.
-        vp_retest=abs(n(last.close)-level)<=tolerance or abs(n(last.low)-level)<=tolerance
-        range_retest=n(last.low)<=lo+tolerance and n(last.close)>lo
-        retest=vp_retest or range_retest
-        bullish_body=n(last.close)>n(last.open)
-        higher_close=n(last.close)>n(recent.iloc[-2].close)
-        rejection_wick=(n(last.close)-n(last.low))/max(n(last.high)-n(last.low),1e-12)>=0.55
-        confirmation=bullish_body or higher_close or rejection_wick
-        bullish=sweep and n(last.close)>lo and retest and confirmation
-        diag.update({"volume_level":level,"vp_bin_step":step,"vp_max_bin_volume":max(vp) if vp else 0.0,
-          "low_sweep_reclaim":sweep,"sweep_low":sweep_low,"retest":retest,"vp_retest":vp_retest,
-          "range_low_retest":range_retest,"retest_distance":abs(n(last.close)-level),"retest_tolerance":tolerance,
-          "bullish_candle":bullish_body,"higher_close":higher_close,"wick_rejection":rejection_wick,
-          "confirmation":confirmation,"confirmation_close":n(last.close)})
-        if not sweep:diag["rejection_reasons"].append("NO_SWEEP_RECLAIM")
-        if not retest:diag["rejection_reasons"].append("NO_VP_OR_RANGE_LOW_RETEST")
-        if not confirmation:diag["rejection_reasons"].append("NO_BULLISH_CONFIRMATION")
-        diag["status"]="SETUP" if bullish else "WAIT";s["diagnostics"][symbol]=diag
-        if not bullish:self.save();return
-        # Frozen audit record for this entry decision (stored with the position and trade).
+        # A setup is persistent and advances only on later closed candles.
+        setups=s.setdefault("setup_by_symbol",{}); setup=setups.get(symbol)
+        if setup and (setup.get("range_high")!=hi or setup.get("range_low")!=lo):
+            # Preserve the frozen POC/range during the setup; do not silently re-anchor.
+            hi=n(setup.get("range_high"),hi);lo=n(setup.get("range_low"),lo);level=n(setup.get("poc"),level)
+        if not setup:
+            sweep_rows=[]
+            for _,r in recent.iterrows():
+                if n(r.low)<lo and n(r.close)>lo:sweep_rows.append(r)
+            if n(last.low)<lo and n(last.close)>lo:sweep_rows.append(last)
+            if sweep_rows:
+                sw=min(sweep_rows,key=lambda r:n(r.low))
+                setup={"stage":"MANIPULATION","range_high":hi,"range_low":lo,"poc":level,
+                       "sweep_low":n(sw.low),"sweep_time":str(sw.time),"created_at":key}
+                setups[symbol]=setup
+        tolerance=max(step*1.25,price*0.0015)
+        stage=setup.get("stage") if setup else "NO_MANIPULATION"
+        # Stages are only advanced by candles occurring strictly after the sweep candle.
+        if setup and key>str(setup.get("sweep_time")):
+            if stage=="MANIPULATION" and n(last.close)>level:
+                setup["stage"]="ABOVE_POC";setup["above_poc_time"]=key;stage="ABOVE_POC"
+            elif stage=="ABOVE_POC" and n(last.low)<=level+tolerance and n(last.high)>=level-tolerance and n(last.close)>=level-tolerance:
+                setup["stage"]="POC_RETEST";setup["retest_time"]=key;stage="POC_RETEST"
+            elif stage=="POC_RETEST" and key>str(setup.get("retest_time")) and n(last.close)>n(last.open) and n(last.close)>level:
+                setup["stage"]="CONFIRMED";setup["confirmation_time"]=key;stage="CONFIRMED"
+        diag.update({"volume_level":level,"poc_frozen":bool(setup),"setup_stage":stage,
+          "low_sweep_reclaim":bool(setup),"sweep_low":setup.get("sweep_low") if setup else None,
+          "poc_crossed":stage in ("ABOVE_POC","POC_RETEST","CONFIRMED"),
+          "poc_retested":stage in ("POC_RETEST","CONFIRMED"),"confirmation":stage=="CONFIRMED",
+          "retest_tolerance":tolerance,"confirmation_close":n(last.close)})
+        if not setup:diag["rejection_reasons"].append("NO_SWEEP_RECLAIM")
+        elif stage=="MANIPULATION":diag["rejection_reasons"].append("WAITING_FOR_CLOSE_ABOVE_POC")
+        elif stage=="ABOVE_POC":diag["rejection_reasons"].append("WAITING_FOR_POC_RETEST")
+        elif stage=="POC_RETEST":diag["rejection_reasons"].append("WAITING_FOR_POST_RETEST_BULLISH_CONFIRMATION")
+        diag["status"]="SETUP" if stage=="CONFIRMED" else "WAIT";s["diagnostics"][symbol]=diag
+        if stage!="CONFIRMED":self.save();return
         def candle_record(row):
-            return {k: (str(row[k]) if k == "time" else n(row[k])) for k in ("time","open","high","low","close","volume")}
-        audit={
-          "audit_version":1,"strategy_version":VERSION,"symbol":symbol,"evaluated_at":datetime.now().isoformat(),
+            return {k:(str(row[k]) if k=="time" else n(row[k])) for k in ("time","open","high","low","close","volume")}
+        audit={"audit_version":2,"strategy_version":VERSION,"symbol":symbol,"evaluated_at":datetime.now().isoformat(),
           "evaluation_candle":candle_record(last),"range_window_candles":[candle_record(r) for _,r in base.iterrows()],
           "confirmation_window_candles":[candle_record(r) for _,r in recent.iterrows()],
-          "range":{"high":hi,"low":lo,"width_pct":width*100,"quality":dict(range_quality)},
-          "volume_profile":{"method":"24 bins; typical_price=(high+low+close)/3; volume summed over base window","bins":bins,"bin_step":step,"level":level,"max_bin_volume":max(vp) if vp else 0.0,"bin_volumes":vp},
-          "sweep":{"detected":sweep,"sweep_low":sweep_low,"range_low":lo,"candidate_sweep_candles":[candle_record(recent.iloc[i]) for i in sweep_idx]},
-          "retest":{"vp_retest":vp_retest,"range_low_retest":range_retest,"any_retest":retest,"distance_close_to_vp":abs(n(last.close)-level),"tolerance":tolerance},
-          "confirmation":{"bullish_body":bullish_body,"higher_close":higher_close,"wick_rejection":rejection_wick,"confirmation":confirmation,"close":n(last.close)},
-          "decision":{"setup":bullish,"rejection_reasons":list(diag["rejection_reasons"])}
-        }
+          "range":{"high":hi,"low":lo,"width_pct":width*100,"quality":dict(quality)},
+          "volume_profile":{"method":"24 bins; typical_price=(high+low+close)/3; frozen at sweep","bins":bins,"bin_step":step,"level":level,"max_bin_volume":max(vp) if vp else 0.0,"bin_volumes":vp},
+          "sweep":{"detected":True,"sweep_low":setup["sweep_low"],"range_low":lo,"sweep_time":setup["sweep_time"]},
+          "sequence":{"stage":"CONFIRMED","above_poc_time":setup.get("above_poc_time"),"retest_time":setup.get("retest_time"),"confirmation_time":setup.get("confirmation_time"),"poc":level},
+          "confirmation":{"bullish_body":True,"close":n(last.close),"confirmation":True},
+          "decision":{"setup":True,"rejection_reasons":[]}}
         diag["entry_audit_candidate"]=audit
-        entryref=price; manipulation_low=sweep_low; manipulation_high=n(recent.high.max())
-        # Place the stop a small buffer below the sweep extreme to avoid an exact-low stop.
-        stop=manipulation_low*(1.0-0.001); risk=entryref-stop
+        entryref=n(last.close);manipulation_low=n(setup["sweep_low"]);manipulation_high=n(last.high)
+        stop=manipulation_low*(1.0-0.001);risk=entryref-stop
         if risk<=0 or risk/entryref>0.025:
             diag["status"]="SKIP_RISK";diag["risk_pct"]=risk/entryref*100 if entryref else None;diag["rejection_reasons"]=["INVALID_OR_OVER_2_5_PERCENT_RISK"];self.save();return
-        target=hi; reward=target-entryref
+        target=hi;reward=target-entryref
         if reward<=0 or reward/risk<1.0 or target<=entryref:
             diag["status"]="SKIP_LOW_RR";diag["risk_pct"]=risk/entryref*100;diag["target_rr"]=reward/risk if risk else None;diag["rejection_reasons"]=["TARGET_OR_RR_INVALID"];self.save();return
         if len(s["positions"])>=self.max_positions or sum(p["notional"] for p in s["positions"])+self.size>self.max_exposure:
             diag["status"]="SKIP_CAPACITY";diag["rejection_reasons"]=["POSITION_OR_EXPOSURE_LIMIT"];self.save();return
-        ex=execution(symbol,"BUY",self.size,entryref) or {}
-        fill=n(ex.get("fill_price"),entryref);fee=n(ex.get("fee_rate"),0.00045);qty=self.size/fill
+        ex=execution(symbol,"BUY",self.size,entryref) or {};fill=n(ex.get("fill_price"),entryref);fee=n(ex.get("fee_rate"),0.00045);qty=self.size/fill
         p={"symbol":symbol,"side":"LONG","entry_price":fill,"entry_reference":entryref,"qty":qty,"notional":self.size,
           "entry_fee":qty*fill*fee,"fee_rate":fee,"stop":stop,"target":target,"manipulation_low":manipulation_low,
           "manipulation_high":manipulation_high,"target_basis":"OPPOSITE_RANGE_EXTREME","current_price":price,
           "entry_time":datetime.now().isoformat(),"entry_candle_time":key,"exit_reason":None,"entry_audit":audit}
-        s["positions"].append(p);diag["status"]="OPEN";diag["side"]="LONG";self.save()
+        s["positions"].append(p);setups.pop(symbol,None);diag["status"]="OPEN";diag["side"]="LONG";self.save()
     def close(self,p,reference,reason,execution,exit_candle_time=None):
         s=self.load(); ex=execution(p["symbol"],"SELL",p["notional"],reference) or {}
         fill=n(ex.get("fill_price"),reference); fee=n(ex.get("fee_rate"),p["fee_rate"]); direction=1
