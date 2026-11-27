@@ -561,6 +561,12 @@ PAPER_SLIPPAGE_RATE = 0.00020
 PAPER_INITIAL_BALANCE = 1000.0
 PAPER_LOCK = threading.RLock()
 PAPER_STATE = {"initial_balance": PAPER_INITIAL_BALANCE, "realized_pnl": 0.0, "position": None, "trades": [], "updated_at": None}
+RANGE_MANIPULATION_PAPER_ENGINE = RangeManipulationPaper(
+    DATA_DIR / "paper_range_manipulation_trades.json", initial_balance=1000.0,
+    trade_size=100.0, max_positions=5, max_exposure=500.0,
+    on_save=lambda: schedule_github_backup(),
+)
+
 PAPER_FEE_CACHE = {"rate": None, "source": "UNAVAILABLE", "updated_at": None}
 PAPER_FEE_CACHE_LOCK = threading.Lock()
 
@@ -1243,7 +1249,8 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
 def paper_process_cycle():
     load_paper_state()
 
-        # Range / manipulation / volume-profile retest strategy: isolated PAPER portfolio.
+    # Range / manipulation / volume-profile retest strategy: isolated PAPER portfolio.
+    if load_bot_config().get("execution_mode", "LIVE") == "PAPER":
         for range_symbol in PAPER_SYMBOLS:
             try:
                 range_df, range_ct, range_price = get_candles_for_interval(range_symbol, "5m")
