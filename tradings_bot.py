@@ -14,8 +14,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 from strategy_engine_v2 import evaluate_strategy_candidates
-from strategy_engine_v2_paper import V2PaperEngine
-from strategy_engine_elder_portfolio import ElderPaperEngine
 from strategy_engine_range_manipulation_paper import RangeManipulationPaper
 from paper_state_guard import should_restore_paper_state, should_upload_paper_state
 
@@ -125,8 +123,6 @@ GITHUB_BACKUP_FILES = [
     "bot_config.json",
     "adaptive_config.json",
     "paper_trades.json",
-    "paper_v2_trades.json",
-    "paper_elder_trades.json",
     "paper_range_manipulation_trades.json",
 ]
 
@@ -565,21 +561,6 @@ PAPER_SLIPPAGE_RATE = 0.00020
 PAPER_INITIAL_BALANCE = 1000.0
 PAPER_LOCK = threading.RLock()
 PAPER_STATE = {"initial_balance": PAPER_INITIAL_BALANCE, "realized_pnl": 0.0, "position": None, "trades": [], "updated_at": None}
-V2_PAPER_ENGINE = V2PaperEngine(
-    DATA_DIR / "paper_v2_trades.json", initial_balance=1000.0, trade_size=100.0,
-    max_positions=5, max_gross_exposure=500.0, leverage=1.0, min_score=55.0,
-    on_save=lambda: schedule_github_backup(),
-)
-ELDER_PAPER_ENGINE = ElderPaperEngine(
-    DATA_DIR / "paper_elder_trades.json", initial_balance=1000.0, trade_size=100.0,
-    max_positions=5, max_gross_exposure=500.0, leverage=1.0, min_score=0.0,
-    on_save=lambda: schedule_github_backup(),
-)
-RANGE_MANIPULATION_PAPER_ENGINE = RangeManipulationPaper(
-    DATA_DIR / "paper_range_manipulation_trades.json", initial_balance=1000.0,
-    trade_size=100.0, max_positions=5, max_exposure=500.0,
-    on_save=lambda: schedule_github_backup(),
-)
 PAPER_FEE_CACHE = {"rate": None, "source": "UNAVAILABLE", "updated_at": None}
 PAPER_FEE_CACHE_LOCK = threading.Lock()
 
@@ -1261,49 +1242,6 @@ def paper_manage_position(symbol, df, current_price, candle_time, btc_context=No
 
 def paper_process_cycle():
     load_paper_state()
-
-    # Separate V2 virtual portfolio. It runs only in PAPER and never calls
-    # any exchange order-submission function.
-    if load_bot_config().get("execution_mode", "LIVE") == "PAPER":
-        for v2_symbol in PAPER_SYMBOLS:
-            try:
-                v2_df, v2_candle_time, v2_price = prepare_df_for_symbol(v2_symbol)
-                if v2_df is not None and not v2_df.empty:
-                    V2_PAPER_ENGINE.process_symbol(
-                        symbol=v2_symbol,
-                        df=v2_df,
-                        candle_time=v2_candle_time,
-                        current_price=v2_price,
-                        evaluator=evaluate_strategy_candidates,
-                        execution_estimator=paper_estimate_execution,
-                        timeframe=get_active_timeframe(),
-                    )
-            except Exception as v2_error:
-                print(f"[V2 PAPER] Cycle error {v2_symbol}:", str(v2_error)[:180])
-            try:
-                elder_frames = {}
-                for interval in ("1d", "4h", "1h", "30m", "15m", "1m"):
-                    frame, frame_ct, frame_price = get_candles_for_interval(v2_symbol, interval)
-                    elder_frames[interval] = frame
-                    if interval == "1m":
-                        elder_ct, elder_price = frame_ct, frame_price
-                if all(elder_frames.get(tf) is not None for tf in ("1d", "4h", "1h", "30m", "15m", "1m")):
-                    ELDER_PAPER_ENGINE.process_symbol(
-                        symbol=v2_symbol,
-                        daily_df=elder_frames["1d"],
-                        four_hour_df=elder_frames["4h"],
-                        hourly_df=elder_frames["1h"],
-                        half_hour_df=elder_frames["30m"],
-                        fifteen_df=elder_frames["15m"],
-                        minute_df=elder_frames["1m"],
-                        candle_time=elder_ct,
-                        current_price=elder_price,
-                        execution_estimator=paper_estimate_execution,
-                    )
-                else:
-                    print(f"[ELDER PAPER] {v2_symbol}: données multi-timeframe insuffisantes")
-            except Exception as elder_error:
-                print(f"[ELDER PAPER] Cycle error {v2_symbol}:", str(elder_error)[:180])
 
         # Range / manipulation / volume-profile retest strategy: isolated PAPER portfolio.
         for range_symbol in PAPER_SYMBOLS:
@@ -2232,8 +2170,6 @@ def compute_dashboard_stats():
         "open_position": get_open_position(),
         "live_trade": get_live_trade_snapshot_v48(),
         "config": load_bot_config(),
-        "strategy_v2_paper": V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
-        "elder_paper": ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
         "active_timeframe": get_active_timeframe(),
         "timeframe_options": TIMEFRAME_OPTIONS,
         "summary": {
@@ -2470,23 +2406,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="muted" id="executionModeLabel" style="margin-top:8px">Mode d’exécution : LIVE</div>
     <div style="margin-top:10px"><label class="toggle"><span>Exécution du bot<br><small style="color:#9ca3af;font-weight:500">LIVE = vrais ordres · PAPER = simulation sans ordre</small></span><select id="executionMode" class="chartSelect" onchange="applyPaperDashboardView(this.value)"><option value="LIVE">LIVE</option><option value="PAPER">PAPER TEST</option></select></label></div>
   </div>
-  <div class="card" id="v2PaperPanel" style="margin-top:12px;border-color:#2563eb;display:none">
-    <h3>🧪 Strategy V2 — portefeuille PAPER indépendant</h3>
-    <div class="muted">Simulation autonome des stratégies V2 · capital séparé de l'ancien PAPER · aucun ordre réel envoyé.</div>
-    <div class="liveGrid" style="margin-top:10px">
-      <div class="liveBox"><div class="liveLabel">Equity V2</div><div class="liveVal" id="v2PaperEquity">1 000 USDC</div></div>
-      <div class="liveBox"><div class="liveLabel">PnL réalisé V2</div><div class="liveVal" id="v2PaperPnl">0 USDC</div></div>
-      <div class="liveBox"><div class="liveLabel">Winrate V2</div><div class="liveVal" id="v2PaperWinrate">0%</div></div>
-      <div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="v2PaperTrades">0</div></div>
-      <div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="v2PaperPF">-</div></div>
-      <div class="liveBox"><div class="liveLabel">Drawdown max. (clôtures)</div><div class="liveVal" id="v2PaperDD">0%</div></div>
-    </div>
-    <div class="muted" id="v2PaperCosts" style="margin-top:10px">Frais/slippage estimés via carnet L2 · funding non simulé.</div>
-    <div class="muted" id="v2PaperPositions" style="margin-top:8px">Aucune position V2 ouverte.</div>
-    <div class="muted" id="v2PaperStrategies" style="margin-top:8px">Statistiques par stratégie : en attente.</div>
-    <div class="scroll" style="margin-top:10px"><table id="v2PaperTradesTable"></table></div>
-  </div>
-  <div class="card" id="elderPaperPanel" style="margin-top:12px;border-color:#7c3aed;display:none"><h3>🧪 Elder Video Strategy — PAPER indépendant</h3><div class="muted">PDL sweep → biais 4H → setup 1H/30m → cassure 15m → retest Order Block 1m · LONG uniquement · aucun ordre réel envoyé. TP1 1R / TP2 2R : hypothèses expérimentales.</div><div class="liveGrid" style="margin-top:10px"><div class="liveBox"><div class="liveLabel">Equity</div><div class="liveVal" id="elderEquity">-</div></div><div class="liveBox"><div class="liveLabel">PnL réalisé</div><div class="liveVal" id="elderPnl">-</div></div><div class="liveBox"><div class="liveLabel">Winrate</div><div class="liveVal" id="elderWinrate">-</div></div><div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="elderTrades">-</div></div><div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="elderPF">-</div></div><div class="liveBox"><div class="liveLabel">Drawdown max.</div><div class="liveVal" id="elderDD">-</div></div></div><div class="muted" id="elderPositions" style="margin-top:8px">Aucune position.</div><div class="scroll" style="margin-top:10px"><table id="elderTradesTable"></table></div></div>
   <div class="card" id="rangeManipPaperPanel" style="margin-top:12px;border-color:#0891b2;display:none"><h3>🧪 Range / Manipulation / Volume Profile — PAPER</h3><div class="muted">Range → sweep sous le range → reclaim → retest du niveau Volume Profile → rejet haussier. LONG uniquement. SL sous le plus bas de la manipulation; TP sur le high du range (liquidité). 5m · PAPER uniquement.</div><div class="liveGrid" style="margin-top:10px"><div class="liveBox"><div class="liveLabel">Equity</div><div class="liveVal" id="rangeManipEquity">-</div></div><div class="liveBox"><div class="liveLabel">PnL réalisé</div><div class="liveVal" id="rangeManipPnl">-</div></div><div class="liveBox"><div class="liveLabel">Winrate</div><div class="liveVal" id="rangeManipWinrate">-</div></div><div class="liveBox"><div class="liveLabel">Trades clôturés</div><div class="liveVal" id="rangeManipTrades">-</div></div><div class="liveBox"><div class="liveLabel">Profit factor</div><div class="liveVal" id="rangeManipPF">-</div></div><div class="liveBox"><div class="liveLabel">Positions ouvertes</div><div class="liveVal" id="rangeManipOpen">-</div></div></div><div class="muted" id="rangeManipPositions" style="margin-top:8px">Aucune position.</div><div class="muted" id="rangeManipDiagnostics" style="margin-top:8px">Diagnostics : en attente.</div><div class="scroll" style="margin-top:10px"><table id="rangeManipTradesTable"></table></div></div>
   <div class="card" id="rangeChartPanel" style="margin-top:12px;border-color:#0891b2">
     <h3>📈 Range Manipulation · Volume Profile · PAPER</h3>
@@ -3000,10 +2919,8 @@ table('postTrade',[
 ],(d.post_trade_analysis||[]).slice().reverse());
 document.getElementById('logs').textContent=(d.log_history||[]).slice(-80).join('\n')}
 async function loadPaper(){try{const r=await fetch("/api/paper"+window.location.search);const p=await r.json();document.getElementById("paperBalance").textContent=fmt(p.equity,2)+" USDC";document.getElementById("paperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("paperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("paperTrades").textContent=p.trades;const feeStatus=(p.fee_source||"INCONNU").includes("HYPERLIQUID")?"compte Hyperliquid":"secours (non personnalisé)";document.getElementById("paperCosts").textContent=`Frais taker : ${fmt((p.fee_rate||0)*100,4)}% · ${feeStatus} · Slippage : carnet L2 (secours si indisponible) · Funding perp non simulé`;const positions=p.positions||[];document.getElementById("paperPosition").textContent=positions.length?("PAPER · "+positions.length+"/"+p.max_positions+" positions · exposition "+fmt(p.open_notional,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.mode+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.tp1||q.target,6)).join("\n")):"Aucune position simulée.";table("paperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Mode",key:"mode"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
-async function loadElder(){try{const r=await fetch("/api/paper_elder"+window.location.search);const p=await r.json();document.getElementById("elderEquity").textContent=fmt(p.equity,2)+" USDC";document.getElementById("elderPnl").textContent=fmt(p.realized_pnl,4)+" USDC";document.getElementById("elderWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("elderTrades").textContent=p.closed_trades;document.getElementById("elderPF").textContent=p.profit_factor===null?"∞":fmt(p.profit_factor,2);document.getElementById("elderDD").textContent=fmt(p.max_drawdown_pct,2)+"%";document.getElementById("elderPositions").textContent=(p.positions||[]).map(q=>q.symbol+" · Entrée "+fmt(q.entry_price,6)+" · PnL latent "+fmt(q.unrealized_pnl,4)+" · SL "+fmt(q.stop,6)+" · TP "+fmt(q.target,6)).join("\n")||"Aucune position ouverte.";table("elderTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
 async function loadRangeManipPaper(){try{const r=await fetch("/api/paper_range_manipulation"+window.location.search);const p=await r.json();document.getElementById("rangeManipEquity").textContent=fmt(p.equity,2)+" USDC";document.getElementById("rangeManipPnl").textContent=fmt(p.realized_pnl,4)+" USDC";document.getElementById("rangeManipWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("rangeManipTrades").textContent=p.closed_trades;document.getElementById("rangeManipPF").textContent=p.profit_factor===null?"∞":fmt(p.profit_factor,2);document.getElementById("rangeManipOpen").textContent=p.open_positions+"/"+p.max_positions;document.getElementById("rangeManipPositions").textContent=(p.positions||[]).map(q=>q.side+" · "+q.symbol+" · entrée "+fmt(q.entry_price,6)+" · prix "+fmt(q.current_price,6)+" · PnL latent "+fmt(q.unrealized_pnl,4)+" · SL "+fmt(q.stop,6)+" · TP "+fmt(q.target,6)).join("\\n")||"Aucune position ouverte.";document.getElementById("rangeManipDiagnostics").textContent="Diagnostics : "+Object.entries(p.diagnostics||{}).map(([s,d])=>s+" · "+d.status+" · range "+fmt(d.range_pct,2)+"% · VP "+fmt(d.volume_level,6)).join(" | ")||"en attente.";table("rangeManipTradesTable",[{label:"Date",key:"entry_time"},{label:"Coin",key:"symbol"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
-async function loadPaperV2(){try{const r=await fetch("/api/paper_v2"+window.location.search);const p=await r.json();document.getElementById("v2PaperEquity").textContent=fmt(p.equity,2)+" USDC";document.getElementById("v2PaperPnl").innerHTML=`<span class="${cls(p.realized_pnl)}">${fmt(p.realized_pnl,4)} USDC</span>`;document.getElementById("v2PaperWinrate").textContent=fmt(p.winrate,1)+"%";document.getElementById("v2PaperTrades").textContent=p.closed_trades;document.getElementById("v2PaperPF").textContent=p.profit_factor===null?"∞":fmt(p.profit_factor,2);document.getElementById("v2PaperDD").textContent=fmt(p.max_drawdown_pct,2)+"%";const positions=p.positions||[];document.getElementById("v2PaperPositions").textContent=positions.length?("V2 · "+positions.length+"/"+p.max_positions+" positions · exposition max. "+fmt(p.max_gross_exposure,2)+" USDC · levier "+fmt(p.leverage,1)+"×\n"+positions.map(q=>q.side+" · "+q.symbol+" · "+q.strategy_id+" | Entrée "+fmt(q.entry_price,6)+" | Prix "+fmt(q.current_price,6)+" | PnL latent "+fmt(q.unrealized_pnl,4)+" USDC | SL "+fmt(q.stop,6)+" | TP "+fmt(q.target,6)).join("\n")):"Aucune position V2 ouverte.";const stats=p.by_strategy||{};document.getElementById("v2PaperStrategies").textContent="Par stratégie : "+(Object.keys(stats).length?Object.entries(stats).map(([k,v])=>k+" · "+v.trades+" trades · WR "+fmt(v.winrate,1)+"% · PnL "+fmt(v.net_pnl,4)+" USDC · PF "+(v.profit_factor===null?"∞":fmt(v.profit_factor,2))).join(" | "):"en attente des premiers trades clôturés");document.getElementById("v2PaperCosts").textContent="Frais et slippage estimés avec carnet L2 (secours si indisponible) · funding non simulé · capital initial indépendant : "+fmt(p.initial_balance,2)+" USDC";table("v2PaperTradesTable",[{label:"Date",key:"date"},{label:"Coin",key:"symbol"},{label:"Stratégie",key:"strategy_id"},{label:"Sens",key:"side"},{label:"PnL net",get:r=>fmt(r.net_pnl,4)+" USDC",cls:v=>cls(v)},{label:"Frais",get:r=>fmt(r.fees,4)+" USDC"},{label:"Sortie",key:"exit_reason"}],p.recent_trades||[]);}catch(e){}}
-load();loadPaper();loadPaperV2();loadElder();loadRangeManipPaper();loadRangeChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadPaperV2,5000);setInterval(loadElder,5000);setInterval(loadRangeManipPaper,5000);setInterval(loadChart,60000);
+load();loadPaper();loadRangeManipPaper();loadRangeChart();setInterval(load,10000);setInterval(loadPaper,5000);setInterval(loadRangeManipPaper,5000);setInterval(loadChart,60000);
 </script>
 </body></html>"""
 
@@ -3026,71 +2943,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
 
-        # Endpoint indépendant, lecture seule, protégé par un secret dédié.
-        # Le token n'est accepté que dans l'en-tête, jamais dans l'URL ni les logs.
-        if parsed.path == "/api/paper_elder/logs":
-            supplied = str(self.headers.get("X-Paper-Elder-Log-Token", "") or "")
-            if not PAPER_ELDER_LOG_TOKEN:
-                return self._json({"error": "log_access_not_configured"}, 503)
-            if not supplied or not hmac.compare_digest(supplied, PAPER_ELDER_LOG_TOKEN):
-                return self._json({"error": "unauthorized"}, 401)
-            # Trois moteurs PAPER indépendants : ne jamais agréger leurs capitaux/PnL.
-            legacy = paper_snapshot()
-            v2 = V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE)
-            elder = ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE)
-
-            def paper_engine_view(snapshot, diagnostic_keys=()):
-                return {
-                    "engine_version": snapshot.get("engine_version"),
-                    "mode": snapshot.get("mode", "PAPER"),
-                    "safe": snapshot.get("safe", True),
-                    "order_submission_enabled": False,
-                    "updated_at": snapshot.get("updated_at"),
-                    "portfolio": {
-                        key: snapshot.get(key) for key in (
-                            "initial_balance", "balance", "equity", "realized_pnl",
-                            "unrealized_pnl", "trades", "closed_trades", "wins", "losses",
-                            "winrate", "profit_factor", "max_drawdown_pct", "open_positions",
-                            "max_positions", "open_notional", "max_gross_exposure", "leverage"
-                        ) if key in snapshot
-                    },
-                    "positions": snapshot.get("positions", []),
-                    "recent_trades": snapshot.get("recent_trades", [])[:30],
-                    "diagnostics": {
-                        key: snapshot.get(key) for key in diagnostic_keys if key in snapshot
-                    },
-                }
-
-            # Redaction défensive avant d'exposer les logs runtime.
-            import re
-            def safe_log(line):
-                value = str(line)
-                value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
-                value = re.sub(r"(?i)((?:api[_ -]?key|secret|private[_ -]?key|token)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", value)
-                value = re.sub(r"0x[a-fA-F0-9]{64}", "[REDACTED_KEY]", value)
-                return value[:1000]
-
-            v2_state = V2_PAPER_ENGINE.load()
-            elder_state = ELDER_PAPER_ENGINE.load()
-            return self._json({
-                "ok": True,
-                "read_only": True,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "engines": {
-                    "legacy_paper": paper_engine_view(legacy),
-                    "strategy_v2_paper": paper_engine_view(v2, ("by_strategy",)),
-                    "elder_video_paper": paper_engine_view(elder, ("strategy", "last_video_diagnostics")),
-                },
-                "runtime": {
-                    "recent_logs": [safe_log(line) for line in list(LOG_HISTORY)[-250:]],
-                    "last_evaluated_candles": {
-                        "strategy_v2_paper": v2_state.get("last_evaluated_candle_by_symbol", {}),
-                        "elder_video_paper": elder_state.get("last_evaluated_candle_by_symbol", {}),
-                    },
-                    "github_sync": dict(GITHUB_SYNC_STATE),
-                },
-            })
-
         if not dashboard_auth_ok(self):
             return self._json({"error": "unauthorized"}, 401)
 
@@ -3102,12 +2954,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/paper":
             return self._json(paper_snapshot())
-
-        if parsed.path == "/api/paper_v2":
-            return self._json(V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE))
-
-        if parsed.path == "/api/paper_elder":
-            return self._json(ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE))
 
         if parsed.path == "/api/paper_range_manipulation":
             return self._json(RANGE_MANIPULATION_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE))
@@ -3472,8 +3318,6 @@ def _github_upload_paper_live_logs():
     PAPER_LIVE_LOGS_LAST_ATTEMPT_TS = now
 
     try:
-        v2_state = V2_PAPER_ENGINE.load()
-        elder_state = ELDER_PAPER_ENGINE.load()
         payload = {
             "ok": True,
             "read_only": True,
@@ -3481,16 +3325,10 @@ def _github_upload_paper_live_logs():
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "engines": {
                 "legacy_paper": paper_snapshot(),
-                "strategy_v2_paper": V2_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
-                "elder_video_paper": ELDER_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
                 "range_manipulation_paper": RANGE_MANIPULATION_PAPER_ENGINE.snapshot(default_fee_rate=PAPER_FEE_RATE),
             },
             "runtime": {
                 "recent_logs": list(LOG_HISTORY)[-250:],
-                "last_evaluated_candles": {
-                    "strategy_v2_paper": v2_state.get("last_evaluated_candle_by_symbol", {}),
-                    "elder_video_paper": elder_state.get("last_evaluated_candle_by_symbol", {}),
-                },
                 "github_sync": dict(GITHUB_SYNC_STATE),
             },
         }
@@ -4735,48 +4573,6 @@ def get_candles(symbol):
     except Exception as e:
         print(f"[ERREUR] Candles {symbol}:", e)
         return pd.DataFrame(), None, None
-
-
-def get_candles_for_interval(symbol, interval):
-    """Fetch CLOSED candles for a fixed Elder timeframe, independent of LIVE config."""
-    interval_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
-    cache_ttl = {"1m": 15, "5m": 30, "15m": 60, "30m": 120, "1h": 300, "4h": 600, "1d": 1800}
-    if interval not in interval_seconds:
-        raise ValueError(f"Unsupported Elder timeframe: {interval}")
-    try:
-        now = time.time()
-        payload = {
-            "type": "candleSnapshot",
-            "req": {
-                "coin": symbol,
-                "interval": interval,
-                "startTime": int((now - 220 * interval_seconds[interval]) * 1000),
-                "endTime": int(now * 1000),
-            },
-        }
-        data = info_post(
-            payload,
-            cache_key=f"elder_candles:{symbol}:{interval}",
-            cache_ttl=cache_ttl[interval],
-            max_retries=2,
-        )
-        if not isinstance(data, list) or len(data) < 60:
-            return None, None, None
-        rows = [{
-            "time": int(c["t"]), "open": float(c["o"]),
-            "high": float(c["h"]), "low": float(c["l"]),
-            "close": float(c["c"]), "volume": float(c["v"]),
-        } for c in data]
-        frame = pd.DataFrame(rows).drop_duplicates("time").sort_values("time").reset_index(drop=True)
-        if len(frame) < 60:
-            return None, None, None
-        confirmed = frame.iloc[:-1].copy()
-        if confirmed.empty:
-            return None, None, None
-        return confirmed, int(confirmed.iloc[-1]["time"]), float(frame.iloc[-1]["close"])
-    except Exception as exc:
-        print(f"[ELDER PAPER] Candles {interval} {symbol}:", str(exc)[:160])
-        return None, None, None
 
 
 def add_indicators(df):
