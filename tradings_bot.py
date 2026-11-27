@@ -3013,6 +3013,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             exits = []
             seen_ranges = set()
 
+            # Only explicitly validated range-history records are drawable.
+            for item in (state.get("range_history") or []):
+                if item.get("symbol") != symbol or item.get("validated") is not True:
+                    continue
+                start_ms = chart_time_ms(item.get("start")) if "chart_time_ms" in locals() else None
+                try:
+                    start_ms = int(float(item.get("start")))
+                    end_ms = int(float(item.get("end")))
+                    high, low = float(item.get("high")), float(item.get("low"))
+                except (TypeError, ValueError):
+                    continue
+                key = (start_ms, end_ms, high, low)
+                if key not in seen_ranges:
+                    seen_ranges.add(key)
+                    ranges.append({"start": start_ms // 1000, "end": end_ms // 1000, "high": high, "low": low})
+
             def chart_time_ms(value):
 
                 try:
