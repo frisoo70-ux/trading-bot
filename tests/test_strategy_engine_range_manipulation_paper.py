@@ -69,7 +69,8 @@ class RangeManipPaperTests(unittest.TestCase):
     def test_stop_first_when_closed_candle_touches_stop_and_target(self):
         e=self.make_engine();s=e.load()
         s["positions"]=[{"symbol":"BTC","side":"LONG","entry_price":100,"qty":1,"notional":100,"entry_fee":0,"fee_rate":0,"stop":95,"target":105,"current_price":100}]
-        df=pd.DataFrame([{"time":123,"open":100,"high":106,"low":94,"close":101,"volume":10}])
+        df=self.frame(100)
+        df.loc[df.index[-1],["time","open","high","low","close","volume"]]=[123,100,106,94,101,10]
         e.process_symbol("BTC",df,999,123,execution)
         self.assertEqual(len(e.load()["positions"]),0)
         self.assertEqual(e.load()["trades"][-1]["exit_reason"],"STOP")
