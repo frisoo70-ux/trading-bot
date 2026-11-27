@@ -32,7 +32,7 @@ class RangeManipPaperTests(unittest.TestCase):
             rows.append({"time":i,"open":101,"high":103,"low":99,"close":101,"volume":10})
         # Sweep below range, reclaim and a retest/rejection in subsequent candles.
         rows.extend([
-            {"time":20,"open":100,"high":101,"low":98,"close":100,"volume":12},
+            {"time":20,"open":100,"high":101,"low":98.6,"close":100,"volume":12},
             {"time":21,"open":100,"high":102,"low":99.2,"close":101,"volume":12},
             {"time":22,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
             {"time":23,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
