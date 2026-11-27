@@ -111,11 +111,44 @@ class RangeManipulationPaper:
         base=rows.iloc[-26:-6]; recent=rows.iloc[-6:-1]; last=rows.iloc[-1]
         hi=n(base.high.max()); lo=n(base.low.min()); width=(hi-lo)/max((hi+lo)/2,1e-12)
         diag={"symbol":symbol,"range_high":hi,"range_low":lo,"range_pct":width*100,"status":"WAIT","last_candle":key,"rejection_reasons":[]}
-        # More tolerant range envelope, still reject excessively volatile / trivial ranges.
+        # Consolidation quality: envelope size alone does not establish a sideways range.
+        closes_base=[n(x) for x in base.close.tolist()]
+        highs_base=[n(x) for x in base.high.tolist()]
+        lows_base=[n(x) for x in base.low.tolist()]
+        span=max(hi-lo,1e-12)
+        xvals=list(range(len(closes_base))); xmean=sum(xvals)/len(xvals); ymean=sum(closes_base)/len(closes_base)
+        denom=sum((x-xmean)**2 for x in xvals) or 1.0
+        slope=sum((x-xmean)*(y-ymean) for x,y in zip(xvals,closes_base))/denom
+        drift_pct_range=abs(slope*(len(closes_base)-1))/span
+        overlap_scores=[]
+        for i in range(1,len(base)):
+            prev=base.iloc[i-1]; cur=base.iloc[i]
+            inter=max(0.0,min(n(prev.high),n(cur.high))-max(n(prev.low),n(cur.low)))
+            union=max(n(prev.high),n(cur.high))-min(n(prev.low),n(cur.low))
+            overlap_scores.append(inter/max(union,1e-12))
+        overlap_mean=sum(overlap_scores)/max(len(overlap_scores),1)
+        touch_band=span*0.20
+        upper_touches=sum(1 for h in highs_base if h>=hi-touch_band)
+        lower_touches=sum(1 for l in lows_base if l<=lo+touch_band)
+        range_quality={"normalized_close_drift":drift_pct_range,"mean_candle_overlap":overlap_mean,
+                       "upper_boundary_touches":upper_touches,"lower_boundary_touches":lower_touches,
+                       "base_candles":len(base),"quality_pass":False}
+        diag["range_quality"]=range_quality
+        quality_reasons=[]
+        if drift_pct_range>0.40: quality_reasons.append("RANGE_DIRECTIONAL_DRIFT_TOO_HIGH")
+        if overlap_mean<0.35: quality_reasons.append("RANGE_CANDLE_OVERLAP_TOO_LOW")
+        if upper_touches<2: quality_reasons.append("INSUFFICIENT_UPPER_BOUNDARY_REACTIONS")
+        if lower_touches<2: quality_reasons.append("INSUFFICIENT_LOWER_BOUNDARY_REACTIONS")
+        range_quality["quality_pass"]=not quality_reasons
+        diag["range_quality_reasons"]=quality_reasons
+        # Envelope bounds remain unchanged; quality checks now gate entry setups.
         if width>0.05 or width<0.0015:
             self.close_active_range(s,symbol)
             diag["status"]="NO_SETUP";diag["rejection_reasons"]=["RANGE_OUTSIDE_0_15_TO_5_PERCENT"];s["diagnostics"][symbol]=diag;self.save();return
         self.record_range(s,symbol,base,hi,lo,ct)
+        if quality_reasons:
+            diag["status"]="NO_SETUP";diag["rejection_reasons"]=quality_reasons
+            s["diagnostics"][symbol]=diag;self.save();return
         lows=recent.low.astype(float); closes=recent.close.astype(float)
         sweep_idx=[i for i in range(len(recent)) if n(recent.iloc[i].low)<lo and n(recent.iloc[i].close)>lo]
         # Allow the sweep/reclaim to occur on any of the last five bars; entry confirmation may follow it.
