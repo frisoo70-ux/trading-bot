@@ -151,12 +151,12 @@ class RangeManipulationPaper:
         tolerance=max(step*1.25,price*0.0015)
         stage=setup.get("stage") if setup else "NO_MANIPULATION"
         # Stages are only advanced by candles occurring strictly after the sweep candle.
-        if setup and key>str(setup.get("sweep_time")):
+        if setup and n(key)>n(setup.get("sweep_time")):
             if stage=="MANIPULATION" and n(last.close)>level:
                 setup["stage"]="ABOVE_POC";setup["above_poc_time"]=key;stage="ABOVE_POC"
             elif stage=="ABOVE_POC" and n(last.low)<=level+tolerance and n(last.high)>=level-tolerance and n(last.close)>=level-tolerance:
                 setup["stage"]="POC_RETEST";setup["retest_time"]=key;stage="POC_RETEST"
-            elif stage=="POC_RETEST" and key>str(setup.get("retest_time")) and n(last.close)>n(last.open) and n(last.close)>level:
+            elif stage=="POC_RETEST" and n(key)>n(setup.get("retest_time")) and n(last.close)>n(last.open) and n(last.close)>level:
                 setup["stage"]="CONFIRMED";setup["confirmation_time"]=key;stage="CONFIRMED"
         diag.update({"volume_level":level,"poc_frozen":bool(setup),"setup_stage":stage,
           "low_sweep_reclaim":bool(setup),"sweep_low":setup.get("sweep_low") if setup else None,
