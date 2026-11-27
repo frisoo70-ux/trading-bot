@@ -40,31 +40,24 @@ class RangeManipPaperTests(unittest.TestCase):
         self.assertIn("status",diag)
         self.tmp.cleanup()
 
-    def test_relaxed_sweep_retest_can_open_long(self):
+    def test_requires_sequential_poc_cross_retest_confirmation(self):
         e=self.make_engine()
         rows=[]
-        # Twenty-bar compact base with prior range liquidity above.
         for i in range(20):
-            rows.append({"time":i,"open":101,"high":104,"low":99,"close":101,"volume":10})
-        # Sweep below range, reclaim and a retest/rejection in subsequent candles.
+            rows.append({"time":i*300000,"open":101,"high":104,"low":99,"close":101,"volume":10})
         rows.extend([
-            {"time":20,"open":100,"high":101,"low":98.6,"close":100,"volume":12},
-            {"time":21,"open":100,"high":102,"low":99.2,"close":101,"volume":12},
-            {"time":22,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
-            {"time":23,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
-            {"time":24,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
-            {"time":25,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":6000000,"open":101,"high":102,"low":98.6,"close":100,"volume":12},
+            {"time":6300000,"open":100,"high":102,"low":99.2,"close":101,"volume":12},
+            {"time":6600000,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":6900000,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":7200000,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
+            {"time":7500000,"open":100,"high":102,"low":99.5,"close":101,"volume":12},
         ])
-        df=pd.DataFrame(rows)
-        e.process_symbol("SOL",df,100,25,execution)
-        self.assertEqual(len(e.load()["positions"]),1)
-        self.assertEqual(e.load()["positions"][0]["side"],"LONG")
-        audit=e.load()["positions"][0].get("entry_audit")
-        self.assertIsNotNone(audit)
-        self.assertTrue(audit["decision"]["setup"])
-        self.assertEqual(audit["volume_profile"]["bins"],24)
-        self.assertEqual(len(audit["range_window_candles"]),20)
-        self.assertEqual(len(audit["confirmation_window_candles"]),5)
+        e.process_symbol("SOL",pd.DataFrame(rows),101,7500000,execution)
+        self.assertEqual(len(e.load()["positions"]),0,"must not buy without sequential POC cross, retest and later confirmation")
+        diag=e.load()["diagnostics"].get("SOL")
+        self.assertIsNotNone(diag)
+        self.assertNotEqual(diag.get("setup_stage"),"CONFIRMED")
         self.tmp.cleanup()
 
     def test_range_history_coalesces_overlapping_windows_and_starts_new_on_break(self):
