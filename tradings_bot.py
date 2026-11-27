@@ -3037,7 +3037,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # POC du range actuellement évalué: l'afficher dès sa détection,
             # indépendamment de l'existence d'une position/trade.
             diag_poc = diagnostics.get("volume_level")
-            diag_time = chart_time_ms(diagnostics.get("last_candle"))
+            diag_time = None
+            diag_window = diagnostics.get("range_window_candles") or []
+            # Positionner le POC au bord droit de la zone de range détectée,
+            # à l'heure de fin de la dernière bougie (et non au milieu de la bougie).
+            if diag_window:
+                diag_time = chart_time_ms(diag_window[-1].get("time"))
+                if diag_time is not None:
+                    diag_time += interval_ms
             if diag_poc is not None and diag_time is not None and diagnostics.get("status") not in ("NO_SETUP",):
                 try:
                     pocs.append({"time": diag_time // 1000, "price": float(diag_poc), "kind": "DETECTED_RANGE"})
