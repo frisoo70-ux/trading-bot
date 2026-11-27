@@ -2789,7 +2789,15 @@ function rangeDrawOverlay(){
  (rangeOverlayState.entries||[]).forEach(p=>{
   const x=xAt(p.time),y=yAt(p.price);
   if(x==null||y==null)return;
-  els.push('<circle cx="'+x+'" cy="'+y+'" r="5" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.5"><title>Achat '+String(p.price)+'</title></circle>');
+  els.push('<circle cx="'+x+'" cy="'+y+'" r="5" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.5"><title>Entrée PAPER '+String(p.price)+'</title></circle>');
+ });
+ (rangeOverlayState.pocs||[]).forEach(p=>{
+  const x=xAt(p.time),y=yAt(p.price);if(x==null||y==null)return;
+  els.push('<circle cx="'+x+'" cy="'+y+'" r="4" fill="#f59e0b" stroke="#fef3c7" stroke-width="1.5"><title>POC '+String(p.price)+'</title></circle>');
+ });
+ (rangeOverlayState.exits||[]).forEach(p=>{
+  const x=xAt(p.time),y=yAt(p.price);if(x==null||y==null)return;
+  els.push('<circle cx="'+x+'" cy="'+y+'" r="5" fill="#f472b6" stroke="#fce7f3" stroke-width="1.5"><title>Sortie '+String(p.reason||'')+' '+String(p.price)+'</title></circle>');
  });
  rangeOverlaySvg.innerHTML=els.join('');
 }
@@ -2810,7 +2818,7 @@ function rangeApplyPayload(d,mode){
  rangeChartCandles=mode==='older'?rangeMergeCandles(d.candles,rangeChartCandles):rangeMergeCandles(rangeChartCandles,d.candles);
  rangeOldestTime=rangeChartCandles.length?Math.floor(Number(rangeChartCandles[0].time)/1000):null;
  if(mode==='older'&&(!d.candles||d.candles.length<450))rangeHasMore=false;
- rangeOverlayState={ranges:d.ranges||[],entries:d.entries||[]};
+ rangeOverlayState={ranges:d.ranges||[],entries:d.entries||[],pocs:d.pocs||[],exits:d.exits||[]};
  rangeCandleSeries.setData(rangeChartCandles.map(b=>({time:Math.floor(Number(b.time)/1000),open:Number(b.open),high:Number(b.high),low:Number(b.low),close:Number(b.close)})));
  if(mode==='older'&&oldRange&&rangeChartCandles.length>oldCount){
   const added=rangeChartCandles.length-oldCount;
