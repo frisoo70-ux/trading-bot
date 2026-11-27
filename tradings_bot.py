@@ -3001,6 +3001,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             positions = [dict(p) for p in (state.get("positions") or []) if p.get("symbol") == symbol]
             ranges = []
             entries = []
+            pocs = []
+            exits = []
             seen_ranges = set()
 
             def chart_time_ms(value):
@@ -3039,36 +3041,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     entry_price = None
                 if entry_time is not None and entry_price is not None:
                     entries.append({"time": entry_time // 1000, "price": entry_price})
-
-            # Toutes les plages détectées sont conservées dans le moteur, même sans trade.
-            for item in (state.get("range_history") or []):
-                if item.get("symbol") != symbol:
-                    continue
-                start_ms = chart_time_ms(item.get("start"))
-                end_ms = chart_time_ms(item.get("end"))
+                    vp = (audit.get("volume_profile") or {}).get("level")
+                    try:
+                        vp = float(vp)
+                        pocs.append({"time": entry_time // 1000, "price": vp})
+                    except (TypeError, ValueError):
+                        pass
+                exit_time = chart_time_ms(record.get("exit_candle_time"))
                 try:
-                    high, low = float(item.get("high")), float(item.get("low"))
+                    exit_price = float(record.get("exit_price"))
                 except (TypeError, ValueError):
-                    continue
-                if start_ms is None or end_ms is None:
-                    continue
-                key = (start_ms, end_ms, high, low)
-                if key not in seen_ranges:
-                    seen_ranges.add(key)
-                    ranges.append({
-                        "start": start_ms // 1000, "end": end_ms // 1000,
-                        "high": high, "low": low,
-                    })
+                    exit_price = None
+                if exit_time is not None and exit_price is not None:
+                    exits.append({"time": exit_time // 1000, "price": exit_price, "reason": record.get("exit_reason")})
 
             for trade in trades:
                 add_range_and_entry(trade)
             for position in positions:
                 add_range_and_entry(position)
-
-            # Le dernier range candidat est également visible, même s'il n'a pas encore déclenché d'achat.
-            candidate = diagnostics.get("entry_audit_candidate") or {}
-            candidate_record = {"entry_audit": candidate}
-            add_range_and_entry(candidate_record)
 
             ranges.sort(key=lambda item: item["start"])
             entries.sort(key=lambda item: item["time"])
@@ -3080,6 +3070,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "candles": candles,
                 "ranges": ranges,
                 "entries": entries,
+                "pocs": pocs,
+                "exits": exits,
                 "has_more": len(candles) >= 450,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "message": "Historique 5m indisponible." if not candles else "",
