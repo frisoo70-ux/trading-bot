@@ -4582,6 +4582,27 @@ def get_candles(symbol):
         return pd.DataFrame(), None, None
 
 
+def get_candles_for_interval(symbol, interval):
+    """Fetch closed candles for fixed timeframe, used by the Range PAPER engine."""
+    interval_seconds = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+    cache_ttl = {"1m": 15, "5m": 30, "15m": 60, "30m": 120, "1h": 300, "4h": 600, "1d": 1800}
+    if interval not in interval_seconds:
+        raise ValueError(f"Unsupported timeframe: {interval}")
+    try:
+        now = time.time()
+        payload = {"type":"candleSnapshot","req":{"coin":symbol,"interval":interval,"startTime":int((now-220*interval_seconds[interval])*1000),"endTime":int(now*1000)}}
+        data = info_post(payload,cache_key=f"range_candles:{symbol}:{interval}",cache_ttl=cache_ttl[interval],max_retries=2)
+        if not isinstance(data,list) or len(data)<60:return None,None,None
+        rows=[{"time":int(x["t"]),"open":float(x["o"]),"high":float(x["h"]),"low":float(x["l"]),"close":float(x["c"]),"volume":float(x["v"])} for x in data]
+        frame=pd.DataFrame(rows).drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        if len(frame)<60:return None,None,None
+        confirmed=frame.iloc[:-1].copy()
+        return confirmed,int(confirmed.iloc[-1]["time"]),float(frame.iloc[-1]["close"])
+    except Exception as exc:
+        print(f"[RANGE PAPER] Candles {interval} {symbol}:",str(exc)[:160])
+        return None,None,None
+
+
 def add_indicators(df):
     df = df.copy()
     df["ema20"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
