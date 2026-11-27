@@ -146,8 +146,6 @@ GITHUB_SYNC_STATE = {
 
 
 DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
-# Secret distinct du dashboard : accès strictement en lecture aux diagnostics Elder PAPER.
-PAPER_ELDER_LOG_TOKEN = os.environ.get("PAPER_ELDER_LOG_TOKEN", "").strip()
 DASHBOARD_PORT = int(os.environ.get("SERVER_PORT", os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", "8000"))))
 
 TIMEFRAME_OPTIONS = ["1m", "3m", "5m", "15m"]
