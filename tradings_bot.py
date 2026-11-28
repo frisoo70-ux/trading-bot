@@ -2780,10 +2780,12 @@ function rangeDrawOverlay(){
  const ts=rangeChartInstance.timeScale(),els=[];
  const xAt=t=>ts.timeToCoordinate(Number(t));
  const yAt=p=>rangeCandleSeries.priceToCoordinate(Number(p));
+ const rangeRects=[];
  (rangeOverlayState.ranges||[]).forEach(a=>{
   const x1=xAt(a.start),x2=xAt(a.end),y1=yAt(a.high),y2=yAt(a.low);
   if(x1==null||x2==null||y1==null||y2==null)return;
   const x=Math.min(x1,x2),y=Math.min(y1,y2),rw=Math.max(1,Math.abs(x2-x1)),rh=Math.max(1,Math.abs(y2-y1));
+  rangeRects.push({range:a,right:x2,top:y,bottom:y+rh});
   els.push('<rect x="'+x+'" y="'+y+'" width="'+rw+'" height="'+rh+'" rx="2" fill="rgba(34,197,94,.055)" stroke="#22c55e" stroke-width="1.5"/>');
  });
  (rangeOverlayState.entries||[]).forEach(p=>{
@@ -2792,8 +2794,14 @@ function rangeDrawOverlay(){
   els.push('<circle cx="'+x+'" cy="'+y+'" r="5" fill="#38bdf8" stroke="#e0f2fe" stroke-width="1.5"><title>Entrée PAPER '+String(p.price)+'</title></circle>');
  });
  (rangeOverlayState.pocs||[]).forEach(p=>{
-  const x=xAt(p.time),y=yAt(p.price);if(x==null||y==null)return;
-  els.push('<circle cx="'+x+'" cy="'+y+'" r="4" fill="#f59e0b" stroke="#fef3c7" stroke-width="1.5"><title>POC '+String(p.price)+'</title></circle>');
+  const y=yAt(p.price);if(y==null)return;
+  let x=xAt(p.time);
+  if(p.kind==='DETECTED_RANGE'){
+   const matching=rangeRects.filter(r=>Number(p.price)<=Number(r.range.high)&&Number(p.price)>=Number(r.range.low));
+   if(matching.length)x=matching[matching.length-1].right;
+  }
+  if(x==null)return;
+  els.push('<circle cx="'+x+'" cy="'+y+'" r="5" fill="#f59e0b" stroke="#fef3c7" stroke-width="1.5"><title>POC '+String(p.price)+'</title></circle>');
  });
  (rangeOverlayState.exits||[]).forEach(p=>{
   const x=xAt(p.time),y=yAt(p.price);if(x==null||y==null)return;
